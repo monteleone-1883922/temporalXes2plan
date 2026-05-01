@@ -1,11 +1,21 @@
 import os
+
 import numpy as np
 from collections import defaultdict
 import pm4py
 import random
 from typing import List, Dict, Optional, Any, Tuple, Set, Union, Callable
+
+from pandas import DataFrame
+from pm4py import PetriNet, Marking
+from pm4py.objects.log.obj import EventLog
+from pm4py.objects.powl.obj import Transition
+
+
+
 from decision_mining import discover_all_decision_rules, get_attribute_domains
 import utils
+import copy
 
 SEED = 42
 random.seed(SEED)
@@ -51,21 +61,21 @@ class Parser:
     use_activity_classifier: bool
     log: Any
     full_log: Any
-    train_df: Any
-    test_df: Any
-    petrinet: Any
-    initial_marking: Any
-    final_marking: Any
-    transitions: Set[Any]
-    places: Set[Any]
-    edges: Set[Any]
+    train_df: tuple[EventLog, EventLog] | tuple[DataFrame, DataFrame]
+    test_df: tuple[EventLog, EventLog] | tuple[DataFrame, DataFrame]
+    petrinet: PetriNet
+    initial_marking: Marking
+    final_marking: Marking
+    transitions: Set[Transition]
+    places: Set[PetriNet.Place]
+    edges: Set[PetriNet.Arc]
     activities: Set[str]
-    silent_transitions: List[Tuple[Any, str]]
+    silent_transitions: Dict[Transition, str]
     start_activities: Dict[str, int]
     end_activities: Dict[str, int]
     attributes: Set[str]
     attribute_categories: Dict[str, str]
-    predecessors: Dict[str, List[str]]
+    predecessors: Dict[str, List[str]] #activities and the list of preceding activities (activities executed right before)
     decision_points_probabilities: Dict[str, Dict[str, float]]
     parallels: Dict[str, List[str]]
     direct_transition_graph: Dict[str, List[str]]
@@ -115,8 +125,8 @@ class Parser:
         self.log = self._load_and_filter_log(coverage_percentage)
         self._split_train_test()
         self._discover_petri_net()
-        self._extract_basic_properties()
-        self._initialize_attributes()
+        self._extract_basic_properties() # Extract activities, start/end activities, and identify silent transitions
+        self._initialize_attributes() # Extract attributes datatypes (numeric, boolean, categorical)
         self._compute_structure_and_probabilities()
 
     def _split_train_test(self) -> None:
@@ -129,9 +139,9 @@ class Parser:
         discovery_function = self.DISCOVERY_ALGORITHMS[self.discovery_algorithm]
         try:
             self.petrinet, self.initial_marking, self.final_marking = discovery_function(self.log)
-            self.transitions = self.petrinet.transitions
-            self.places = self.petrinet.places
-            self.edges = self.petrinet.arcs
+            self.transitions = set(self.petrinet.transitions)
+            self.places = set(self.petrinet.places)
+            self.edges = set(self.petrinet.arcs)
             #pm4py.vis.view_petri_net(self.petrinet, self.initial_marking, self.final_marking)
             print(f"Successfully discovered Petri net using {self.discovery_algorithm} algorithm")
         except Exception as e:
@@ -140,14 +150,14 @@ class Parser:
 
     def _extract_basic_properties(self) -> None:
         """Extract basic properties like activities, start/end activities, and tau transitions."""
-        self.silent_transitions = []
+        self.silent_transitions = {}
         activities_set = set()
         tau_counter = 1
         
         for transition in self.transitions:
             if transition.label is None: # Create a tau action for a silent transition
                 tau_name = f"tau_{tau_counter}"
-                self.silent_transitions.append((transition, tau_name))
+                self.silent_transitions[transition] = tau_name
                 activities_set.add(tau_name)
                 tau_counter += 1
             else: # Regular labeled transition
@@ -196,16 +206,17 @@ class Parser:
             The loaded and filtered event log object.
         """
         log = pm4py.objects.log.importer.xes.importer.apply(self.log_path)
-        
+        self.full_lifecycle_log = copy.deepcopy(log)
+
         if self.use_activity_classifier:
             # When using Activity classifier, combine concept:name + lifecycle:transition
             # This is needed for logs where events are not uniquely identified by concept:name
             # alone (e.g., BPIC 2013)
             for trace in log:
                 for event in trace:
-                    concept_name = event.get('concept:name', '')
                     lifecycle = event.get('lifecycle:transition', '')
                     if lifecycle:
+                        concept_name = event.get('concept:name', '')
                         # Combine as "ActivityName (Lifecycle)" - e.g., "Accepted (In Progress)"
                         event['concept:name'] = f"{concept_name} ({lifecycle})"
             print("Using Activity classifier: combining concept:name + lifecycle:transition")
@@ -217,7 +228,7 @@ class Parser:
                     log = pm4py.filter_event_attribute_values(log, 'lifecycle:transition', 'complete')
             except:
                 pass
-        
+
         self.full_log = log  # Store full log for frequency computation
         
         try:
@@ -244,17 +255,13 @@ class Parser:
         # Include trace (case) attributes
         for attr in pm4py.get_trace_attributes(self.full_log):
             sanitized_name = utils.sanitize_name(f"case:{attr}")
-            values = []
-            for trace in self.full_log:
-                if attr in trace.attributes:
-                    values.append(trace.attributes[attr])
+            values = [trace.attributes[attr] for trace in self.full_log if attr in trace.attributes]
             if values:
-                if all(isinstance(val, bool) for val in values):
-                    attr_categories[sanitized_name] = 'boolean'
-                elif all(isinstance(val, (int, float)) and not isinstance(val, bool) for val in values):
-                    attr_categories[sanitized_name] = 'numerical'
-                else:
-                    attr_categories[sanitized_name] = 'categorical'
+                attr_categories[sanitized_name] = 'boolean' \
+                    if all(isinstance(val, bool) for val in values) \
+                    else 'numerical' \
+                    if all(isinstance(val, (int, float)) and not isinstance(val, bool) for val in values) \
+                    else 'categorical'
         
         # Include event attributes
         for attr in pm4py.get_event_attributes(self.full_log):
@@ -262,17 +269,16 @@ class Parser:
                 continue 
             sanitized_name = utils.sanitize_name(attr)
             values = pm4py.get_event_attribute_values(self.full_log, attr).keys()
-            if all(isinstance(val, bool) for val in values):
-                attr_categories[sanitized_name] = 'boolean'
-            elif all(isinstance(val, (int, float)) and not isinstance(val, bool) for val in values):
-                attr_categories[sanitized_name] = 'numerical'
-            else:
-                attr_categories[sanitized_name] = 'categorical'
+            attr_categories[sanitized_name] = 'boolean' \
+                if all(isinstance(val, bool) for val in values) \
+                else 'numerical' \
+                if all(isinstance(val, (int, float)) and not isinstance(val, bool) for val in values) \
+                else 'categorical'
         
         return attr_categories
     
     
-    def _get_place_outgoing_transitions(self) -> Dict[Any, List[Any]]:
+    def _get_place_outgoing_transitions(self) -> Dict[PetriNet.Place, List[Transition]]:
         """Get mapping of places to their outgoing transitions."""
         place_outgoing_transitions = defaultdict(list)
         for arc in self.edges:
@@ -293,7 +299,10 @@ class Parser:
         return transition_outgoing_places
 
     def _compute_activity_frequencies(self) -> Dict[str, Dict[str, int]]:
-        """Compute frequency of direct transitions between activities."""
+        """Compute frequency of direct transitions between activities.
+        For each pair of activities you can see the frequency they happen together
+        moreover you can count how many times an activity appears before another and viceversa
+        """
         df_counts = defaultdict(lambda: defaultdict(int))
         for trace in self.full_log:
             for i in range(len(trace) - 1):
@@ -304,7 +313,7 @@ class Parser:
 
     def _compute_decision_probabilities(
         self, 
-        decision_points: Dict[Any, List[Any]], 
+        decision_points: Dict[PetriNet.Place, List[Transition]],
         df_counts: Dict[str, Dict[str, int]]
     ) -> Dict[str, Dict[str, float]]:
         """
@@ -317,20 +326,30 @@ class Parser:
         Returns:
             Mapping of place names to branch probabilities.
         """
+        # For each place contains a dict[next executable activity, probability to be executed]
         decision_probabilities = {}
         for place, outgoing_transitions in decision_points.items():
+            #  activities executable from a certain place
             all_transitions = [(t, self._get_activity_name_for_transition(t)) for t in outgoing_transitions]
+            # dict[next executable activity, probability to be executed]
             place_probs = {}
             incoming_activities = set()
             for out_transition, out_label in all_transitions:
                 sanitized_out = utils.sanitize_name(out_label)
+                # iterate activities preceding the executable activities for this place
                 for pred in self.predecessors.get(sanitized_out, []):
                     self._add_non_tau_predecessors(pred, incoming_activities)
+            # predecessor activities (in the PetriNet without tau activities)
+            # set of all predecessors forall next executable actions
             incoming_activities = list(incoming_activities)
-            
+
+            # count for each next activity how many times it happens after the incoming activities (in the log)
             transition_counts = defaultdict(int)
+            # sum of all transition_counts
             total_count = 0
+            # for preceding activity
             for in_activity in incoming_activities:
+                # for next activities
                 for out_transition, out_label in all_transitions:
                     sanitized_out = utils.sanitize_name(out_label)
                     count = df_counts[in_activity].get(sanitized_out, 0)
@@ -380,10 +399,11 @@ class Parser:
         """Compute decision point probabilities for the whole Petri net."""
         place_outgoing_transitions = self._get_place_outgoing_transitions()
         
-        decision_points = {}
-        for place, transitions in place_outgoing_transitions.items():
-            if len(transitions) > 1:
-                decision_points[place] = transitions
+        decision_points = {
+            place : transitions
+            for place, transitions in place_outgoing_transitions.items()
+            if len(transitions) > 1
+        }
 
         df_counts = self._compute_activity_frequencies()
         decision_probabilities = self._compute_decision_probabilities(decision_points, df_counts)
@@ -458,10 +478,11 @@ class Parser:
     def extract_predecessors(self) -> Dict[str, List[str]]:
         """Extract a mapping of activities to their direct predecessors in the Petri net."""
         place_to_inputs = self._build_place_input_mapping()
-        predecessors = self._build_predecessor_mapping(place_to_inputs)
-        return {k: list(set(v)) for k, v in predecessors.items()}
+        # predecessor activities
+        return self._build_predecessor_mapping(place_to_inputs)
 
-    def _build_place_input_mapping(self) -> Dict[Any, List[Any]]:
+
+    def _build_place_input_mapping(self) -> Dict[PetriNet.Place, List[Transition]]:
         """Build mapping from places to their input transitions."""
         place_to_inputs = defaultdict(list)
         for arc in self.edges:
@@ -470,30 +491,35 @@ class Parser:
                 place_to_inputs[arc.target].append(arc.source)
         return place_to_inputs
 
-    def _get_activity_name_for_transition(self, transition: Any) -> str:
+    def _build_predecessor_mapping(self, place_to_inputs: Dict[PetriNet.Place, List[Transition]],
+                                   remove_duplicates: bool = True) -> Dict[str, List[str]]:
+        """Build predecessor mapping from place-input mapping.
+        Builds a dict[
+            activity ,
+            list of preceding activities (only activities executed right before the key activity)
+        ]"""
+        predecessors: Dict[str, set[str] | list[str]] = defaultdict(set if remove_duplicates else list)
+        for arc in self.edges:
+            if (isinstance(arc.source, pm4py.objects.petri_net.obj.PetriNet.Place) and
+                    isinstance(arc.target, pm4py.objects.petri_net.obj.PetriNet.Transition)):
+
+                target_activity = self._get_activity_name_for_transition(arc.target)
+                for input_transition in place_to_inputs[arc.source]:
+                    input_activity = self._get_activity_name_for_transition(input_transition)
+                    if remove_duplicates:
+                        predecessors[target_activity].add(input_activity)
+                    else:
+                        predecessors[target_activity].append(input_activity)
+        return {act: list(prec_act) for act, prec_act in predecessors.items()} if remove_duplicates else predecessors
+
+    def _get_activity_name_for_transition(self, transition: Transition) -> str:
         """Get the activity name for a transition, handling silent transitions."""
         if transition.label is not None:
             return utils.sanitize_name(transition.label)
         else:
-            # Find the tau name for this silent transition
-            for silent_transition, tau_name in self.silent_transitions:
-                if silent_transition == transition:
-                    return tau_name
+            # Find the tau name for this silent
             # If not found, create a new tau name (shouldn't happen if _extract_basic_properties ran)
-            return f"tau_unknown_{id(transition)}"
-
-    def _build_predecessor_mapping(self, place_to_inputs: Dict[Any, List[Any]]) -> Dict[str, List[str]]:
-        """Build predecessor mapping from place-input mapping."""
-        predecessors = defaultdict(list)
-        for arc in self.edges:
-            if (isinstance(arc.source, pm4py.objects.petri_net.obj.PetriNet.Place) and \
-                isinstance(arc.target, pm4py.objects.petri_net.obj.PetriNet.Transition)):
-                
-                target_activity = self._get_activity_name_for_transition(arc.target)
-                for input_transition in place_to_inputs[arc.source]:
-                    input_activity = self._get_activity_name_for_transition(input_transition)
-                    predecessors[target_activity].append(input_activity)
-        return predecessors
+            return self.silent_transitions.get(transition, f"tau_unknown_{id(transition)}")
 
 
     def discover_attribute_activity_relationships(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
