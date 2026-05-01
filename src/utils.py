@@ -6,12 +6,22 @@ import subprocess
 from argparse import ArgumentParser
 from collections import defaultdict
 from datetime import datetime
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import pandas as pd
 import pm4py
 import re
 
 
-def create_base_argument_parser(description="Run evaluation framework"):
+def create_base_argument_parser(description: str = "Run evaluation framework") -> ArgumentParser:
+    """
+    Create a base ArgumentParser with common arguments for the evaluation framework.
+
+    Args:
+        description: A brief description of the parser's purpose.
+
+    Returns:
+        The initialized ArgumentParser instance.
+    """
     parser = ArgumentParser(description=description)
     parser.add_argument('--log_coverage', type=float, default=0.001, 
                         help='Minimum cumulative coverage percentage for variant filtering (pm4py).')
@@ -44,7 +54,7 @@ def create_base_argument_parser(description="Run evaluation framework"):
     return parser
 
 
-def extract_base_activity_name(action_name):
+def extract_base_activity_name(action_name: str) -> str:
     """
     Extract the base activity name from measurement variants.
     
@@ -88,7 +98,7 @@ def extract_base_activity_name(action_name):
     return action_name
 
 
-def filter_tau_activities_from_plan(plan_content):
+def filter_tau_activities_from_plan(plan_content: str) -> Tuple[str, List[str]]:
     """
     Filter tau (silent transition) activities from a plan content string.
     
@@ -121,7 +131,7 @@ def filter_tau_activities_from_plan(plan_content):
     return '\n'.join(filtered_plan_lines), filtered_actions
 
 
-def parse_plan_actions(plan_content):
+def parse_plan_actions(plan_content: str) -> List[str]:
     """
     Parse action names from a plan content string, filtering out tau activities.
     
@@ -135,7 +145,18 @@ def parse_plan_actions(plan_content):
     return filtered_actions
 
 
-def find_attribute_key_in_event(event, attr_name):
+def find_attribute_key_in_event(event: Dict[str, Any], attr_name: str) -> Optional[str]:
+    """
+    Find the actual key used in an event dictionary for a given attribute name,
+    considering various case and formatting variations.
+
+    Args:
+        event: The event dictionary to search in.
+        attr_name: The attribute name to look for.
+
+    Returns:
+        The matching key from the event dictionary, or None if not found.
+    """
     variations = [
         attr_name,
         attr_name.capitalize(),
@@ -159,7 +180,18 @@ def find_attribute_key_in_event(event, attr_name):
     return None
 
 
-def extract_attribute_predicates(parser, event, include_target=None):
+def extract_attribute_predicates(parser: Any, event: Dict[str, Any], include_target: Optional[str] = None) -> List[str]:
+    """
+    Extract PDDL attribute predicates from an event based on decision thresholds.
+
+    Args:
+        parser: The XES parser instance containing decision thresholds and intervals.
+        event: The event dictionary containing attribute values.
+        include_target: Optional attribute name to specifically include.
+
+    Returns:
+        A list of PDDL predicate strings (e.g., "(attr value)").
+    """
     predicates = []
     if hasattr(parser, 'decision_thresholds') and parser.decision_thresholds:
         for attr_name in parser.decision_thresholds.keys():
@@ -185,7 +217,7 @@ def extract_attribute_predicates(parser, event, include_target=None):
     return predicates
 
 
-def get_first_attribute_value_in_trace(parser, trace_events, target_attr):
+def get_first_attribute_value_in_trace(parser: Any, trace_events: List[Dict[str, Any]], target_attr: str) -> Optional[float]:
     """
     Get the first available value for a specific attribute in the trace events.
     Searches through all events in the trace to find the first non-null value.
@@ -213,7 +245,7 @@ def get_first_attribute_value_in_trace(parser, trace_events, target_attr):
     return None
 
 
-def extract_initial_attribute_predicates(parser, trace_events, include_target=None):
+def extract_initial_attribute_predicates(parser: Any, trace_events: List[Dict[str, Any]], include_target: Optional[str] = None) -> List[str]:
     """
     Extract initial attribute predicates using the first available value of each attribute in the trace.
     This includes both numerical attributes (discretized via thresholds) and categorical attributes
@@ -276,7 +308,7 @@ def extract_initial_attribute_predicates(parser, trace_events, include_target=No
     return predicates
 
 
-def get_categorical_attribute_value_from_trace(parser, trace_events, sanitized_attr):
+def get_categorical_attribute_value_from_trace(parser: Any, trace_events: List[Dict[str, Any]], sanitized_attr: str) -> Optional[str]:
     """
     Get the value of a categorical attribute from the trace.
     Searches through trace attributes (case-level) and event attributes.
@@ -328,7 +360,7 @@ def get_categorical_attribute_value_from_trace(parser, trace_events, sanitized_a
     return None
 
 
-def compute_enabled_activities_after_prefix(parser, prefix):
+def compute_enabled_activities_after_prefix(parser: Any, prefix: List[str]) -> Set[str]:
     """
     Compute which activities should be enabled after executing a prefix.
     
@@ -433,7 +465,7 @@ def compute_enabled_activities_after_prefix(parser, prefix):
     return enabled
 
 
-def compute_enabled_activities_after_last_activity(parser, last_activity):
+def compute_enabled_activities_after_last_activity(parser: Any, last_activity: str) -> Set[str]:
     """
     Compute the set of activities enabled immediately after the execution of a
     single activity (last_activity) — i.e., the successors of the last activity.
@@ -533,7 +565,7 @@ def compute_enabled_activities_after_last_activity(parser, last_activity):
     return enabled
 
 
-def compute_reachable_activities_from_last_activity(parser, last_activity, max_depth=10):
+def compute_reachable_activities_from_last_activity(parser: Any, last_activity: str, max_depth: int = 10) -> Set[str]:
     """
     Compute activities reachable from the last activity following direct transitions
     (graph-based) up to max_depth hops. If a Petri net is available, fallback to
@@ -562,7 +594,17 @@ def compute_reachable_activities_from_last_activity(parser, last_activity, max_d
     return reachable
 
 
-def _compute_enabled_from_graph(parser, prefix):
+def _compute_enabled_from_graph(parser: Any, prefix: List[str]) -> Set[str]:
+    """
+    Fallback method using direct transition graph when Petri net not available.
+
+    Args:
+        parser: The XES parser instance.
+        prefix: List of completed activities.
+
+    Returns:
+        Set of enabled activities.
+    """
     """Fallback method using direct transition graph when Petri net not available."""
     enabled = set()
     completed = set(prefix)
@@ -583,7 +625,26 @@ def _compute_enabled_from_graph(parser, prefix):
     return enabled
 
 
-def compute_initial_state(parser, prefix, trace_events=None, prefix_length=0, include_target_attr=None):
+def compute_initial_state(
+    parser: Any, 
+    prefix: List[str], 
+    trace_events: Optional[List[Dict[str, Any]]] = None, 
+    prefix_length: int = 0, 
+    include_target_attr: Optional[str] = None
+) -> List[str]:
+    """
+    Compute the initial state predicates for planning after a given prefix.
+
+    Args:
+        parser: The XES parser instance.
+        prefix: List of activities already completed.
+        trace_events: Optional full list of event dictionaries for the trace.
+        prefix_length: Length of the prefix (unused).
+        include_target_attr: Optional target attribute to focus on.
+
+    Returns:
+        List of PDDL initial state predicates.
+    """
     if not prefix:
         init_predicates = []
         if hasattr(parser, 'start_activities') and parser.start_activities:
@@ -610,7 +671,13 @@ def compute_initial_state(parser, prefix, trace_events=None, prefix_length=0, in
     return init_predicates
 
 
-def compute_initial_state_from_last_activity(parser, prefix, trace_events=None, prefix_length=0, include_target_attr=None):
+def compute_initial_state_from_last_activity(
+    parser: Any, 
+    prefix: List[str], 
+    trace_events: Optional[List[Dict[str, Any]]] = None, 
+    prefix_length: int = 0, 
+    include_target_attr: Optional[str] = None
+) -> List[str]:
     """
     Create an initial state that contains completed predicates for the given prefix
     and enables only those activities that are immediate successors of the last
@@ -641,7 +708,26 @@ def compute_initial_state_from_last_activity(parser, prefix, trace_events=None, 
     return init_predicates
 
 
-def compute_goal_condition(parser, target_activity, trace_events=None, trace_length=0, target_attr=None):
+def compute_goal_condition(
+    parser: Any, 
+    target_activity: str, 
+    trace_events: Optional[List[Dict[str, Any]]] = None, 
+    trace_length: int = 0, 
+    target_attr: Optional[str] = None
+) -> List[str]:
+    """
+    Compute the goal condition predicates for planning.
+
+    Args:
+        parser: The XES parser instance.
+        target_activity: The name of the target activity to reach.
+        trace_events: Optional full list of event dictionaries for the trace.
+        trace_length: The point in the trace representing the goal.
+        target_attr: Optional target attribute for measurement-based goals.
+
+    Returns:
+        List of PDDL goal condition predicates.
+    """
     goal_predicates = [f"(completed {target_activity})"]
     is_measurement_activity = False
     matching_attribute = target_attr
@@ -682,7 +768,17 @@ def compute_goal_condition(parser, target_activity, trace_events=None, trace_len
     return goal_predicates
 
 
-def parse_fast_downward_output(stdout, stderr):
+def parse_fast_downward_output(stdout: str, stderr: str) -> Dict[str, Optional[float]]:
+    """
+    Parse Fast Downward stdout and stderr to extract planning metrics.
+
+    Args:
+        stdout: Standard output from the planner.
+        stderr: Standard error from the planner.
+
+    Returns:
+        A dictionary containing extracted metrics like 'expanded_nodes', 'search_time', etc.
+    """
     metrics = {'expanded_nodes': None,
                'space_used': None,
                'solution_length': None,
@@ -802,7 +898,7 @@ SOLVABILITY_UNSOLVABLE_STRUCTURAL = "unsolvable_structural"
 SOLVABILITY_UNSOLVABLE_RESOURCE = "unsolvable_resource"
 
 
-def classify_planner_result(return_code, plan_exists, stdout="", stderr=""):
+def classify_planner_result(return_code: int, plan_exists: bool, stdout: str = "", stderr: str = "") -> str:
     """
     Classify the planner result into solvability categories based on Fast Downward exit codes.
     
@@ -861,7 +957,7 @@ def classify_planner_result(return_code, plan_exists, stdout="", stderr=""):
     return SOLVABILITY_UNSOLVABLE_RESOURCE
 
 
-def run_planner(plan_path, search_algorithm="astar_lmcut", timeout=30):
+def run_planner(plan_path: str, search_algorithm: str = "astar_lmcut", timeout: int = 30) -> Tuple[bool, str, Dict[str, Any], str]:
     """
     Run the planner and return results with solvability classification.
     
@@ -908,7 +1004,16 @@ def run_planner(plan_path, search_algorithm="astar_lmcut", timeout=30):
         return False, f"Planning error: {str(e)}", empty_metrics, SOLVABILITY_UNSOLVABLE_RESOURCE
 
 
-def parse_plan_file(plan_path):
+def parse_plan_file(plan_path: str) -> List[str]:
+    """
+    Parse a PDDL plan file and extract the sequence of action names.
+
+    Args:
+        plan_path: Path to the .plan file.
+
+    Returns:
+        List of sanitized action names (base activity names), excluding tau transitions.
+    """
     if not os.path.exists(plan_path):
         return []
     
@@ -952,7 +1057,16 @@ def parse_plan_file(plan_path):
     return actions
 
 
-def extract_numerical_attributes(parser):
+def extract_numerical_attributes(parser: Any) -> List[str]:
+    """
+    Extract a list of numerical attribute names from the parser.
+
+    Args:
+        parser: The XES parser instance.
+
+    Returns:
+        List of numerical attribute names.
+    """
     numerical_attrs = []
     if hasattr(parser, 'attribute_categories'):
         for attr, category in parser.attribute_categories.items():
@@ -961,7 +1075,18 @@ def extract_numerical_attributes(parser):
     return numerical_attrs
 
 
-def get_goal_attribute_value(parser, event, target_attr):
+def get_goal_attribute_value(parser: Any, event: Dict[str, Any], target_attr: str) -> Optional[float]:
+    """
+    Extract the numeric value of a target attribute from an event.
+
+    Args:
+        parser: The XES parser instance.
+        event: The event dictionary.
+        target_attr: The name of the target attribute.
+
+    Returns:
+        The numeric value as a float, or None if not found or invalid.
+    """
     trace_attr_key = find_attribute_key_in_event(event, target_attr)
     
     if trace_attr_key and trace_attr_key in event:
@@ -975,20 +1100,57 @@ def get_goal_attribute_value(parser, event, target_attr):
     return None
 
 
-def create_evaluation_directories(script_dir):
+def create_evaluation_directories(script_dir: str) -> str:
+    """
+    Create the necessary directories for storing evaluation results.
+
+    Args:
+        script_dir: The directory containing the current script.
+
+    Returns:
+        The path to the created evaluation directory.
+    """
     evaluation_dir = os.path.join(script_dir, '..', 'evaluation')
     os.makedirs(evaluation_dir, exist_ok=True)
     return evaluation_dir
 
 
-def generate_evaluation_filename(pddl_name, log_coverage, search_algorithm, eval_type, timestamp=None):
+def generate_evaluation_filename(
+    pddl_name: str, 
+    log_coverage: float, 
+    search_algorithm: str, 
+    eval_type: str, 
+    timestamp: Optional[str] = None
+) -> str:
+    """
+    Generate a standardized filename for evaluation result CSVs.
+
+    Args:
+        pddl_name: Name of the PDDL domain.
+        log_coverage: Coverage percentage used for filtering.
+        search_algorithm: The planning algorithm used.
+        eval_type: The type of evaluation (e.g., 'suffix', 'planning').
+        timestamp: Optional specific timestamp to use.
+
+    Returns:
+        The generated filename string.
+    """
     if timestamp is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     coverage_str = f"{log_coverage:.6f}".rstrip('0').rstrip('.')
     return f'{eval_type}_eval_{pddl_name}_cov{coverage_str}_{search_algorithm}_{timestamp}.csv'
 
 
-def calculate_all_prefix_lengths(test_traces):
+def calculate_all_prefix_lengths(test_traces: List[List[str]]) -> List[int]:
+    """
+    Calculate all unique prefix lengths present in a set of test traces.
+
+    Args:
+        test_traces: List of traces, where each trace is a list of activity names.
+
+    Returns:
+        A sorted list of unique prefix lengths.
+    """
     all_prefix_lengths = set()
     for trace in test_traces:
         sanitized_trace = [sanitize_name(event) for event in trace]
@@ -999,7 +1161,7 @@ def calculate_all_prefix_lengths(test_traces):
     return sorted(list(all_prefix_lengths))
 
 
-def prepare_test_data(parser, max_traces=None):
+def prepare_test_data(parser: Any, max_traces: Optional[int] = None) -> Tuple[List[List[str]], List[List[Dict[str, Any]]]]:
     """
     Prepare test data from parser for evaluation.
     
@@ -1031,7 +1193,16 @@ def prepare_test_data(parser, max_traces=None):
     return test_traces, test_traces_with_events
 
 
-def read_state_file(file_path):
+def read_state_file(file_path: str) -> List[str]:
+    """
+    Read a state file containing PDDL predicates.
+
+    Args:
+        file_path: Path to the state file.
+
+    Returns:
+        List of non-empty lines from the file.
+    """
     try:
         with open(file_path, 'r') as f:
             return [line.strip() for line in f if line.strip()]
@@ -1040,14 +1211,23 @@ def read_state_file(file_path):
         return []
 
 
-def sanitize_name(name):
+def sanitize_name(name: str) -> str:
+    """
+    Sanitize an activity or attribute name for use in PDDL.
+
+    Args:
+        name: The original name string.
+
+    Returns:
+        A sanitized version of the name (lowercase, no special characters).
+    """
     # Strip "case:" prefix for cleaner trace attribute names
     if name.lower().startswith("case:"):
         name = name[5:]  # Remove "case:" prefix
     return name.strip().lower().replace(" ", "_").replace(":", "_").replace("-", "_").replace("(", "").replace(")", "").replace("/", "_").replace("\\", "_")
 
 
-def convert_interval_to_lte_gte(interval_str):
+def convert_interval_to_lte_gte(interval_str: str) -> str:
     """Convert interval notation like (-inf-6.15] to lte-6_15 format."""
     interval = interval_str.strip('()[]')
     if interval.startswith('-inf-'):
@@ -1069,7 +1249,18 @@ def convert_interval_to_lte_gte(interval_str):
     return interval_str
 
 
-def discretize_value(attr, value, intervals=None):
+def discretize_value(attr: str, value: Union[float, str, None], intervals: Optional[Dict[str, List[float]]] = None) -> str:
+    """
+    Discretize a numeric or interval value based on defined thresholds.
+
+    Args:
+        attr: The attribute name.
+        value: The value to discretize.
+        intervals: A dictionary mapping attribute names to lists of thresholds.
+
+    Returns:
+        The discretized value string (e.g., 'lte_10_0', 'gte_5_0_lte_10_0').
+    """
     if isinstance(value, str) and ('-inf' in value or ('-' in value and not value.replace('-', '').replace('.', '').replace('_', '').isalnum())):
         return convert_interval_to_lte_gte(value)
     else:   # Numeric discretization

@@ -2,13 +2,39 @@ import os
 import sys
 import numpy as np
 from collections import defaultdict
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 from xes_parser import Parser
 from decision_mining import discover_all_decision_rules, get_attribute_domains
 import utils
 
 
 class RDDLDataCollector:
-    def __init__(self, log_name, coverage_percentage=1.0, discovery_algorithm='inductive'):
+    """
+    Collector for gathering data needed to generate RDDL (Relational Dynamic Dependency Language) models.
+
+    Attributes:
+        log_name (str): Name of the XES event log file.
+        log_path (str): Full path to the XES log.
+        parser (Parser): XES parser instance for structural analysis.
+        decision_rules (List[Any]): Rules discovered via decision mining.
+        intervals (Dict[str, List[float]]): Discretization intervals for numerical attributes.
+        decision_samples (List[Dict[str, Any]]): Samples used for decision mining.
+        rddl_data (Dict[str, Any]): The compiled RDDL data.
+    """
+
+    log_name: str
+    log_path: str
+    parser: Parser
+    decision_rules: List[Any]
+    intervals: Dict[str, List[float]]
+    decision_samples: List[Dict[str, Any]]
+    rddl_data: Dict[str, Any]
+    def __init__(
+        self, 
+        log_name: str, 
+        coverage_percentage: float = 1.0, 
+        discovery_algorithm: str = 'inductive'
+    ) -> None:
         """
         Initialize the RDDL data collector.
         
@@ -42,7 +68,13 @@ class RDDLDataCollector:
         print("\n[4/4] RDDL data collection complete!")
         print("="*70)
     
-    def _collect_all_data(self):
+    def _collect_all_data(self) -> Dict[str, Any]:
+        """
+        Collect all necessary data for RDDL generation.
+
+        Returns:
+            A dictionary containing structural, probability, and data-related information.
+        """
         """Collect all necessary data for RDDL generation."""
         data = {
             'structure': self._get_structure(),
@@ -53,7 +85,13 @@ class RDDLDataCollector:
         }
         return data
     
-    def _get_structure(self):
+    def _get_structure(self) -> Dict[str, Any]:
+        """
+        Get the control flow structure from the parser.
+
+        Returns:
+            Dictionary with predecessors, parallels, and transition graph.
+        """
         """Get the control flow structure from the parser."""
         return {
             'predecessors': self.parser.predecessors,
@@ -61,7 +99,13 @@ class RDDLDataCollector:
             'direct_transition_graph': self.parser.direct_transition_graph
         }
     
-    def _get_probabilities(self):
+    def _get_probabilities(self) -> Dict[str, Dict[str, float]]:
+        """
+        Get decision point probabilities from the parser.
+
+        Returns:
+            Map of decision points to activity branch probabilities.
+        """
         """Get decision point probabilities from the parser."""
         # Convert decision_points_probabilities to a more readable format
         probabilities = {}
@@ -74,7 +118,7 @@ class RDDLDataCollector:
         
         return probabilities
     
-    def _get_types_and_values(self):
+    def _get_types_and_values(self) -> Dict[str, Dict[str, Any]]:
         """
         Get all data attribute types and their possible values.
         Only includes data attributes used in decision mining (not activities).
@@ -148,7 +192,16 @@ class RDDLDataCollector:
         
         return types_and_values
     
-    def _extract_discretized_numerical_values(self, attr):
+    def _extract_discretized_numerical_values(self, attr: str) -> Set[str]:
+        """
+        Extract and discretize numerical values for an attribute from the log.
+
+        Args:
+            attr: The numerical attribute name.
+
+        Returns:
+            Set of discretized value strings.
+        """
         """
         Extract and discretize numerical values for an attribute from the log.
         """
@@ -206,7 +259,7 @@ class RDDLDataCollector:
         
         return values
     
-    def _get_value_transition_probabilities(self):
+    def _get_value_transition_probabilities(self) -> Dict[str, Dict[str, Any]]:
         """
         Compute the probability distribution of new values for each attribute.
         Only considers attributes used in decision mining.
@@ -304,7 +357,18 @@ class RDDLDataCollector:
         
         return value_transitions
     
-    def _discretize_from_known_values(self, attr, raw_value, known_values):
+    def _discretize_from_known_values(self, attr: str, raw_value: Any, known_values: Set[str]) -> Optional[str]:
+        """
+        Discretize a numerical value based on a set of known discretized value ranges.
+
+        Args:
+            attr: The attribute name.
+            raw_value: The raw numeric value.
+            known_values: Set of known discretized value strings (e.g., 'lte_10_0').
+
+        Returns:
+            The matching discretized value string, or None if no match found.
+        """
         """
         Discretize a numerical value by checking which known discretized value's range it falls into.
         Uses the reverse approach: parse the discretized value name to understand the range,
@@ -335,7 +399,16 @@ class RDDLDataCollector:
         matching_values.sort(key=lambda x: x[1])
         return matching_values[0][0]
     
-    def _get_range_width(self, discretized_name):
+    def _get_range_width(self, discretized_name: str) -> float:
+        """
+        Calculate the width of the range represented by a discretized value name.
+
+        Args:
+            discretized_name: The discretized value string.
+
+        Returns:
+            The numerical width of the range (float). Unbounded ranges return infinity.
+        """
         """
         Calculate the width of the range represented by a discretized value.
         Smaller width = more specific range.
@@ -366,7 +439,17 @@ class RDDLDataCollector:
         # Single-sided ranges have infinite width
         return float('inf')
     
-    def _value_matches_discretized_range(self, value, discretized_name):
+    def _value_matches_discretized_range(self, value: float, discretized_name: str) -> bool:
+        """
+        Check if a numerical value matches the range represented by a discretized value name.
+
+        Args:
+            value: The numeric value to check.
+            discretized_name: The discretized range string (e.g., 'gte_10_lte_20').
+
+        Returns:
+            True if the value falls within the range, False otherwise.
+        """
         """
         Check if a numerical value matches the range represented by a discretized value name.
         E.g., "lte_28_5" means value <= 28.5
@@ -451,7 +534,13 @@ class RDDLDataCollector:
         
         return False
     
-    def _get_data_preconditions(self):
+    def _get_data_preconditions(self) -> Dict[str, List[Dict[str, List[str]]]]:
+        """
+        Extract data preconditions coupled with control flow conditions.
+
+        Returns:
+            Map of activities to lists of variant-specific preconditions.
+        """
         """
         Extract data preconditions coupled with control flow conditions.
         Uses decision mining samples to get data preconditions for each activity variant.
@@ -480,11 +569,18 @@ class RDDLDataCollector:
         
         return dict(data_preconditions)
     
-    def get_rddl_data(self):
+    def get_rddl_data(self) -> Dict[str, Any]:
+        """
+        Return the collected RDDL data.
+
+        Returns:
+            The compiled RDDL data dictionary.
+        """
         """Return the collected RDDL data."""
         return self.rddl_data
     
-    def print_summary(self):
+    def print_summary(self) -> None:
+        """Print a detailed summary of the collected RDDL data to stdout."""
         """Print detailed statistics in key-value format, one per line."""
         print("\n" + "="*70)
         print("RDDL DATA COLLECTION RESULTS")
@@ -547,7 +643,13 @@ class RDDLDataCollector:
         print("\n" + "="*70)
 
 
-def main():
+def main() -> Dict[str, Any]:
+    """
+    Main entry point for running the RDDL data collector from the command line.
+
+    Returns:
+        The collected RDDL data.
+    """
     if len(sys.argv) < 2:
         print("Usage: python xes_parser_rddl.py <log_name> [coverage_percentage] [discovery_algorithm]")
         print("Example: python xes_parser_rddl.py sepsis.xes 0.8 inductive")

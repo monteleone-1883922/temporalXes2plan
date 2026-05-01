@@ -1,11 +1,60 @@
 import os
 import random
 from collections import defaultdict
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import pm4py
 import utils
+from xes_parser import Parser
+
 
 class Encoder:
-    def __init__(self, parser, domain_name="process_domain", min_confidence=0.1, init=None, goal=None, minimal_preconditions=False):
+    """
+    Encoder for transforming process models and event logs into PDDL domains and problems.
+
+    Attributes:
+        parser (Parser): XES parser instance containing process data.
+        domain_name (str): Name of the PDDL domain to generate.
+        init (Optional[List[str]]): Custom initial state predicates.
+        goal (Optional[List[str]]): Custom goal state predicates.
+        min_confidence (float): Minimum confidence for including attribute relationships.
+        activities (Set[str]): Set of activities in the process.
+        attribute_categories (Dict[str, str]): Mapping of attributes to their categories.
+        tau_activities (Set[str]): Set of silent (tau) activities.
+        decision_points (Dict[str, Dict[str, float]]): Branch probabilities at decision points.
+        decision_preconditions (Dict[str, List[Set[str]]]): Data-driven preconditions for activities.
+        decision_attributes (Set[str]): Attributes involved in decision-making.
+        parallel_activities (Dict[str, List[str]]): Parallel activity relationships.
+        minimal_preconditions (bool): Whether to use minimal preconditions for planning.
+    """
+
+    parser: Parser
+    domain_name: str
+    init: Optional[List[str]]
+    goal: Optional[List[str]]
+    min_confidence: float
+    activities: Set[str]
+    attribute_categories: Dict[str, str]
+    _value_mappings: Dict[str, Any]
+    attr_activity_relationships: Dict[str, Any]
+    activity_attr_effects: Dict[str, Any]
+    tau_activities: Set[str]
+    decision_points: Dict[str, Dict[str, float]]
+    decision_preconditions: Dict[str, List[Set[str]]]
+    decision_attributes: Set[str]
+    parallel_activities: Dict[str, List[str]]
+    parallel_activity_map: Dict[str, Set[str]]
+    split_actions: Dict[str, Any]
+    effect_alternatives: Dict[str, Any]
+    minimal_preconditions: bool
+    def __init__(
+        self, 
+        parser: Parser, 
+        domain_name: str = "process_domain", 
+        min_confidence: float = 0.1, 
+        init: Optional[List[str]] = None, 
+        goal: Optional[List[str]] = None, 
+        minimal_preconditions: bool = False
+    ) -> None:
         self.parser = parser
         self.domain_name = domain_name
         self.init = init
@@ -51,11 +100,12 @@ class Encoder:
         self.minimal_preconditions = minimal_preconditions
     
 
-    def is_tau_activity(self, activity_name):
+    def is_tau_activity(self, activity_name: str) -> bool:
+        """Check if an activity is a silent (tau) transition."""
         return activity_name.startswith('tau_')
     
 
-    def _build_parallel_activity_map(self):
+    def _build_parallel_activity_map(self) -> Dict[str, Set[str]]:
         """
         Build a map of activities that can be executed in parallel with each other and
         determine which activities should not be considered as preconditions.
@@ -73,7 +123,8 @@ class Encoder:
         return parallel_map
     
     
-    def _generate_pddl_predicate_definitions(self):
+    def _generate_pddl_predicate_definitions(self) -> str:
+        """Generate the predicates section for the PDDL domain."""
         predicates = [
             "    (completed ?a - activity)",
             "    (enabled ?a - activity)"
@@ -115,7 +166,7 @@ class Encoder:
 
         return "  (:predicates\n" + "\n".join(predicates) + "\n  )"
     
-    def _create_attribute_predicate(self, attr, category):
+    def _create_attribute_predicate(self, attr: str, category: str) -> Optional[str]:
         """Create a single attribute predicate based on its category."""
         if category == 'boolean':
             return f"    ({attr})"
@@ -125,7 +176,7 @@ class Encoder:
             return f"    ({attr} ?v - {attr}_type)"
     
 
-    def _generate_pddl_type_definitions(self):
+    def _generate_pddl_type_definitions(self) -> str:
         """Generate PDDL type definitions based on the predicates that will be used."""
         # Collect attributes that will have predicates
         relevant_attrs = set()
@@ -169,7 +220,7 @@ class Encoder:
         )
     
 
-    def _collect_preconditions(self, action_name, variant_conditions=None):
+    def _collect_preconditions(self, action_name: str, variant_conditions: Optional[List[str]] = None) -> List[str]:
         """
         Collect preconditions for an action using the direct transition graph.
         
@@ -251,7 +302,7 @@ class Encoder:
         return unique_preconditions
 
 
-    def _analyze_input_places(self, action_name):
+    def _analyze_input_places(self, action_name: str) -> Dict[str, Any]:
         """
         Analyze the input places of a transition (activity) in the Petri net
         to determine the correct logical relationships for its preconditions.
@@ -302,7 +353,7 @@ class Encoder:
         return result
 
 
-    def _collect_effects(self, action_name):
+    def _collect_effects(self, action_name: str) -> List[str]:
         """
         Collect effects for an action with additional effects to enable subsequent activities.
         """
@@ -333,13 +384,13 @@ class Encoder:
         
         return effects
 
-    def _add_completion_effect(self, action_name, effects, seen_effects):
+    def _add_completion_effect(self, action_name: str, effects: List[str], seen_effects: Set[str]) -> None:
         """Add the basic completion effect for an action."""
         completion_effect = f"(completed {action_name})"
         effects.append(completion_effect)
         seen_effects.add(completion_effect)
 
-    def _handle_start_activity_effects(self, action_name, effects, seen_effects):
+    def _handle_start_activity_effects(self, action_name: str, effects: List[str], seen_effects: Set[str]) -> List[str]:
         """Handle effects specific to start activities."""
         successors = self._get_successors(action_name)
         for succ in successors:
@@ -351,14 +402,14 @@ class Encoder:
         self._add_disable_effect(action_name, effects, seen_effects)
         return effects
 
-    def _add_disable_effect(self, action_name, effects, seen_effects):
+    def _add_disable_effect(self, action_name: str, effects: List[str], seen_effects: Set[str]) -> None:
         """Add effect to disable the current action."""
         disable_current = f"(not (enabled {action_name}))"
         if disable_current not in seen_effects:
             effects.append(disable_current)
             seen_effects.add(disable_current)
 
-    def _handle_attribute_effects(self, action_name, effects, seen_effects):
+    def _handle_attribute_effects(self, action_name: str, effects: List[str], seen_effects: Set[str]) -> Dict[str, bool]:
         """Handle attribute-related effects for an action."""
         boolean_effects = {}
         sanitized_action = action_name.lower()
@@ -375,7 +426,7 @@ class Encoder:
         
         return boolean_effects
 
-    def _process_matching_attribute(self, action_name, matching_attribute, effects, seen_effects):
+    def _process_matching_attribute(self, action_name: str, matching_attribute: str, effects: List[str], seen_effects: Set[str]) -> Dict[str, bool]:
         """Process effects for attributes that match the action name."""
         boolean_effects = {}
         attr_category = self.attribute_categories[matching_attribute]
@@ -391,7 +442,7 @@ class Encoder:
         
         return boolean_effects
 
-    def _handle_non_boolean_matching_attribute(self, action_name, matching_attribute, attr_category, effects, seen_effects):
+    def _handle_non_boolean_matching_attribute(self, action_name: str, matching_attribute: str, attr_category: str, effects: List[str], seen_effects: Set[str]) -> None:
         """Handle non-boolean attributes that match the action name."""
         num_type = f"{matching_attribute}_type"
         remove_effect = (
@@ -410,7 +461,7 @@ class Encoder:
             action_name, matching_attribute, attr_category, effects, seen_effects
         )
 
-    def _add_attribute_alternatives_and_effects(self, action_name, attr, attr_category, effects, seen_effects):
+    def _add_attribute_alternatives_and_effects(self, action_name: str, attr: str, attr_category: str, effects: List[str], seen_effects: Set[str]) -> None:
         """Add attribute alternatives and effects."""
         possible_values = self._get_possible_attribute_values(attr)
         
@@ -426,14 +477,14 @@ class Encoder:
                 effects.append(set_effect)
                 seen_effects.add(set_effect)
 
-    def _get_possible_attribute_values(self, attr):
+    def _get_possible_attribute_values(self, attr: str) -> Optional[Set[str]]:
         decision_values = self.parser.attribute_domains.get(attr, set())
         if decision_values:
             if attr in self._value_mappings:
                 decision_values = {self._value_mappings[attr].get(val, val) for val in decision_values}
             return decision_values
         
-    def _get_param_index_for_attribute(self, action_name, attr):
+    def _get_param_index_for_attribute(self, action_name: str, attr: str) -> int:
         """Get the parameter index for a given attribute in an action."""
         param_index = 1
         for action_attr in self._get_attribute_params(action_name):
@@ -442,7 +493,7 @@ class Encoder:
             param_index += 1
         return param_index
 
-    def _process_activity_attribute_effects(self, action_name, effects, seen_effects, boolean_effects):
+    def _process_activity_attribute_effects(self, action_name: str, effects: List[str], seen_effects: Set[str], boolean_effects: Dict[str, bool]) -> None:
         """Process activity attribute effects from the discovered relationships."""
         if action_name not in self.activity_attr_effects:
             return
@@ -455,7 +506,7 @@ class Encoder:
         # Add boolean effects
         self._add_boolean_effects(boolean_effects, effects, seen_effects)
 
-    def _handle_successor_enabling(self, action_name, effects, seen_effects):
+    def _handle_successor_enabling(self, action_name: str, effects: List[str], seen_effects: Set[str]) -> None:
         """Handle enabling of successor activities."""
         successors = self._get_successors(action_name)
         decision_point_probs = self._get_decision_point_for_activity(action_name)
@@ -465,7 +516,7 @@ class Encoder:
         else:
             self._enable_all_successors(successors, effects, seen_effects)
 
-    def _handle_decision_point_successors(self, action_name, decision_point_probs, successors, effects, seen_effects):
+    def _handle_decision_point_successors(self, action_name: str, decision_point_probs: Dict[str, float], successors: List[str], effects: List[str], seen_effects: Set[str]) -> None:
         """Handle successor enabling for decision points."""
         valid_successors = {succ: prob for succ, prob in decision_point_probs.items() 
                            if prob >= 0.01 and succ in successors}
@@ -474,7 +525,7 @@ class Encoder:
             for key in self.decision_points_conditions:
                 self._process_decision_point_conditions(key, action_name, effects)
 
-    def _enable_all_successors(self, successors, effects, seen_effects):
+    def _enable_all_successors(self, successors: List[str], effects: List[str], seen_effects: Set[str]) -> None:
         """Enable all successor activities."""
         for succ in successors:
             enable_effect = f"(enabled {succ})"
@@ -482,7 +533,7 @@ class Encoder:
                 effects.append(enable_effect)
                 seen_effects.add(enable_effect)
 
-    def _process_decision_point_conditions(self, key, action_name, effects):
+    def _process_decision_point_conditions(self, key: Any, action_name: str, effects: List[str]) -> None:
         """Process conditions for decision points."""
         attributes_pre_xor = self.decision_points_conditions[key]
         for attribute in attributes_pre_xor:
@@ -494,7 +545,7 @@ class Encoder:
                 else:
                     self._handle_single_transition(attribute, val, transitions_val_pre_xor, effects)
 
-    def _handle_multiple_transitions(self, action_name, attribute, val, transitions_val_pre_xor, effects):
+    def _handle_multiple_transitions(self, action_name: str, attribute: str, val: Any, transitions_val_pre_xor: Dict[str, Any], effects: List[str]) -> None:
         """Handle multiple transitions in decision points."""
         decision_alternatives = []
         for transition in transitions_val_pre_xor.keys():
@@ -510,12 +561,12 @@ class Encoder:
         first_transition = list(transitions_val_pre_xor.keys())[0]
         effects.append(f"(when ({attribute} {val})\n        (enabled {first_transition}))")
 
-    def _handle_single_transition(self, attribute, val, transitions_val_pre_xor, effects):
+    def _handle_single_transition(self, attribute: str, val: Any, transitions_val_pre_xor: Dict[str, Any], effects: List[str]) -> None:
         """Handle single transition in decision points."""
         for transition in transitions_val_pre_xor.keys():
             effects.append(f"(when ({attribute} {val})\n        (enabled {transition}))")
 
-    def _process_boolean_conditional_effects(self, conditional_effects, boolean_effects, effects, seen_effects):
+    def _process_boolean_conditional_effects(self, conditional_effects: List[Dict[str, Any]], boolean_effects: Dict[str, bool], effects: List[str], seen_effects: Set[str]) -> None:
         """Process conditional effects for boolean attributes."""
         conditional_by_attr = defaultdict(list)
         for effect in conditional_effects:
@@ -531,7 +582,7 @@ class Encoder:
                     effects.append(when_effect)
                     seen_effects.add(when_effect)
 
-    def _add_boolean_effects(self, boolean_effects, effects, seen_effects):
+    def _add_boolean_effects(self, boolean_effects: Dict[str, bool], effects: List[str], seen_effects: Set[str]) -> None:
         """Add boolean effects to the effects list."""
         for attr, is_true in boolean_effects.items():
             effect_str = f"({attr})" if is_true else f"(not ({attr}))"
@@ -539,7 +590,7 @@ class Encoder:
                 effects.append(effect_str)
                 seen_effects.add(effect_str)
 
-    def _generate_measurement_variant_effects(self, action_name, variant):
+    def _generate_measurement_variant_effects(self, action_name: str, variant: Dict[str, Any]) -> List[str]:
         """
         Generate effects for a specific measurement outcome variant.
         This avoids PDDL semantic issues by having deterministic effects
@@ -591,7 +642,7 @@ class Encoder:
         
         return effects
 
-    def _generate_measurement_action_variants(self, action_name):
+    def _generate_measurement_action_variants(self, action_name: str) -> List[Dict[str, Any]]:
         """
         Generate separate actions for each measurement outcome to avoid
         PDDL semantic issues with simultaneous effects.
@@ -633,7 +684,7 @@ class Encoder:
         
         return self._deduplicate_variants(variants, action_name)
 
-    def _get_attribute_params(self, action_name):
+    def _get_attribute_params(self, action_name: str) -> Set[str]:
         """Determine which attributes should be parameters for an action."""
         param_attributes = set()
         
@@ -674,13 +725,13 @@ class Encoder:
         return param_attributes
 
 
-    def _get_decision_point_for_activity(self, action_name):
+    def _get_decision_point_for_activity(self, action_name: str) -> Optional[Dict[str, float]]:
         if action_name in self.processed_decision_points:
             return self.processed_decision_points[action_name]
         return None
 
 
-    def _find_or_preconditions(self, action_name):
+    def _find_or_preconditions(self, action_name: str) -> List[List[str]]:
         """
         Find all OR conditions in the preconditions of an action.
         Returns a list of lists, where each inner list represents one OR condition.
@@ -714,7 +765,7 @@ class Encoder:
         return or_conditions
 
 
-    def _generate_action_variants(self, action_name):
+    def _generate_action_variants(self, action_name: str) -> List[Dict[str, Any]]:
         """ Generate variants of an action to replace OR conditions with separate actions. """
         or_conditions = self._find_or_preconditions(action_name)
         
@@ -746,7 +797,7 @@ class Encoder:
         return self._deduplicate_variants(variants, action_name)
 
 
-    def _generate_pddl_action_definition(self, action_name):
+    def _generate_pddl_action_definition(self, action_name: str) -> str:
         """Generate PDDL action definition for a specific activity."""
         # First check for measurement variants (separate actions per outcome)
         measurement_variants = self._generate_measurement_action_variants(action_name)
@@ -811,7 +862,14 @@ class Encoder:
         return self._generate_single_action_definition(action_name)
 
 
-    def _generate_single_action_definition(self, action_name, variant_name=None, variant_conditions=None, deterministic_effects=None, decision_preconditions=None):
+    def _generate_single_action_definition(
+        self, 
+        action_name: str, 
+        variant_name: Optional[str] = None, 
+        variant_conditions: Optional[List[str]] = None, 
+        deterministic_effects: Optional[List[str]] = None, 
+        decision_preconditions: Optional[Set[str]] = None
+    ) -> str:
         """Generate a single PDDL action definition, optionally for a variant."""
         is_starting_action = action_name in self.parser.start_activities
         display_name = variant_name if variant_name else action_name
@@ -844,11 +902,18 @@ class Encoder:
         action_def.append("  )")
         return "\n".join(action_def)
 
-    def _get_parameter_type(self, attr):
+    def _get_parameter_type(self, attr: str) -> str:
         """Get the parameter type for an attribute."""
         return f"{attr}_type"
 
-    def _add_action_preconditions(self, action_def, action_name, variant_conditions, extra_preconditions=None, is_starting_action=False):
+    def _add_action_preconditions(
+        self, 
+        action_def: List[str], 
+        action_name: str, 
+        variant_conditions: Optional[List[str]], 
+        extra_preconditions: Optional[Set[str]] = None, 
+        is_starting_action: bool = False
+    ) -> None:
         """Add preconditions to action definition."""
         preconditions = self._collect_preconditions(action_name, variant_conditions)
         if extra_preconditions:
@@ -866,7 +931,7 @@ class Encoder:
         else:
             action_def.append("   :precondition ()")
 
-    def _add_action_effects(self, action_def, action_name, deterministic_effects):
+    def _add_action_effects(self, action_def: List[str], action_name: str, deterministic_effects: Optional[List[str]]) -> None:
         """Add effects to action definition."""
         if deterministic_effects is not None:
             effects = deterministic_effects
@@ -879,7 +944,8 @@ class Encoder:
             action_def.append("   :effect (and\n      " + "\n      ".join(effects) + "\n   )")
 
 
-    def generate_domain(self, output_path=None):
+    def generate_domain(self, output_path: Optional[str] = None) -> str:
+        """Generate PDDL domain string and optionally save to file."""
         requirements = ":strips :typing :universal-preconditions :conditional-effects :negative-preconditions"
         domain = [
             f"(define (domain {self.domain_name})", f"  (:requirements {requirements})", "",
@@ -902,7 +968,7 @@ class Encoder:
         return domain_content
     
 
-    def generate_problem(self, problem_name="process_problem", output_path=None):
+    def generate_problem(self, problem_name: str = "process_problem", output_path: Optional[str] = None) -> str:
         """
         Generate PDDL problem file with initial state and goal.
         
@@ -937,7 +1003,7 @@ class Encoder:
         
         return problem_content
 
-    def _add_attribute_constants(self, constants, relevant_attrs):
+    def _add_attribute_constants(self, constants: List[str], relevant_attrs: Set[str]) -> None:
         """Add constants for numerical and categorical attributes."""
         for attr, category in self.attribute_categories.items():
             if category in ['numerical', 'categorical'] and attr in relevant_attrs and attr in self.parser.attribute_domains:
@@ -945,7 +1011,7 @@ class Encoder:
                 if vals:
                     constants.append(f"    {' '.join(sorted(vals))} - {attr}_type")
 
-    def _generate_pddl_constants_definitions(self):
+    def _generate_pddl_constants_definitions(self) -> str:
         """Generate the constants section of the PDDL domain."""
         constants = ["  (:constants"]
         
@@ -983,13 +1049,13 @@ class Encoder:
         constants.append("  )")
         return "\n".join(constants)
 
-    def _ensure_value_mappings(self, attr, vals, prefix):
+    def _ensure_value_mappings(self, attr: str, vals: Set[Any], prefix: str) -> None:
         """Ensure value mappings exist for categorical attributes."""
         if not hasattr(self, '_value_mappings'):
             self._value_mappings = {}
         self._value_mappings[attr] = {val: utils.sanitize_name(val) for val in vals}
 
-    def _generate_init_section(self, custom_init):
+    def _generate_init_section(self, custom_init: Optional[List[str]]) -> str:
         """Generate the initial state section of the PDDL problem."""
         init = ["  (:init"]
         
@@ -1023,7 +1089,7 @@ class Encoder:
         init.append("  )")
         return "\n".join(init)
     
-    def _generate_goal_section(self, custom_goal):
+    def _generate_goal_section(self, custom_goal: Optional[List[str]]) -> str:
         """Generate the goal section of the PDDL problem."""
         goal = ["  (:goal", "    (and"]
         
@@ -1037,7 +1103,7 @@ class Encoder:
         goal.append("    ) )")
         return "\n".join(goal)
 
-    def _create_default_goal(self):
+    def _create_default_goal(self) -> str:
         """Create a default goal condition."""
         if self.parser.end_activities:
             # Filter end activities to only include those that are in the discovered activities
@@ -1048,12 +1114,13 @@ class Encoder:
         return "()"  # No valid end activities found
 
 
-    def _get_successors(self, action_name):
+    def _get_successors(self, action_name: str) -> List[str]:
         """Get successors using the direct transition graph."""
         return self.parser.direct_transition_graph.get(action_name, [])
     
 
-    def _process_decision_points(self):
+    def _process_decision_points(self) -> None:
+        """Process and normalize decision point probabilities for internal mapping."""
         self.processed_decision_points = {}
         for key_str, probs in self.decision_points.items():
             if isinstance(probs, dict):
@@ -1075,7 +1142,8 @@ class Encoder:
                     print(f"Error processing complex key {key_str}: {e}")
 
 
-    def _normalize_action_signature(self, preconditions, effects):
+    def _normalize_action_signature(self, preconditions: List[str], effects: List[str]) -> str:
+        """Create a normalized string signature for an action to aid deduplication."""
         normalized_preconditions = sorted(set(preconditions)) if preconditions else []
         normalized_effects = sorted(set(effects)) if effects else []
         precond_str = " AND ".join(normalized_preconditions)
@@ -1083,7 +1151,8 @@ class Encoder:
         
         return f"PRECOND[{precond_str}]_EFFECT[{effect_str}]"
 
-    def _deduplicate_variants(self, variants, action_name):
+    def _deduplicate_variants(self, variants: List[Dict[str, Any]], action_name: str) -> List[Dict[str, Any]]:
+        """Remove redundant action variants based on their preconditions and effects."""
         if not variants:
             return variants
             
@@ -1119,7 +1188,8 @@ class Encoder:
             
         return unique_variants
 
-    def _extract_activity_name(self, key_str):
+    def _extract_activity_name(self, key_str: str) -> Optional[str]:
+        """Extract a valid activity name from a potentially complex dictionary key string."""
         key_lower = str(key_str).lower()
         for activity in self.activities:
             if activity is not None and activity.lower() in key_lower:

@@ -5,9 +5,19 @@ import json
 import sys
 from pathlib import Path
 import argparse
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
 
-def load_batch_results(results_dir):
+def load_batch_results(results_dir: Union[str, Path]) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+    """
+    Load batch evaluation results from a directory.
+
+    Args:
+        results_dir: Directory containing 'batch_summary.csv' and 'complete_results.json'.
+
+    Returns:
+        A tuple of (summary DataFrame, detailed results dictionary).
+    """
     results_dir = Path(results_dir)
     summary_file = results_dir / "batch_summary.csv"
     if not summary_file.exists():
@@ -22,7 +32,13 @@ def load_batch_results(results_dir):
     return df, detailed_results
 
 
-def analyze_success_rates(df):
+def analyze_success_rates(df: pd.DataFrame) -> None:
+    """
+    Print a detailed analysis of success rates by category.
+
+    Args:
+        df: DataFrame containing evaluation results.
+    """
     print("SUCCESS RATE ANALYSIS")
     print("=" * 50)
     
@@ -51,7 +67,13 @@ def analyze_success_rates(df):
     print(coverage_success[['count', 'sum', 'percentage']])
 
 
-def analyze_performance(df):
+def analyze_performance(df: pd.DataFrame) -> None:
+    """
+    Analyze performance metrics (duration) for successful runs.
+
+    Args:
+        df: DataFrame containing evaluation results.
+    """
     """Analyze performance metrics."""
     print("\n\nPERFORMANCE ANALYSIS")
     print("=" * 50)
@@ -81,7 +103,14 @@ def analyze_performance(df):
     print(coverage_duration.sort_values('log_coverage'))
 
 
-def create_visualizations(df, output_dir):
+def create_visualizations(df: pd.DataFrame, output_dir: Union[str, Path]) -> None:
+    """
+    Create visualization plots and save them to the specified directory.
+
+    Args:
+        df: DataFrame containing evaluation results.
+        output_dir: Directory where plots will be saved.
+    """
     """Create visualization plots."""
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
@@ -147,7 +176,19 @@ def create_visualizations(df, output_dir):
     print(f"\nVisualization plots saved to: {output_dir}")
 
 
-def generate_report(df, detailed_results, output_file):
+def generate_report(
+    df: pd.DataFrame, 
+    detailed_results: Optional[Dict[str, Any]], 
+    output_file: Union[str, Path]
+) -> None:
+    """
+    Generate a comprehensive text report of the evaluation results.
+
+    Args:
+        df: DataFrame containing evaluation results.
+        detailed_results: Optional dictionary with detailed JSON data.
+        output_file: Path to the output text file.
+    """
     """Generate a comprehensive report."""
     with open(output_file, 'w') as f:
         f.write("XES2PDDL Batch Evaluation Report\n")
@@ -188,7 +229,13 @@ def generate_report(df, detailed_results, output_file):
     print(f"Report saved to: {output_file}")
 
 
-def main():
+def main() -> Optional[int]:
+    """
+    Main entry point for the analysis script.
+
+    Returns:
+        Exit code (1 for error, None for success).
+    """
     parser = argparse.ArgumentParser(description="Analyze XES2PDDL batch evaluation results")
     parser.add_argument("results_dir", help="Directory containing batch results")
     parser.add_argument("--output", "-o", default="analysis", help="Output directory for analysis results")

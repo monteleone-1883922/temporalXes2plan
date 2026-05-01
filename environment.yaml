@@ -1,0 +1,16 @@
+# Conda environment configuration for temporalXes2Plan project
+name: temporalXes2Plan
+
+channels:
+  - defaults
+
+dependencies:
+  - python=3.14
+  - pip
+  - pip:
+    - jellyfish==1.2.1
+    - matplotlib==3.10.6
+    - numpy==2.2.6
+    - pandas==2.3.2
+    - pm4py==2.7.17
+    - scikit-learn==1.7.2

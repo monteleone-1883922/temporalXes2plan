@@ -2,12 +2,19 @@ import argparse
 import os
 import sys
 import subprocess
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
 _module_dir = os.path.dirname(os.path.abspath(__file__))
 DOWNWARD_SCRIPT = os.path.join(_module_dir, 'downward', 'fast-downward.py')
 DOWNWARD_CMD = [sys.executable, DOWNWARD_SCRIPT]
 
-def get_search_configs():
+def get_search_configs() -> Dict[str, Dict[str, str]]:
+    """
+    Return dictionary of supported search configurations for Fast Downward.
+
+    Returns:
+        Mapping of search configuration keys to their type and command-line string.
+    """
     """Return dictionary of supported search configurations"""
     return {
         # Optimal (with reopening)
@@ -26,7 +33,13 @@ def get_search_configs():
         "lama_first": {"type": "alias", "config": "lama-first"}
     }
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments for running the planner.
+
+    Returns:
+        The parsed arguments as a Namespace object.
+    """
     parser = argparse.ArgumentParser(description='Run Fast Downward planner with configurable search algorithms')
     search_configs = get_search_configs()
     search_help = "Search algorithm to use. Available options:\n"
@@ -53,7 +66,16 @@ def parse_arguments():
     
     return parser.parse_args()
 
-def build_command(search_key):
+def build_command(search_key: str) -> List[str]:
+    """
+    Build the full command-line list for executing Fast Downward.
+
+    Args:
+        search_key: The search configuration identifier (from get_search_configs).
+
+    Returns:
+        List of command-line arguments to be executed.
+    """
     search_configs = get_search_configs()
     search_config = search_configs[search_key]
     

@@ -1,4 +1,5 @@
-from argparse import ArgumentParser
+from argparse import ArgumentParser, Namespace
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import os
 from xes_parser import Parser
 from pddl_encoder import Encoder
@@ -6,7 +7,13 @@ import subprocess
 import utils
 
 
-def parse_arguments():
+def parse_arguments() -> Namespace:
+    """
+    Parse command-line arguments for the XES2PDDL framework.
+
+    Returns:
+        The parsed arguments as a Namespace object.
+    """
     parser = ArgumentParser(description="Run the framework for XES encoding in PDDL.")
     parser.add_argument('--log_coverage', type=float, default='0.001', help='Minimum cumulative coverage percentage for variant filtering (pm4py).')
     parser.add_argument('--xes_name', type=str, default='sepsis.xes', help='Name of the XES event log to use.')

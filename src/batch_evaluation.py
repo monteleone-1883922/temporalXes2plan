@@ -9,10 +9,39 @@ import signal
 import sys
 import subprocess
 import time
+from typing import List, Dict, Optional, Any, Tuple, Set, Union, Callable
 
 
 class BatchEvaluator:
-    def __init__(self, config_name=None, output_dir="../evaluation/batch_results", checkpoint_file=None, resume=False):
+    """
+    Evaluator for running batches of process mining and planning tasks.
+
+    Attributes:
+        config_name (Optional[str]): Name of the predefined configuration to use.
+        output_dir (Path): Directory where results and logs will be stored.
+        resume (bool): Whether to resume from a previous checkpoint.
+        checkpoint_file (Path): Path to the checkpoint JSON file.
+        interrupted (bool): Flag to track if the process was interrupted.
+        predefined_configs (Dict[str, Dict[str, Any]]): Mapping of preset names to configurations.
+        default_config (Dict[str, Any]): The default configuration used if none specified.
+        config (Dict[str, Any]): The active configuration for the current run.
+    """
+
+    config_name: Optional[str]
+    output_dir: Path
+    resume: bool
+    checkpoint_file: Path
+    interrupted: bool
+    predefined_configs: Dict[str, Dict[str, Any]]
+    default_config: Dict[str, Any]
+    config: Dict[str, Any]
+    def __init__(
+        self, 
+        config_name: Optional[str] = None, 
+        output_dir: Union[str, Path] = "../evaluation/batch_results", 
+        checkpoint_file: Optional[Union[str, Path]] = None, 
+        resume: bool = False
+    ) -> None:
         self.config_name = config_name
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -27,7 +56,13 @@ class BatchEvaluator:
         self.default_config = self.predefined_configs["single_log"].copy()
         self.config = self.load_config()
     
-    def get_predefined_configs(self):
+    def get_predefined_configs(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Define and return the set of predefined batch configurations.
+
+        Returns:
+            Dictionary mapping config names (e.g., 'planning', 'full') to their parameters.
+        """
         # Define which logs need as activity names (concept:name + lifecycle:transition)
         activity_classifier_logs = {
             "bpic_2013_cp.xes": True,
@@ -117,11 +152,18 @@ class BatchEvaluator:
             }
         }
             
-    def _signal_handler(self, signum, frame):
+    def _signal_handler(self, signum: int, frame: Optional[Any]) -> None:
+        """Handle interrupt signals to ensure progress is saved."""
         print(f"\nReceived signal {signum}. Saving checkpoint and exiting...")
         self.interrupted = True
 
-    def load_checkpoint(self):
+    def load_checkpoint(self) -> Dict[str, Any]:
+        """
+        Load the checkpoint file if it exists.
+
+        Returns:
+            A dictionary containing completed configurations and batch metadata.
+        """
         if self.checkpoint_file.exists():
             try:
                 with open(self.checkpoint_file, 'r') as f:
@@ -133,7 +175,15 @@ class BatchEvaluator:
                 return {"completed_configs": [], "batch_id": None, "config_hash": None}
         return {"completed_configs": [], "batch_id": None, "config_hash": None}
     
-    def save_checkpoint(self, completed_configs, batch_id, config_hash):
+    def save_checkpoint(self, completed_configs: List[str], batch_id: str, config_hash: str) -> None:
+        """
+        Save the current progress to a checkpoint file.
+
+        Args:
+            completed_configs: List of successfully completed run IDs.
+            batch_id: Identifier for the current batch.
+            config_hash: Hash representing the configuration state.
+        """
         checkpoint = {
             "completed_configs": completed_configs,
             "batch_id": batch_id,
@@ -146,21 +196,25 @@ class BatchEvaluator:
         except Exception as e:
             print(f"Warning: Could not save checkpoint: {e}")
     
-    def get_config_hash(self):
+    def get_config_hash(self) -> str:
+        """Generate an MD5 hash of the current configuration."""
         config_str = json.dumps(self.config, sort_keys=True)
         return hashlib.md5(config_str.encode()).hexdigest()
     
-    def get_run_id(self, config):
+    def get_run_id(self, config: Dict[str, Any]) -> str:
+        """Generate a unique run identifier for a specific configuration."""
         coverage_str = f"{config['log_coverage']:.6f}".rstrip('0').rstrip('.')
         return f"{config['evaluation_type']}_{config['xes_name'].replace('.xes', '')}_{config['search_algorithm']}_{config['discovery_algorithm']}_cov{coverage_str}"
         
-    def load_config(self):
+    def load_config(self) -> Dict[str, Any]:
+        """Load the active configuration based on the provided config name."""
         if self.config_name and self.config_name in self.predefined_configs:
             return self.predefined_configs[self.config_name].copy()
         else:
             return self.default_config.copy()
     
-    def save_config_template(self, filename="batch_config_template.json"):
+    def save_config_template(self, filename: str = "batch_config_template.json") -> None:
+        """Save a template JSON configuration to a file."""
         template = {
             "description": "Template configuration for XES2PDDL batch evaluation",
             "event_logs": [
@@ -188,7 +242,8 @@ class BatchEvaluator:
             json.dump(template, f, indent=2)
         print(f"Configuration template saved to {filename}")
     
-    def list_predefined_configs(self):
+    def list_predefined_configs(self) -> None:
+        """Print a summary of all predefined configurations to stdout."""
         print("Available predefined configurations:")
         print("=" * 50)
         for name, config in self.predefined_configs.items():
@@ -206,7 +261,13 @@ class BatchEvaluator:
             print(f"{'':20}   Logs: {', '.join(config['event_logs'][:3])}{'...' if logs_count > 3 else ''}")
             print()
     
-    def generate_configurations(self):
+    def generate_configurations(self) -> List[Dict[str, Any]]:
+        """
+        Generate all individual configurations (runs) from the active batch config.
+
+        Returns:
+            A list of configuration dictionaries.
+        """
         configurations = []
         discovery_algorithms = self.config.get("discovery_algorithms", ["alpha"])
         coverage_levels = self.config.get("coverage_levels", [0.8])
@@ -233,7 +294,17 @@ class BatchEvaluator:
         
         return configurations
     
-    def run_evaluation(self, config, batch_id=None):
+    def run_evaluation(self, config: Dict[str, Any], batch_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Run a single evaluation task based on the provided configuration.
+
+        Args:
+            config: The configuration for this specific run.
+            batch_id: Optional batch identifier for file naming.
+
+        Returns:
+            A dictionary containing the run results (success, duration, etc.).
+        """
         eval_type = config["evaluation_type"]
         if eval_type == "planning":
             script = "eval_planning.py"
@@ -342,7 +413,13 @@ class BatchEvaluator:
             print(f"  ERROR: {e}")
             return result
     
-    def run_batch(self):
+    def run_batch(self) -> List[Dict[str, Any]]:
+        """
+        Execute the entire batch of evaluations.
+
+        Returns:
+            A list of result dictionaries for all runs in the batch.
+        """
         configurations = self.generate_configurations()
         
         checkpoint = self.load_checkpoint() if self.resume else {"completed_configs": [], "batch_id": None, "config_hash": None}
@@ -437,7 +514,8 @@ class BatchEvaluator:
         self.print_summary(results)
         return results
     
-    def print_summary(self, results):
+    def print_summary(self, results: List[Dict[str, Any]]) -> None:
+        """Print a summary of the batch evaluation results to stdout."""
         total = len(results)
         successful = sum(1 for r in results if r['success'])
         failed = total - successful
@@ -464,7 +542,8 @@ class BatchEvaluator:
         print(f"Summary CSV: {self.output_dir}/batch_summary.csv")
 
 
-def main():
+def main() -> None:
+    """Main entry point for the batch evaluation script."""
     parser = argparse.ArgumentParser(description="Batch evaluation for XES2PDDL framework")
     parser.add_argument("--preset", type=str, choices=[
         "planning", "suffix", "single_log", "outcome", "full"], help="Use predefined configuration")

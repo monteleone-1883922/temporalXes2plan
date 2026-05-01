@@ -3,20 +3,46 @@ from jellyfish._jellyfish import damerau_levenshtein_distance
 import os
 import time
 import csv
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
 import utils
 from pddl_encoder import Encoder
 from xes_parser import Parser
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments for the suffix prediction evaluation.
+
+    Returns:
+        The parsed arguments as a Namespace object.
+    """
     parser = utils.create_base_argument_parser(
         "Run the evaluation of the framework for XES encoding in PDDL and generation of predictions through FOND planning."
     )
     return parser.parse_args()
 
 
-def compute_goal_condition_suffix(parser, target_activity, trace_events=None, full_trace_length=0, suffix=None):
+def compute_goal_condition_suffix(
+    parser: Parser, 
+    target_activity: str, 
+    trace_events: Optional[List[Any]] = None, 
+    full_trace_length: int = 0, 
+    suffix: Optional[List[str]] = None
+) -> List[str]:
+    """
+    Compute a proper PDDL goal condition including attribute values from the final state.
+
+    Args:
+        parser: XES parser instance.
+        target_activity: The final activity to reach.
+        trace_events: Full trace data with attribute values.
+        full_trace_length: Length of the full trace to get final attribute values.
+        suffix: Optional list of activities in the real suffix.
+
+    Returns:
+        List of PDDL predicates for the goal state (deduplicated).
+    """
     """
     Compute a proper PDDL goal condition including attribute values from the final state.
     

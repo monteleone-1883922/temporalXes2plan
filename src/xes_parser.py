@@ -3,6 +3,7 @@ import numpy as np
 from collections import defaultdict
 import pm4py
 import random
+from typing import List, Dict, Optional, Any, Tuple, Set, Union, Callable
 from decision_mining import discover_all_decision_rules, get_attribute_domains
 import utils
 
@@ -12,6 +13,64 @@ os.environ['PYTHONHASHSEED'] = str(SEED)
 np.random.seed(SEED)
 
 class Parser:
+    """
+    XES Parser for discovering Petri nets and extracting process properties.
+
+    Attributes:
+        log_path (str): Path to the XES event log file.
+        coverage_percentage (float): Coverage percentage for variant filtering.
+        discovery_algorithm (str): Petri net discovery algorithm name.
+        intervals (Dict[str, List[float]]): Attribute discretization intervals.
+        use_activity_classifier (bool): Whether to use Activity classifier.
+        log (pm4py.objects.log.obj.EventLog): The loaded and filtered event log.
+        full_log (pm4py.objects.log.obj.EventLog): The full event log (pre-filtering).
+        petrinet (pm4py.objects.petri_net.obj.PetriNet): Discovered Petri net.
+        initial_marking (pm4py.objects.petri_net.obj.Marking): Initial marking.
+        final_marking (pm4py.objects.petri_net.obj.Marking): Final marking.
+        transitions (Set[pm4py.objects.petri_net.obj.PetriNet.Transition]): Transitions.
+        places (Set[pm4py.objects.petri_net.obj.PetriNet.Place]): Places.
+        edges (Set[pm4py.objects.petri_net.obj.PetriNet.Arc]): Arcs.
+        activities (Set[str]): Set of activity names.
+        silent_transitions (List[Tuple[pm4py.objects.petri_net.obj.PetriNet.Transition, str]]): Tau transitions.
+        start_activities (Dict[str, int]): Map of start activities to frequencies.
+        end_activities (Dict[str, int]): Map of end activities to frequencies.
+        attributes (Set[str]): Set of event attributes.
+        attribute_categories (Dict[str, str]): Map of attributes to categories.
+        predecessors (Dict[str, List[str]]): Map of activities to predecessors.
+        decision_points_probabilities (Dict[str, Dict[str, float]]): Probabilities at decision points.
+        parallels (Dict[str, List[str]]): Map of AND-splits to parallel activities.
+        direct_transition_graph (Dict[str, List[str]]): Direct transition graph.
+        attribute_domains (Dict[str, Set[str]]): Possible values for attributes.
+        decision_samples (List[Dict[str, Any]]): Samples for decision mining.
+    """
+
+    log_path: str
+    coverage_percentage: float
+    discovery_algorithm: str
+    intervals: Dict[str, List[float]]
+    use_activity_classifier: bool
+    log: Any
+    full_log: Any
+    train_df: Any
+    test_df: Any
+    petrinet: Any
+    initial_marking: Any
+    final_marking: Any
+    transitions: Set[Any]
+    places: Set[Any]
+    edges: Set[Any]
+    activities: Set[str]
+    silent_transitions: List[Tuple[Any, str]]
+    start_activities: Dict[str, int]
+    end_activities: Dict[str, int]
+    attributes: Set[str]
+    attribute_categories: Dict[str, str]
+    predecessors: Dict[str, List[str]]
+    decision_points_probabilities: Dict[str, Dict[str, float]]
+    parallels: Dict[str, List[str]]
+    direct_transition_graph: Dict[str, List[str]]
+    attribute_domains: Dict[str, Set[str]]
+    decision_samples: List[Dict[str, Any]]
     IGNORED_ATTRIBUTES = {'case:concept:name', 'concept:name', 'time:timestamp', 'lifecycle:transition', 'org:resource', 'org:group', 'variant-index', 'Resource', 'org:role'}
     MIN_PROBABILITY_THRESHOLD = 0.1
     STRONG_PROBABILITY_THRESHOLD = 0.2
@@ -25,13 +84,19 @@ class Parser:
         'ilp': pm4py.discovery.discover_petri_net_ilp
     }
 
-    def __init__(self, log_name, coverage_percentage, discovery_algorithm='inductive', intervals=None,
-                 use_activity_classifier=False):
+    def __init__(
+        self, 
+        log_path: str, 
+        coverage_percentage: float, 
+        discovery_algorithm: str = 'inductive', 
+        intervals: Optional[Dict[str, List[float]]] = None,
+        use_activity_classifier: bool = False
+    ) -> None:
         """
         Initialize the Parser with a specified discovery algorithm.
         
         Args:
-            log_name: Name of the XES event log file
+            log_path: path to the XES event log file
             coverage_percentage: Minimum cumulative coverage percentage for variant filtering
             discovery_algorithm: Algorithm to use for Petri net discovery ('alpha', 'inductive', 'heuristics', 'ilp')
             intervals: Intervals from decision mining for discretization
@@ -46,7 +111,7 @@ class Parser:
         self.intervals = intervals or {}
         self.discovery_algorithm = discovery_algorithm
         self.use_activity_classifier = use_activity_classifier
-        self.log_path = os.path.join(os.path.dirname(__file__), '..', 'logs', log_name)
+        self.log_path = log_path
         self.log = self._load_and_filter_log(coverage_percentage)
         self._split_train_test()
         self._discover_petri_net()
@@ -54,11 +119,13 @@ class Parser:
         self._initialize_attributes()
         self._compute_structure_and_probabilities()
 
-    def _split_train_test(self):
+    def _split_train_test(self) -> None:
+        """Split the log into training and testing sets (80/20)."""
         self.train_df, self.test_df = pm4py.split_train_test(self.log, train_percentage=0.8)
         self.log = self.train_df
 
-    def _discover_petri_net(self):
+    def _discover_petri_net(self) -> None:
+        """Discover the Petri net using the selected algorithm."""
         discovery_function = self.DISCOVERY_ALGORITHMS[self.discovery_algorithm]
         try:
             self.petrinet, self.initial_marking, self.final_marking = discovery_function(self.log)
@@ -71,7 +138,8 @@ class Parser:
             print(f"Error discovering Petri net with {self.discovery_algorithm} algorithm: {e}")
             
 
-    def _extract_basic_properties(self):
+    def _extract_basic_properties(self) -> None:
+        """Extract basic properties like activities, start/end activities, and tau transitions."""
         self.silent_transitions = []
         activities_set = set()
         tau_counter = 1
@@ -93,12 +161,14 @@ class Parser:
                              for activity, freq in pm4py.get_end_activities(self.full_log).items()}
 
 
-    def _initialize_attributes(self):
+    def _initialize_attributes(self) -> None:
+        """Initialize attribute sets and categories."""
         self.attributes = {utils.sanitize_name(attr) for attr in pm4py.get_event_attributes(self.full_log) 
                           if attr not in Parser.IGNORED_ATTRIBUTES}
         self.attribute_categories = self._categorize_attributes()
 
-    def _compute_structure_and_probabilities(self):
+    def _compute_structure_and_probabilities(self) -> None:
+        """Compute structural properties and probabilities for the discovered Petri net."""
         self.predecessors = self.extract_predecessors()
         self.decision_points_probabilities = self.compute_decision_points_probabilities()
         self.parallels = self.identify_parallels()
@@ -115,7 +185,16 @@ class Parser:
         if intervals:
             self.intervals = dict(intervals)  # Convert defaultdict to regular dict
 
-    def _load_and_filter_log(self, coverage_percentage):
+    def _load_and_filter_log(self, coverage_percentage: float) -> Any:
+        """
+        Load the XES log, apply classifiers, and filter by coverage.
+
+        Args:
+            coverage_percentage: Minimum cumulative coverage for variant filtering.
+
+        Returns:
+            The loaded and filtered event log object.
+        """
         log = pm4py.objects.log.importer.xes.importer.apply(self.log_path)
         
         if self.use_activity_classifier:
@@ -153,7 +232,13 @@ class Parser:
         return log
     
     
-    def _categorize_attributes(self):
+    def _categorize_attributes(self) -> Dict[str, str]:
+        """
+        Categorize attributes into 'boolean', 'numerical', or 'categorical'.
+
+        Returns:
+            Dictionary mapping attribute names to categories.
+        """
         attr_categories = {}
         
         # Include trace (case) attributes
@@ -187,7 +272,8 @@ class Parser:
         return attr_categories
     
     
-    def _get_place_outgoing_transitions(self):
+    def _get_place_outgoing_transitions(self) -> Dict[Any, List[Any]]:
+        """Get mapping of places to their outgoing transitions."""
         place_outgoing_transitions = defaultdict(list)
         for arc in self.edges:
             source, target = arc.source, arc.target
@@ -196,7 +282,8 @@ class Parser:
                 place_outgoing_transitions[source].append(target)
         return place_outgoing_transitions
 
-    def _get_transition_outgoing_places(self):
+    def _get_transition_outgoing_places(self) -> Dict[Any, List[Any]]:
+        """Get mapping of transitions to their outgoing places."""
         transition_outgoing_places = defaultdict(list)
         for arc in self.edges:
             source, target = arc.source, arc.target
@@ -205,7 +292,8 @@ class Parser:
                 transition_outgoing_places[source].append(target)
         return transition_outgoing_places
 
-    def _compute_activity_frequencies(self):
+    def _compute_activity_frequencies(self) -> Dict[str, Dict[str, int]]:
+        """Compute frequency of direct transitions between activities."""
         df_counts = defaultdict(lambda: defaultdict(int))
         for trace in self.full_log:
             for i in range(len(trace) - 1):
@@ -214,7 +302,21 @@ class Parser:
                 df_counts[current_activity][next_activity] += 1
         return df_counts
 
-    def _compute_decision_probabilities(self, decision_points, df_counts):
+    def _compute_decision_probabilities(
+        self, 
+        decision_points: Dict[Any, List[Any]], 
+        df_counts: Dict[str, Dict[str, int]]
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Compute probabilities for each branch at decision points.
+
+        Args:
+            decision_points: Dictionary mapping places to outgoing transitions.
+            df_counts: Activity frequency counts.
+
+        Returns:
+            Mapping of place names to branch probabilities.
+        """
         decision_probabilities = {}
         for place, outgoing_transitions in decision_points.items():
             all_transitions = [(t, self._get_activity_name_for_transition(t)) for t in outgoing_transitions]
@@ -254,7 +356,13 @@ class Parser:
 
         return decision_probabilities
 
-    def _add_non_tau_predecessors(self, activity, incoming_set, visited=None):
+    def _add_non_tau_predecessors(
+        self, 
+        activity: str, 
+        incoming_set: Set[str], 
+        visited: Optional[Set[str]] = None
+    ) -> None:
+        """Recursively find non-tau predecessors, skipping intermediate tau transitions."""
         if visited is None:
             visited = set()
         
@@ -268,7 +376,8 @@ class Parser:
             for pred in self.predecessors.get(activity, []):
                 self._add_non_tau_predecessors(pred, incoming_set, visited)
 
-    def compute_decision_points_probabilities(self):
+    def compute_decision_points_probabilities(self) -> Dict[str, Dict[str, float]]:
+        """Compute decision point probabilities for the whole Petri net."""
         place_outgoing_transitions = self._get_place_outgoing_transitions()
         
         decision_points = {}
@@ -282,7 +391,7 @@ class Parser:
         return decision_probabilities
         
         
-    def identify_parallels(self):
+    def identify_parallels(self) -> Dict[str, List[str]]:
         """
         Identifies transitions that split into parallel paths (AND-splits).
         Returns a dictionary mapping parallel-splitting transitions to their subsequent transitions.
@@ -299,14 +408,21 @@ class Parser:
         
         return self._extract_parallel_patterns(transition_outgoing_places, place_outgoing_transitions, decision_point_places)
 
-    def _identify_decision_point_places(self, place_outgoing_transitions):
+    def _identify_decision_point_places(self, place_outgoing_transitions: Dict[Any, List[Any]]) -> Set[Any]:
+        """Identify places that represent decision points (multiple outputs)."""
         decision_point_places = set()
         for place, transitions in place_outgoing_transitions.items():
             if len(transitions) > 1:
                 decision_point_places.add(place)
         return decision_point_places
 
-    def _extract_parallel_patterns(self, transition_outgoing_places, place_outgoing_transitions, decision_point_places):
+    def _extract_parallel_patterns(
+        self, 
+        transition_outgoing_places: Dict[Any, List[Any]], 
+        place_outgoing_transitions: Dict[Any, List[Any]], 
+        decision_point_places: Set[Any]
+    ) -> Dict[str, List[str]]:
+        """Extract parallel execution patterns from the Petri net structure."""
         parallels = {}
         for transition, places in transition_outgoing_places.items():
             if len(places) >= 2:
@@ -325,7 +441,12 @@ class Parser:
         
         return parallels
 
-    def _get_subsequent_transitions(self, places, place_outgoing_transitions):
+    def _get_subsequent_transitions(
+        self, 
+        places: List[Any], 
+        place_outgoing_transitions: Dict[Any, List[Any]]
+    ) -> List[Any]:
+        """Get all transitions following a list of places."""
         subsequent_transitions = []
         for place in places:
             for next_transition in place_outgoing_transitions[place]:
@@ -334,12 +455,14 @@ class Parser:
         return subsequent_transitions
     
 
-    def extract_predecessors(self):
+    def extract_predecessors(self) -> Dict[str, List[str]]:
+        """Extract a mapping of activities to their direct predecessors in the Petri net."""
         place_to_inputs = self._build_place_input_mapping()
         predecessors = self._build_predecessor_mapping(place_to_inputs)
         return {k: list(set(v)) for k, v in predecessors.items()}
 
-    def _build_place_input_mapping(self):
+    def _build_place_input_mapping(self) -> Dict[Any, List[Any]]:
+        """Build mapping from places to their input transitions."""
         place_to_inputs = defaultdict(list)
         for arc in self.edges:
             if isinstance(arc.source, pm4py.objects.petri_net.obj.PetriNet.Transition) and \
@@ -347,7 +470,7 @@ class Parser:
                 place_to_inputs[arc.target].append(arc.source)
         return place_to_inputs
 
-    def _get_activity_name_for_transition(self, transition):
+    def _get_activity_name_for_transition(self, transition: Any) -> str:
         """Get the activity name for a transition, handling silent transitions."""
         if transition.label is not None:
             return utils.sanitize_name(transition.label)
@@ -359,7 +482,7 @@ class Parser:
             # If not found, create a new tau name (shouldn't happen if _extract_basic_properties ran)
             return f"tau_unknown_{id(transition)}"
 
-    def _build_predecessor_mapping(self, place_to_inputs):
+    def _build_predecessor_mapping(self, place_to_inputs: Dict[Any, List[Any]]) -> Dict[str, List[str]]:
         """Build predecessor mapping from place-input mapping."""
         predecessors = defaultdict(list)
         for arc in self.edges:
@@ -373,7 +496,8 @@ class Parser:
         return predecessors
 
 
-    def discover_attribute_activity_relationships(self):
+    def discover_attribute_activity_relationships(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Discover how attribute values influence subsequent activities."""
         relationships = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
         for trace in self.full_log:
             for i in range(len(trace) - 1):
@@ -418,7 +542,7 @@ class Parser:
         return significant_relationships
     
 
-    def discover_activity_attribute_effects(self):
+    def discover_activity_attribute_effects(self) -> Dict[str, Dict[str, Any]]:
         """
         Discover how activities affect attribute values, including capturing actual values
         for new attribute introductions. Considers only valid transitions in the Petri net.
@@ -434,14 +558,21 @@ class Parser:
         
         return self._build_significant_effects(effects, new_value_introductions)
 
-    def _get_valid_transitions(self):
+    def _get_valid_transitions(self) -> Set[Tuple[str, str]]:
+        """Identify valid activity transitions from the Petri net structure."""
         valid_transitions = set()
         for target_activity, source_activities in self.predecessors.items():
             for source_activity in source_activities:
                 valid_transitions.add((source_activity, target_activity))
         return valid_transitions
 
-    def _collect_attribute_effects(self, effects, new_value_introductions, valid_transitions):
+    def _collect_attribute_effects(
+        self, 
+        effects: Dict[str, Dict[str, Dict[str, Dict[str, int]]]], 
+        new_value_introductions: Dict[str, Dict[str, Dict[str, int]]], 
+        valid_transitions: Set[Tuple[str, str]]
+    ) -> None:
+        """Traverse the log to collect attribute changes and introductions."""
         for trace in self.full_log:
             attributes_seen_in_trace = set()
             prev_event = None
@@ -459,7 +590,14 @@ class Parser:
                 
                 prev_event = event
 
-    def _track_new_attribute_introductions(self, event, sanitized_activity, attributes_seen_in_trace, new_value_introductions):
+    def _track_new_attribute_introductions(
+        self, 
+        event: Dict[str, Any], 
+        sanitized_activity: str, 
+        attributes_seen_in_trace: Set[str], 
+        new_value_introductions: Dict[str, Dict[str, Dict[str, int]]]
+    ) -> None:
+        """Track when a new attribute is first introduced in a trace."""
         for attr, val in event.items():
             if attr in self.IGNORED_ATTRIBUTES:
                 continue
@@ -469,7 +607,15 @@ class Parser:
                 new_value_introductions[sanitized_activity][sanitized_attr][discretized_val] += 1
                 attributes_seen_in_trace.add(sanitized_attr)
 
-    def _track_attribute_changes(self, prev_event, event, sanitized_activity, valid_transitions, effects):
+    def _track_attribute_changes(
+        self, 
+        prev_event: Dict[str, Any], 
+        event: Dict[str, Any], 
+        sanitized_activity: str, 
+        valid_transitions: Set[Tuple[str, str]], 
+        effects: Dict[str, Dict[str, Dict[str, Dict[str, int]]]]
+    ) -> None:
+        """Track changes in attribute values between subsequent events."""
         prev_activity = prev_event['concept:name']
         sanitized_prev_activity = utils.sanitize_name(prev_activity)
         
@@ -491,7 +637,12 @@ class Parser:
             curr_val_str = str(curr_val).lower() if isinstance(curr_val, bool) else str(curr_val)
             effects[sanitized_prev_activity][sanitized_attr][prev_val_str][curr_val_str] += 1
 
-    def _build_significant_effects(self, effects, new_value_introductions):
+    def _build_significant_effects(
+        self, 
+        effects: Dict[str, Dict[str, Dict[str, Dict[str, int]]]], 
+        new_value_introductions: Dict[str, Dict[str, Dict[str, int]]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Filter and structure significant attribute effects."""
         significant_effects = {}
         for activity, attributes in effects.items():
             significant_effects[activity] = {}
@@ -520,7 +671,8 @@ class Parser:
         
         return significant_effects
 
-    def _filter_significant_transitions(self, from_values):
+    def _filter_significant_transitions(self, from_values: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, Any]]:
+        """Filter attribute transitions based on probability and support count."""
         significant_from_values = {}
         
         for from_val, to_values in from_values.items():
@@ -540,7 +692,7 @@ class Parser:
         
         return significant_from_values
 
-    def _build_direct_transition_graph(self):
+    def _build_direct_transition_graph(self) -> Dict[str, List[str]]:
         """
         Build a direct transition graph by removing places and connecting transitions directly.
         Silent transitions are included as explicit nodes.
@@ -568,7 +720,8 @@ class Parser:
         return dict(graph)
 
 
-    def _get_place_incoming_transitions(self):
+    def _get_place_incoming_transitions(self) -> Dict[Any, List[Any]]:
+        """Get mapping of places to their incoming transitions."""
         place_incoming_transitions = defaultdict(list)
         for arc in self.edges:
             if isinstance(arc.target, pm4py.objects.petri_net.obj.PetriNet.Place) and \

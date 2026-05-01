@@ -3,6 +3,7 @@ from sklearn.tree import DecisionTreeClassifier, _tree
 import pm4py
 import numpy as np
 from collections import defaultdict
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import warnings
 import os
 import utils
@@ -32,7 +33,17 @@ all_categorical_cols = []
 all_bool_cols = []
 
 
-def get_base_feature(col_name):
+def get_base_feature(col_name: str) -> str:
+    """
+    Find the base feature name from a potentially encoded column name.
+    Useful for mapping one-hot encoded or discretized columns back to their original attribute.
+
+    Args:
+        col_name: The name of the column (e.g., 'attribute_value', 'attr_True').
+
+    Returns:
+        The base attribute name in lowercase.
+    """
     """Finds the base feature name."""
     col_name_lower = col_name.lower()
     if col_name_lower.endswith("_false") or col_name_lower.endswith("_true"):
@@ -49,7 +60,17 @@ def get_base_feature(col_name):
         return col_name_lower
     return col_name_lower
 
-def extract_simple_guards(tree, feature_names):
+def extract_simple_guards(tree: DecisionTreeClassifier, feature_names: List[str]) -> List[Dict[str, Any]]:
+    """
+    Extract simple logical guards (conditions) from a trained decision tree.
+
+    Args:
+        tree: The trained scikit-learn DecisionTreeClassifier.
+        feature_names: List of feature names corresponding to the tree's input.
+
+    Returns:
+        A list of dictionaries, each containing an 'activity' and its 'guard' condition string.
+    """
     tree_ = tree.tree_
     feature_name = [
         feature_names[i] if i != _tree.TREE_UNDEFINED else "undefined!"
@@ -133,7 +154,11 @@ def extract_simple_guards(tree, feature_names):
     
     return guards
 
-def load_and_prepare_log(log_path, meta_cols, log=None):
+def load_and_prepare_log(
+    log_path: str, 
+    meta_cols: List[str], 
+    log: Optional[Any] = None
+) -> Tuple[pd.DataFrame, List[str], List[str], List[str], List[str]]:
     """Loads log, auto-detects features, and prepares DataFrame.
     
     Args:
@@ -198,7 +223,17 @@ def load_and_prepare_log(log_path, meta_cols, log=None):
     df[all_feature_cols] = df.groupby('case:concept:name')[all_feature_cols].ffill()
     return df, all_feature_cols, numeric_cols, final_bool_cols, categorical_cols
 
-def find_decision_points(df, min_instances):
+def find_decision_points(df: pd.DataFrame, min_instances: int) -> List[str]:
+    """
+    Identify activities that act as decision points in the process.
+
+    Args:
+        df: Prepared DataFrame containing 'concept:name' and 'next_activity'.
+        min_instances: Minimum frequency for an activity to be considered.
+
+    Returns:
+        List of activity names that are decision points.
+    """
     """Finds all activities with more than one unique next step."""
     if 'next_activity' not in df.columns or 'concept:name' not in df.columns:
         return []
@@ -213,7 +248,16 @@ def find_decision_points(df, min_instances):
     print(f"    {final_decision_points}\n")
     return final_decision_points
 
-def run_analysis_for_decision_point(df, decision_point, all_features, booleans, categoricals, config, global_top_features=None, skip_final_training=False):
+def run_analysis_for_decision_point(
+    df: pd.DataFrame, 
+    decision_point: str, 
+    all_features: List[str], 
+    booleans: List[str], 
+    categoricals: List[str], 
+    config: Dict[str, Any], 
+    global_top_features: Optional[List[str]] = None, 
+    skip_final_training: bool = False
+) -> Tuple[Optional[Dict[str, List[str]]], Dict[str, Set[str]], List[Tuple[str, float]]]:
     """
     Analyzes a single decision point and extracts decision rules.
     
@@ -325,7 +369,11 @@ def run_analysis_for_decision_point(df, decision_point, all_features, booleans, 
         grouped_guards[g['activity']].append(g['guard'])
     return grouped_guards, value_types, sorted_features
 
-def discover_all_decision_rules(log_path, config_overrides={}, log=None):
+def discover_all_decision_rules(
+    log_path: str, 
+    config_overrides: Dict[str, Any] = {}, 
+    log: Optional[Any] = None
+) -> Tuple[Dict[str, Dict[str, List[str]]], Dict[str, List[float]], List[Dict[str, Any]]]:
     """
     Main entry point. Loads a log, runs mining on all decision points,
     and returns a dictionary of all rules and consolidated intervals.
@@ -460,7 +508,7 @@ def discover_all_decision_rules(log_path, config_overrides={}, log=None):
         print(f"An unexpected error occurred in decision mining: {e}")
         return {}, {}, []
 
-def _find_matching_intervals(old_value_type, thresholds):
+def _find_matching_intervals(old_value_type: str, thresholds: List[float]) -> List[str]:
     """
     Find which consolidated intervals match the semantics of an old value type.
     
@@ -534,7 +582,10 @@ def _find_matching_intervals(old_value_type, thresholds):
     
     return matching if matching else [old_value_type]
 
-def _remap_samples_to_consolidated_intervals(samples, value_type_mappings):
+def _remap_samples_to_consolidated_intervals(
+    samples: List[Dict[str, Any]], 
+    value_type_mappings: Dict[str, Dict[str, List[str]]]
+) -> List[Dict[str, Any]]:
     """
     Remap guards in samples to use consolidated non-overlapping intervals.
     If a guard maps to multiple intervals, create duplicate samples for each.
@@ -600,7 +651,10 @@ def _remap_samples_to_consolidated_intervals(samples, value_type_mappings):
     
     return remapped_samples
 
-def get_attribute_domains(samples, intervals=None):
+def get_attribute_domains(
+    samples: List[Dict[str, Any]], 
+    intervals: Optional[Dict[str, List[float]]] = None
+) -> Dict[str, Set[Union[str, bool]]]:
     """
     Get for each attribute in the preconditions the set of possible values.
     

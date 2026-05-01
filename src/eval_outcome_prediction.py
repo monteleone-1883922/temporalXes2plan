@@ -2,6 +2,7 @@ from datetime import datetime
 import os
 import time
 import csv
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
 from jellyfish._jellyfish import damerau_levenshtein_distance
 
@@ -10,7 +11,13 @@ from xes_parser import Parser
 from pddl_encoder import Encoder
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments for the outcome prediction evaluation.
+
+    Returns:
+        The parsed arguments as a Namespace object.
+    """
     parser = utils.create_base_argument_parser(
         "Run the evaluation of the framework for XES encoding in PDDL for numerical outcome prediction."
     )
@@ -19,7 +26,17 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def create_possible_goal_conditions(parser, target_attr):
+def create_possible_goal_conditions(parser: Parser, target_attr: str) -> List[Tuple[List[str], str]]:
+    """
+    Create goal conditions for all possible discretized values of the target attribute.
+
+    Args:
+        parser: The XES parser containing attribute data and intervals.
+        target_attr: The name of the numerical attribute to predict.
+
+    Returns:
+        A list of tuples, each containing (PDDL goal condition list, discretized value label).
+    """
     """Create goal conditions for all possible discretized values of the target attribute."""
     goals = []
     
@@ -45,13 +62,35 @@ def create_possible_goal_conditions(parser, target_attr):
     return goals
 
 
-def get_actual_discretized_value(parser, target_attr, actual_value):
+def get_actual_discretized_value(parser: Parser, target_attr: str, actual_value: float) -> Optional[str]:
+    """
+    Get the discretized string representation of a raw numerical value.
+
+    Args:
+        parser: The XES parser containing discretization intervals.
+        target_attr: The attribute name.
+        actual_value: The raw numerical value.
+
+    Returns:
+        The discretized label (e.g., 'low', 'medium', 'high') or None if not available.
+    """
     if hasattr(parser, 'intervals') and target_attr in parser.intervals:
         return utils.discretize_value(target_attr, actual_value, parser.intervals)
     return None
 
 
-def discretized_to_numerical_estimate(parser, target_attr, discretized_value):
+def discretized_to_numerical_estimate(parser: Parser, target_attr: str, discretized_value: str) -> Optional[float]:
+    """
+    Convert a discretized label back to a numerical estimate (e.g., center of interval).
+
+    Args:
+        parser: The XES parser containing discretization intervals.
+        target_attr: The attribute name.
+        discretized_value: The discretized label string.
+
+    Returns:
+        A numerical estimate (float) or None if not applicable.
+    """
     if not discretized_value or not hasattr(parser, 'intervals') or target_attr not in parser.intervals:
         return None
     

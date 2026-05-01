@@ -1,6 +1,7 @@
 import os
 import time
 import csv
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
 from datetime import datetime
 from xes_parser import Parser
@@ -8,12 +9,28 @@ from pddl_encoder import Encoder
 import utils
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments for the planning evaluation.
+
+    Returns:
+        The parsed arguments as a Namespace object.
+    """
     parser = utils.create_base_argument_parser("Evaluate PDDL planner predictions quality")
     return parser.parse_args()
 
 
-def evaluate_minimality(predicted_suffix, ground_truth_suffix):
+def evaluate_minimality(predicted_suffix: List[str], ground_truth_suffix: List[str]) -> Dict[str, Any]:
+    """
+    Evaluate the minimality of a predicted suffix compared to the ground truth.
+
+    Args:
+        predicted_suffix: The sequence of activities predicted by the planner.
+        ground_truth_suffix: The actual remaining sequence of activities from the log.
+
+    Returns:
+        A dictionary containing length metrics and a boolean indicating if it's minimal.
+    """
     """Evaluate minimality of predicted suffix compared to ground truth."""
     pred_len = len(predicted_suffix)
     gt_len = len(ground_truth_suffix)
@@ -34,7 +51,8 @@ def evaluate_minimality(predicted_suffix, ground_truth_suffix):
     }
 
 
-def main():
+def main() -> None:
+    """Main entry point for the planning quality evaluation script."""
     print("Initialization of quality evaluation for PDDL planner predictions...")
     args = parse_arguments()
     pddl_name = args.xes_name.split('.')[0]

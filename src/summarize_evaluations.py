@@ -13,12 +13,22 @@ import csv
 from pathlib import Path
 from collections import defaultdict
 import argparse
+from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 
-def parse_plan_quality_metrics(filepath):
+def parse_plan_quality_metrics(filepath: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Parse plan quality metrics from a text file.
+
+    Args:
+        filepath: Path to the .txt file containing plan quality metrics.
+
+    Returns:
+        A dictionary of parsed metrics.
+    """
     """Parse plan quality metrics from txt file."""
     metrics = {}
     
@@ -78,7 +88,16 @@ def parse_plan_quality_metrics(filepath):
     return metrics
 
 
-def parse_plan_quality_prefix_metrics(content):
+def parse_plan_quality_prefix_metrics(content: str) -> Dict[int, Dict[str, Any]]:
+    """
+    Parse per-prefix length metrics from the content of a plan quality text file.
+
+    Args:
+        content: The string content of the metrics file.
+
+    Returns:
+        A dictionary mapping prefix lengths to their respective metrics.
+    """
     """Parse per-prefix length metrics from plan quality txt file content."""
     prefix_metrics = {}
     
@@ -99,7 +118,16 @@ def parse_plan_quality_prefix_metrics(content):
     return prefix_metrics
 
 
-def parse_suffix_prediction_metrics(filepath):
+def parse_suffix_prediction_metrics(filepath: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Parse suffix prediction metrics from a text file.
+
+    Args:
+        filepath: Path to the .txt file containing suffix prediction metrics.
+
+    Returns:
+        A dictionary of parsed metrics.
+    """
     """Parse suffix prediction metrics from txt file."""
     metrics = {}
     
@@ -151,7 +179,16 @@ def parse_suffix_prediction_metrics(filepath):
     return metrics
 
 
-def parse_outcome_prediction_metrics(filepath):
+def parse_outcome_prediction_metrics(filepath: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Parse outcome prediction metrics from a text file.
+
+    Args:
+        filepath: Path to the .txt file containing outcome prediction metrics.
+
+    Returns:
+        A dictionary of parsed metrics.
+    """
     """Parse outcome prediction metrics from txt file."""
     metrics = {}
     
@@ -280,7 +317,14 @@ def parse_outcome_prediction_metrics(filepath):
     return metrics
 
 
-def summarize_plan_quality(eval_dir, output_path):
+def summarize_plan_quality(eval_dir: Union[str, Path], output_path: Union[str, Path]) -> None:
+    """
+    Aggregate plan quality metrics into a single CSV summary.
+
+    Args:
+        eval_dir: Directory containing individual metrics files.
+        output_path: Path to the output summary CSV.
+    """
     """Create summary CSV for plan quality evaluations."""
     eval_dir = Path(eval_dir)
     metrics_files = sorted(eval_dir.glob('plan_quality_metrics_*.txt'))
@@ -324,7 +368,14 @@ def summarize_plan_quality(eval_dir, output_path):
     print(f"  - {len(all_metrics)} evaluations summarized")
 
 
-def summarize_suffix_prediction(eval_dir, output_path):
+def summarize_suffix_prediction(eval_dir: Union[str, Path], output_path: Union[str, Path]) -> None:
+    """
+    Aggregate suffix prediction metrics into a single CSV summary.
+
+    Args:
+        eval_dir: Directory containing individual metrics files.
+        output_path: Path to the output summary CSV.
+    """
     """Create summary CSV for suffix prediction evaluations."""
     eval_dir = Path(eval_dir)
     metrics_files = sorted(eval_dir.glob('suffix_prediction_metrics_*.txt'))
@@ -366,7 +417,14 @@ def summarize_suffix_prediction(eval_dir, output_path):
     print(f"  - {len(all_metrics)} evaluations summarized")
 
 
-def summarize_outcome_prediction(eval_dir, output_path):
+def summarize_outcome_prediction(eval_dir: Union[str, Path], output_path: Union[str, Path]) -> None:
+    """
+    Aggregate outcome prediction metrics into a single CSV summary.
+
+    Args:
+        eval_dir: Directory containing individual metrics files.
+        output_path: Path to the output summary CSV.
+    """
     """Create summary CSV for outcome prediction evaluations."""
     eval_dir = Path(eval_dir)
     metrics_files = sorted(eval_dir.glob('outcome_prediction_metrics_*.txt'))
@@ -412,7 +470,19 @@ def summarize_outcome_prediction(eval_dir, output_path):
     print(f"  - {len(all_metrics)} evaluations summarized")
 
 
-def generate_plan_quality_fd_time_chart(eval_dir, output_path, figures_dir=None):
+def generate_plan_quality_fd_time_chart(
+    eval_dir: Union[str, Path], 
+    output_path: Union[str, Path], 
+    figures_dir: Optional[Union[str, Path]] = None
+) -> None:
+    """
+    Generate a line chart showing prediction time by prefix length.
+
+    Args:
+        eval_dir: Directory containing metrics files.
+        output_path: Reference path (used to derive default figures directory).
+        figures_dir: Optional custom directory to save the chart.
+    """
     """
     Generate a line chart showing Avg FD Total Time across prefix lengths 
     for astar_blind search algorithm and inductive discovery algorithm
@@ -505,7 +575,8 @@ def generate_plan_quality_fd_time_chart(eval_dir, output_path, figures_dir=None)
     print(f"  - {len(dataset_prefix_data)} datasets plotted")
 
 
-def main():
+def main() -> None:
+    """Main entry point for the evaluation summarization script."""
     parser = argparse.ArgumentParser(
         description='Summarize evaluation metrics from txt files into CSV summaries.'
     )
