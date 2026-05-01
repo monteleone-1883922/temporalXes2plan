@@ -1,0 +1,1 @@
+./release/optic/optic-clp $@
