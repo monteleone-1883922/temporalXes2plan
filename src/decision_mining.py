@@ -6,7 +6,11 @@ from collections import defaultdict
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import warnings
 import os
+import logging
+from tqdm import tqdm
 import utils
+
+logger = utils.get_logger(__name__)
 
 
 DEFAULT_CONFIG = {
@@ -44,7 +48,6 @@ def get_base_feature(col_name: str) -> str:
     Returns:
         The base attribute name in lowercase.
     """
-    """Finds the base feature name."""
     col_name_lower = col_name.lower()
     if col_name_lower.endswith("_false") or col_name_lower.endswith("_true"):
         base = col_name.rsplit('_', 1)[0]
@@ -56,6 +59,8 @@ def get_base_feature(col_name: str) -> str:
             base = "_".join(parts[:-i])
             if base.lower() in all_categorical_cols:
                 return base.lower()
+    
+    logger.debug(f"Could not resolve base feature for column: {col_name}, defaulting to lowercase name")
     return col_name_lower
 
 def extract_simple_guards(tree: DecisionTreeClassifier, feature_names: List[str]) -> List[Dict[str, Any]]:
@@ -185,10 +190,10 @@ def load_and_prepare_log(
         log: Optional pre-loaded pm4py log object (already transformed with Activity classifier if needed)
     """
     if log is None:
-        print(f"  > Loading log: {log_path}")
+        logger.info(f"Loading log: {log_path}")
         log = pm4py.objects.log.importer.xes.importer.apply(log_path)
     else:
-        print(f"  > Using pre-loaded log")
+        logger.info(f"Using pre-loaded log")
     df = pm4py.convert_to_dataframe(log)
 
     #add column next activity for every activity
@@ -220,7 +225,7 @@ def load_and_prepare_log(
         # Ignore columns with always same value
         elif len(unique_vals_no_na) < 2 and col in all_feature_cols:
             all_feature_cols.remove(col)
-            print(f"  > Ignoring column with single value: {col}")
+            logger.info(f"Ignoring column with single value: {col}")
 
              
     # Try to convert object columns that are numeric to numeric
@@ -229,6 +234,9 @@ def load_and_prepare_log(
             try:
                 temp = pd.to_numeric(df[col], errors='coerce')
                 if temp.notna().sum() > 0 and temp.dtype in [np.int64, np.float64]:
+                    nan_count = temp.isna().sum()
+                    if nan_count > len(temp) * 0.5:
+                        logger.warning(f"Conversion of column {col} to numeric resulted in {nan_count}/{len(temp)} NaNs. Data might be noisy.")
                     df[col] = temp
                     numeric_cols.add(col)
                     object_cols.remove(col)
@@ -237,11 +245,13 @@ def load_and_prepare_log(
              
     categorical_cols = [c for c in all_feature_cols if c not in numeric_cols and c not in final_bool_cols]
 
-    print(f"\n  Auto-detected features:")
-    print(f"    Numeric: {numeric_cols}")
-    print(f"    Boolean: {final_bool_cols}")
-    print(f"    Categorical: {categorical_cols}\n")
+    logger.info(f"Auto-detected features: Numeric: {len(numeric_cols)}, Boolean: {len(final_bool_cols)}, Categorical: {len(categorical_cols)}")
+    logger.debug(f"Numeric: {numeric_cols}")
+    logger.debug(f"Boolean: {final_bool_cols}")
+    logger.debug(f"Categorical: {categorical_cols}")
     all_feature_cols = list(all_feature_cols)
+    if not all_feature_cols:
+        logger.warning(f"No features detected in log {log_path} after filtering.")
     df[all_feature_cols] = df.groupby('case:concept:name')[all_feature_cols].ffill()
     return df, all_feature_cols, list(numeric_cols), list(final_bool_cols), list(categorical_cols)
 
@@ -266,8 +276,7 @@ def find_decision_points(df: pd.DataFrame, min_instances: int) -> List[str]:
         p for p in potential_decision_points 
         if instance_counts.get(p, 0) >= min_instances
     ]
-    print(f"  Found {len(final_decision_points)} potential decision points (>{min_instances} instances):")
-    print(f"    {final_decision_points}\n")
+    logger.info(f"Found {len(final_decision_points)} potential decision points (>{min_instances} instances): {final_decision_points}")
     return final_decision_points
 
 def run_analysis_for_decision_point(
@@ -297,19 +306,15 @@ def run_analysis_for_decision_point(
     df_decision = df_decision[~df_decision['next_activity'].isin(all_noise)]
     
     if len(df_decision) < config['min_instances']:
-        print(f"  Skipping: Not enough valid instances after filtering (found {len(df_decision)}).")
+        logger.warning(f"  Skipping {decision_point}: Not enough valid instances after filtering (found {len(df_decision)}).")
         return None, {}, []
     outcomes = df_decision['next_activity'].nunique()
     if outcomes < 2:
-        print(f"  Skipping: Only one outcome ({df_decision['next_activity'].unique()}) after filtering.")
+        logger.warning(f"  Skipping {decision_point}: Only one outcome ({df_decision['next_activity'].unique()}) after filtering.")
         return None, {}, []
         
-    print(f"  Analyzing {len(df_decision)} instances with {outcomes} unique outcomes.")
-    print("  Outcome distribution:\n", 
-          df_decision['next_activity'].value_counts(normalize=True).head(5))
-
+    logger.info(f"Analyzing {decision_point}: {len(df_decision)} instances, {outcomes} unique outcomes, min_samples_leaf: {config['min_samples_leaf']}")
     dynamic_min_samples = config['min_samples_leaf']
-    print(f"  Using min_samples_leaf: {dynamic_min_samples}")
 
     X = df_decision[all_features]
     y = df_decision['next_activity'].astype(str)
@@ -336,6 +341,10 @@ def run_analysis_for_decision_point(
     for name, imp in feature_importance_dict.items():
         base = get_base_feature(name)
         base_importance[base] += imp
+    
+    if importances.sum() == 0:
+        logger.warning(f"Decision point {decision_point} result in 0 feature importance for all features.")
+    
     sorted_features = sorted(base_importance.items(), key=lambda x: x[1], reverse=True)
     
     if skip_final_training:
@@ -345,15 +354,15 @@ def run_analysis_for_decision_point(
         available_features = list(set(get_base_feature(f) for f in encoded_feature_names))
         if global_top_features is not None:
             top_features = [f for f in global_top_features if f in available_features]
-            print(f"  Selecting top {len(top_features)} features from global: {top_features}")
+            logger.info(f"  Selecting top {len(top_features)} features from global: {top_features}")
         else:
             num_available = len(available_features)
             if config['top_features'] > num_available:
-                print(f"  Warning: Requested {config['top_features']} top features, but only {num_available} available. Using all.")
+                logger.warning(f"  Requested {config['top_features']} top features, but only {num_available} available. Using all.")
                 top_features = available_features
             else:
                 top_features = [f[0] for f in sorted_features[:config['top_features']]]
-            print(f"  Selecting top {len(top_features)} features: {top_features}")
+            logger.info(f"  Selecting top {len(top_features)} features: {top_features}")
         
         X_filtered = X_encoded[[col for col in encoded_feature_names if get_base_feature(col) in top_features]]
         
@@ -368,6 +377,8 @@ def run_analysis_for_decision_point(
         encoded_feature_names = list(X_filtered.columns)
     
     guards = extract_simple_guards(clf, encoded_feature_names)
+    if not guards:
+        logger.debug(f"No guards extracted for decision point {decision_point} (tree might be root only).")
 
     grouped_guards = defaultdict(list)
     
@@ -437,16 +448,14 @@ def discover_all_decision_rules(
 
         decision_points = find_decision_points(df, config['min_instances'])        
         if not decision_points:
-            print("  No decision points found meeting the criteria.")
+            logger.warning("No decision points found meeting the criteria.")
             return {}, {}, []
 
         # First pass: collect feature importances globally
         global_feature_importance = defaultdict(float)
-        for i, point in enumerate(decision_points):
-            print("\n" + "="*70)
+        for i, point in enumerate(tqdm(decision_points, desc="Decision Mining (Pass 1: Feature Importance)")):
             formatted_point = utils.sanitize_name(point)
-            print(f"ANALYZING DECISION POINT {i+1}/{len(decision_points)}: 'exec_{formatted_point}' (collecting features)")
-            print("="*70)
+            logger.info(f"ANALYZING DECISION POINT {i+1}/{len(decision_points)}: 'exec_{formatted_point}' (collecting features)")
             
             _, _, sorted_features = run_analysis_for_decision_point(
                 df, point, 
@@ -460,16 +469,14 @@ def discover_all_decision_rules(
         # Select global top features
         global_top_features_sorted = sorted(global_feature_importance.items(), key=lambda x: x[1], reverse=True)
         global_top_features = [f for f, s in global_top_features_sorted[:config['top_features']]]
-        print(f"\nGlobal top {len(global_top_features)} features selected: {global_top_features}")
+        logger.info(f"Global top {len(global_top_features)} features selected: {global_top_features}")
 
         # Second pass: train with global top features
         all_decision_rules = {} 
         all_value_types = defaultdict(set)
-        for i, point in enumerate(decision_points):
-            print("\n" + "="*70)
+        for i, point in enumerate(tqdm(decision_points, desc="Decision Mining (Pass 2: Training)")):
             formatted_point = utils.sanitize_name(point)
-            print(f"ANALYZING DECISION POINT {i+1}/{len(decision_points)}: 'exec_{formatted_point}'")
-            print("="*70)
+            logger.info(f"ANALYZING DECISION POINT {i+1}/{len(decision_points)}: 'exec_{formatted_point}'")
             
             rules_for_point, value_types_for_point, _ = run_analysis_for_decision_point(
                 df, point, 
@@ -491,9 +498,7 @@ def discover_all_decision_rules(
                         preconditions = set(conditions) | {f"(completed {current_formatted})"}
                         samples.append({'activity': formatted_activity, 'preconditions': preconditions})
             
-        print("\n" + "="*70)
-        print("Decision mining complete.")
-        print("="*70)
+        logger.info("Decision mining complete.")
         
         # Convert value types to split points for non-overlapping interval generation
         all_intervals = defaultdict(list)
@@ -571,10 +576,10 @@ def discover_all_decision_rules(
         return all_decision_rules, all_intervals, remapped_samples
 
     except FileNotFoundError:
-        print(f"Error: Log file not found at '{log_path}'")
+        logger.error(f"Log file not found at '{log_path}'")
         return {}, {}, []
     except Exception as e:
-        print(f"An unexpected error occurred in decision mining: {e}")
+        logger.error(f"An unexpected error occurred in decision mining: {e}")
         return {}, {}, []
 
 def _find_matching_intervals(old_value_type: str, thresholds: List[float], thresholds_sort: bool = False) -> List[str]:
@@ -601,8 +606,10 @@ def _find_matching_intervals(old_value_type: str, thresholds: List[float], thres
         if len(parts) >= 2:
             threshold_val = float(f"{parts[0]}.{parts[1]}")
         else:
+            logger.warning(f"Could not extract threshold value from type: {old_value_type}")
             return [old_value_type]
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
+        logger.warning(f"Error parsing threshold from {old_value_type}: {e}")
         return [old_value_type]
 
     upper_threshold_val = None
@@ -630,6 +637,7 @@ def _find_matching_intervals(old_value_type: str, thresholds: List[float], thres
                     matching.append(interval_name)
             #  Fixme: add logs, this should never happen
             elif not is_upper_bound and not is_lower_bound:
+                logger.warning(f"Value type {old_value_type} has neither gte nor lte. This should not happen.")
                 matching.append(interval_name)
         
         # Middle intervals: gte_X_lte_Y
@@ -674,7 +682,7 @@ def _remap_samples_to_consolidated_intervals(
     """
     remapped_samples = []
     
-    for sample in samples:
+    for sample in tqdm(samples, desc="Remapping samples to consolidated intervals"):
         activity = sample['activity']
         preconditions = sample['preconditions']
         
@@ -720,6 +728,7 @@ def _remap_samples_to_consolidated_intervals(
             # This is a simplification - full expansion would create all combinations
 
             for attr, new_thresholds_precond in attr_alternatives.items():
+                logger.debug(f"Sample for activity {activity} duplicated into {len(new_thresholds_precond)} variants due to overlapping interval {attr}")
                 for alt_value in new_thresholds_precond:
                     new_preconditions = set(fixed_preconditions)
                     new_preconditions.add(f'({attr} {alt_value})')

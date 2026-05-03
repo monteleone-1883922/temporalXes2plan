@@ -55,6 +55,18 @@ class Encoder:
         goal: Optional[List[str]] = None, 
         minimal_preconditions: bool = False
     ) -> None:
+        """
+        Initialize the Encoder with process data and generation settings.
+        
+        Args:
+            parser: XES parser instance containing discovered process properties.
+            domain_name: Name to assign to the generated PDDL domain.
+            min_confidence: Threshold for including uncertain attribute relationships.
+            init: Custom PDDL predicates to include in the initial state.
+            goal: Custom PDDL predicates to include in the goal condition.
+            minimal_preconditions: If True, generate lightweight preconditions suitable 
+                                   for suffix planning (ignoring structural history).
+        """
         self.parser = parser
         self.domain_name = domain_name
         self.init = init
@@ -478,6 +490,15 @@ class Encoder:
                 seen_effects.add(set_effect)
 
     def _get_possible_attribute_values(self, attr: str) -> Optional[Set[str]]:
+        """
+        Get the set of possible values for a given attribute from the parser's domains.
+        
+        Args:
+            attr: The name of the attribute.
+            
+        Returns:
+            A set of possible values (sanitized), or None if the attribute is unknown.
+        """
         decision_values = self.parser.attribute_domains.get(attr, set())
         if decision_values:
             if attr in self._value_mappings:
@@ -726,6 +747,16 @@ class Encoder:
 
 
     def _get_decision_point_for_activity(self, action_name: str) -> Optional[Dict[str, float]]:
+        """
+        Retrieve the branch probabilities for an activity if it follows a decision point.
+        
+        Args:
+            action_name: The name of the activity.
+            
+        Returns:
+            A dictionary mapping sibling activities to their branch probabilities, 
+            or None if not a decision point successor.
+        """
         if action_name in self.processed_decision_points:
             return self.processed_decision_points[action_name]
         return None
@@ -798,7 +829,18 @@ class Encoder:
 
 
     def _generate_pddl_action_definition(self, action_name: str) -> str:
-        """Generate PDDL action definition for a specific activity."""
+        """
+        Generate the full PDDL action definition for a given activity.
+        
+        This handles parameters, preconditions (structural and data-driven), 
+        and effects (completion, enabling successors, and attribute updates).
+        
+        Args:
+            action_name: The name of the activity to encode.
+            
+        Returns:
+            A string containing the PDDL ':action' definition.
+        """
         # First check for measurement variants (separate actions per outcome)
         measurement_variants = self._generate_measurement_action_variants(action_name)
         if measurement_variants:

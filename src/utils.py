@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import subprocess
+import logging
 
 from argparse import ArgumentParser
 from collections import defaultdict
@@ -9,7 +10,20 @@ from datetime import datetime
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import pandas as pd
 import pm4py
-import re
+
+def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
+    """
+    Get a configured logger with the specified name and level.
+    """
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(level)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
+
 
 
 def create_base_argument_parser(description: str = "Run evaluation framework") -> ArgumentParser:
@@ -473,6 +487,13 @@ def compute_enabled_activities_after_last_activity(parser: Any, last_activity: s
     This function returns only the direct successors for the given activity,
     expanding variants/measurements as needed to include all possible successors
     that could be enabled by any possible variant of the last activity.
+
+    Args:
+        parser: XES parser instance containing process model data.
+        last_activity: The name of the activity that was just executed.
+
+    Returns:
+        A set of activity names (sanitized) that are enabled after the given activity.
     """
     enabled = set()
     if not last_activity:
@@ -568,9 +589,18 @@ def compute_enabled_activities_after_last_activity(parser: Any, last_activity: s
 def compute_reachable_activities_from_last_activity(parser: Any, last_activity: str, max_depth: int = 10) -> Set[str]:
     """
     Compute activities reachable from the last activity following direct transitions
-    (graph-based) up to max_depth hops. If a Petri net is available, fallback to
-    computing reachability via direct_transition_graph to avoid expensive replay.
-    Returns a set of activity names.
+    (graph-based) up to max_depth hops. 
+    
+    If a Petri net is available, fallback to computing reachability via 
+    direct_transition_graph to avoid expensive replay.
+
+    Args:
+        parser: XES parser instance containing the direct transition graph.
+        last_activity: The starting activity for reachability analysis.
+        max_depth: Maximum number of hops to explore in the graph.
+
+    Returns:
+        A set of reachable activity names.
     """
     reachable = set()
     if not last_activity:
@@ -682,6 +712,16 @@ def compute_initial_state_from_last_activity(
     Create an initial state that contains completed predicates for the given prefix
     and enables only those activities that are immediate successors of the last
     activity in the prefix (and its variants).
+
+    Args:
+        parser: XES parser instance.
+        prefix: List of activities already completed in the current trace.
+        trace_events: Optional full list of event dictionaries for the trace.
+        prefix_length: Length of the prefix (unused).
+        include_target_attr: Optional target attribute for measurement-based initialization.
+
+    Returns:
+        List of PDDL initial state predicates.
     """
     if not prefix:
         init_predicates = []

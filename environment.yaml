@@ -14,3 +14,4 @@ dependencies:
     - pandas==2.3.2
     - pm4py==2.7.17
     - scikit-learn==1.7.2
+    - tqdm
