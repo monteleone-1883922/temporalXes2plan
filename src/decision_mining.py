@@ -29,8 +29,8 @@ META_COLUMNS_IGNORED = [
 ]
 
 OPTIONAL_DATA_ACTIVITIES_TO_IGNORE = []
-all_categorical_cols = []
-all_bool_cols = []
+all_categorical_cols = set()
+all_bool_cols = set()
 
 
 def get_base_feature(col_name: str) -> str:
@@ -56,8 +56,6 @@ def get_base_feature(col_name: str) -> str:
             base = "_".join(parts[:-i])
             if base.lower() in all_categorical_cols:
                 return base.lower()
-    if col_name_lower in all_bool_cols:
-        return col_name_lower
     return col_name_lower
 
 def extract_simple_guards(tree: DecisionTreeClassifier, feature_names: List[str]) -> List[Dict[str, Any]]:
@@ -78,6 +76,22 @@ def extract_simple_guards(tree: DecisionTreeClassifier, feature_names: List[str]
     ]
     paths = []
 
+    # function to recursively read conditions of decision tree for each activity
+    # Example tree:
+
+    #       amount <= 500?
+    #       /           \
+#   priority > 3?    "Reject"
+#    /        \
+# "Approve"  "Review"
+#
+# would yield:
+#     [
+#         ("Approve", [("amount", "<=", 500), ("priority", ">", 3)]),
+#         ("Review", [("amount", "<=", 500), ("priority", "<=", 3)]),
+#         ("Reject", [("amount", ">", 500)])
+#     ]
+
     def recurse(node, conditions):
         """Recursively walks the tree, building conditions with thresholds."""
         if tree_.feature[node] != _tree.TREE_UNDEFINED:
@@ -92,11 +106,17 @@ def extract_simple_guards(tree: DecisionTreeClassifier, feature_names: List[str]
             paths.append((activity_name, conditions))
 
     recurse(0, [])
-    
+    # Example of guards content:
+    # {
+    #     'activity': 'Approve',
+    #     'guard': '(amount lte_500) and (priority gte_3) and (urgent)'
+    # }
     guards = []
     for activity, conds in paths:
+
         guard_conditions = []
         numeric_conds = []
+        numeric_per_base = defaultdict(list)
         for name, op, thresh in conds:
             base = get_base_feature(name)
             sanitized_base = utils.sanitize_name(base)
@@ -106,8 +126,9 @@ def extract_simple_guards(tree: DecisionTreeClassifier, feature_names: List[str]
                 guard_conditions.append(f"(not ({sanitized_base}))")
             elif base in all_categorical_cols:
                 value = name[len(sanitized_base) + 1:]
-                guard_conditions.append(f"({sanitized_base} e{value})")
+                guard_conditions.append(f"({sanitized_base} e{value})") #TODO use = instead?
             else:
+                # for bool converted to integers 0/1
                 if base in all_bool_cols:
                     if op == "<=":
                         guard_conditions.append(f"(not ({sanitized_base}))")
@@ -117,12 +138,9 @@ def extract_simple_guards(tree: DecisionTreeClassifier, feature_names: List[str]
                         guard_conditions.append(f"({sanitized_base})")  # fallback
                 else:
                     numeric_conds.append((sanitized_base, op, thresh))
+                    numeric_per_base[base].append((op, thresh))
         
         # Process numeric conditions into intervals
-        numeric_per_base = defaultdict(list)
-        for base, op, thresh in numeric_conds:
-            numeric_per_base[base].append((op, thresh))
-        
         for base, cond_list in numeric_per_base.items():
             lower = float('-inf')
             upper = float('inf')
@@ -173,34 +191,37 @@ def load_and_prepare_log(
         print(f"  > Using pre-loaded log")
     df = pm4py.convert_to_dataframe(log)
 
+    #add column next activity for every activity
     df['next_activity'] = df.groupby('case:concept:name')['concept:name'].shift(-1)
     all_cols = set(df.columns)
-    meta_cols_present = set(meta_cols) | {'next_activity'}
-    all_feature_cols = list(all_cols - meta_cols_present)
+    meta_cols_present = set(meta_cols) | {'next_activity', 'Activity', 'concept:name'}
     
     # Also filter out activity names which shouldn't be used for decision mining
-    all_feature_cols = [col for col in all_feature_cols 
-                       if not col.startswith('case:variant') and col not in ['Activity', 'concept:name']]
-    
-    numeric_cols = list(df[all_feature_cols].select_dtypes(include=np.number).columns)
+    all_feature_cols = [col for col in all_cols
+                       if not col.startswith('case:variant') and col not in meta_cols_present]
+    # obtain columns by datatype
+    numeric_cols = set(df[all_feature_cols].select_dtypes(include=np.number).columns)
     bool_cols = list(df[all_feature_cols].select_dtypes(include='bool').columns)
-    object_cols = list(df[all_feature_cols].select_dtypes(include='object').columns)
-    final_bool_cols = list(bool_cols) 
-    
+    object_cols = set(df[all_feature_cols].select_dtypes(include='object').columns)
+
+    all_feature_cols = set(all_feature_cols)
+
+    for col in bool_cols:
+        if col in df.columns and col in all_feature_cols:
+            df[col] = df[col].map({True: 1, False: 0})
+    final_bool_cols = set(bool_cols)
+    # tries to convert to bool columns all columns with only 2 or less categorical values if they contain boolean values
     for col in object_cols:
         unique_vals_no_na = df[col].dropna().unique()
         if len(unique_vals_no_na) <= 2 and all(str(v).lower() in ['true', 'false', '1', '0'] for v in unique_vals_no_na):
             df[col] = df[col].map({'True': 1, 'False': 0, True: 1, False: 0, 
                                    '1': 1, '0': 0, 1: 1, 0: 0})
-            final_bool_cols.append(col)
+            final_bool_cols.add(col)
+        # Ignore columns with always same value
         elif len(unique_vals_no_na) < 2 and col in all_feature_cols:
             all_feature_cols.remove(col)
             print(f"  > Ignoring column with single value: {col}")
-    
-    for col in final_bool_cols:
-        if col in df.columns and col in all_feature_cols:
-             df[col] = df[col].map({'True': 1, 'False': 0, True: 1, False: 0, 
-                                   '1': 1, '0': 0, 1: 1, 0: 0})
+
              
     # Try to convert object columns that are numeric to numeric
     for col in list(object_cols):
@@ -209,10 +230,10 @@ def load_and_prepare_log(
                 temp = pd.to_numeric(df[col], errors='coerce')
                 if temp.notna().sum() > 0 and temp.dtype in [np.int64, np.float64]:
                     df[col] = temp
-                    numeric_cols.append(col)
+                    numeric_cols.add(col)
                     object_cols.remove(col)
             except:
-                pass
+                continue
              
     categorical_cols = [c for c in all_feature_cols if c not in numeric_cols and c not in final_bool_cols]
 
@@ -220,8 +241,9 @@ def load_and_prepare_log(
     print(f"    Numeric: {numeric_cols}")
     print(f"    Boolean: {final_bool_cols}")
     print(f"    Categorical: {categorical_cols}\n")
+    all_feature_cols = list(all_feature_cols)
     df[all_feature_cols] = df.groupby('case:concept:name')[all_feature_cols].ffill()
-    return df, all_feature_cols, numeric_cols, final_bool_cols, categorical_cols
+    return df, all_feature_cols, list(numeric_cols), list(final_bool_cols), list(categorical_cols)
 
 def find_decision_points(df: pd.DataFrame, min_instances: int) -> List[str]:
     """
@@ -267,7 +289,9 @@ def run_analysis_for_decision_point(
         sorted_features: List of (feature, importance) tuples sorted by importance
     """
     df_decision = df[df["concept:name"] == decision_point].copy()
+    # Remove final activities
     df_decision = df_decision.dropna(subset=['next_activity'])
+    # Remove activities considered as noise
     heuristic_noise = [c for c in all_features if c in df_decision['next_activity'].unique()]
     all_noise = set(heuristic_noise) | set(OPTIONAL_DATA_ACTIVITIES_TO_IGNORE)
     df_decision = df_decision[~df_decision['next_activity'].isin(all_noise)]
@@ -305,7 +329,7 @@ def run_analysis_for_decision_point(
         random_state=42
     )
     clf.fit(X_encoded, y)
-    
+    # Collect importance of each feature for this decision point
     importances = clf.feature_importances_
     feature_importance_dict = dict(zip(encoded_feature_names, importances))
     base_importance = defaultdict(float)
@@ -344,12 +368,16 @@ def run_analysis_for_decision_point(
         encoded_feature_names = list(X_filtered.columns)
     
     guards = extract_simple_guards(clf, encoded_feature_names)
+
+    grouped_guards = defaultdict(list)
     
     # Extract value types from guards instead of using split points
     # This ensures we only create types that are actually used in the decision rules
     value_types = defaultdict(set)
     for g in guards:
+
         guard = g['guard']
+        grouped_guards[g['activity']].append(guard)
         # Parse conditions to extract value types
         conditions = guard.split(" and ")
         for cond in conditions:
@@ -363,17 +391,14 @@ def run_analysis_for_decision_point(
                     # Only add numeric value types (not categorical or boolean)
                     if value_type.startswith('lte_') or value_type.startswith('gte_'):
                         value_types[attr].add(value_type)
-    
-    grouped_guards = defaultdict(list)
-    for g in guards:
-        grouped_guards[g['activity']].append(g['guard'])
+
     return grouped_guards, value_types, sorted_features
 
 def discover_all_decision_rules(
     log_path: str, 
     config_overrides: Dict[str, Any] = {}, 
     log: Optional[Any] = None
-) -> Tuple[Dict[str, Dict[str, List[str]]], Dict[str, List[float]], List[Dict[str, Any]]]:
+) -> Tuple[Dict[str, Dict[str, List[str]]], Dict[str, List[float]], List[Dict[str, Union[str, Set[str]]]]]:
     """
     Main entry point. Loads a log, runs mining on all decision points,
     and returns a dictionary of all rules and consolidated intervals.
@@ -407,13 +432,13 @@ def discover_all_decision_rules(
             log=log
         )
 
-        all_categorical_cols = [utils.sanitize_name(c) for c in categoricals]
-        all_bool_cols = [utils.sanitize_name(b) for b in booleans]
+        all_categorical_cols = {utils.sanitize_name(c) for c in categoricals}
+        all_bool_cols = {utils.sanitize_name(b) for b in booleans}
 
         decision_points = find_decision_points(df, config['min_instances'])        
         if not decision_points:
             print("  No decision points found meeting the criteria.")
-            return {}, {}
+            return {}, {}, []
 
         # First pass: collect feature importances globally
         global_feature_importance = defaultdict(float)
@@ -471,7 +496,7 @@ def discover_all_decision_rules(
         print("="*70)
         
         # Convert value types to split points for non-overlapping interval generation
-        all_intervals = defaultdict(set)
+        all_intervals = defaultdict(list)
         value_type_mappings = {}
         
         for attr, value_types_set in all_value_types.items():
@@ -498,7 +523,51 @@ def discover_all_decision_rules(
         
         # Remap guards in samples to use consolidated intervals
         remapped_samples = _remap_samples_to_consolidated_intervals(samples, value_type_mappings)
-        
+        # all_decision_rules example:
+        """{
+            'Review_Application': {
+                'Approve': [
+                    '(amount lte_500_0) and (credit_score gte_700_0)',
+                    '(amount lte_200_0)'
+                ],
+                'Reject': [
+                    '(amount gte_500_0) and (not (has_guarantor))'
+                ],
+                'Request_Info': [
+                    '(amount gte_500_0) and (has_guarantor) and (credit_score lte_700_0)'
+                ]
+            },
+            'Check_Documents': {
+                'Accept': [
+                    '(credit_score gte_600_0) and (urgent)'
+                ],
+                'Return': [
+                    '(credit_score lte_600_0)'
+                ]
+            }
+        }"""
+        # all_intervals example:
+        """{
+            'amount': [200.0, 500.0],
+            'credit_score': [600.0, 700.0]
+        }"""
+        # remapped_samples example:
+        """[
+            {
+                'activity': 'exec_Approve',
+                'preconditions': {
+                    '(amount lte_200_0)',
+                    '(completed exec_Review_Application)'
+                }
+            },
+            {
+                'activity': 'exec_Approve',
+                'preconditions': {
+                    '(amount gte_200_0_lte_500_0)',
+                    '(completed exec_Review_Application)'
+                }
+            }
+        ]"""
         return all_decision_rules, all_intervals, remapped_samples
 
     except FileNotFoundError:
@@ -508,9 +577,10 @@ def discover_all_decision_rules(
         print(f"An unexpected error occurred in decision mining: {e}")
         return {}, {}, []
 
-def _find_matching_intervals(old_value_type: str, thresholds: List[float]) -> List[str]:
+def _find_matching_intervals(old_value_type: str, thresholds: List[float], thresholds_sort: bool = False) -> List[str]:
     """
     Find which consolidated intervals match the semantics of an old value type.
+    old value type has to be a float converted to string, this doesn't work on integers
     
     For example, if old_value_type is 'gte_57_5' and thresholds are [28.5, 40.5, 57.5, 147.5],
     it should match both 'gte_57_5_lte_147_5' and 'gte_147_5'.
@@ -523,7 +593,8 @@ def _find_matching_intervals(old_value_type: str, thresholds: List[float]) -> Li
     # Parse the old value type
     is_lower_bound = 'gte_' in old_value_type
     is_upper_bound = 'lte_' in old_value_type
-    
+    #TODO: tieni a mente che gli intervalli sono contigui quindi forse per quello legge solo il primo
+    # check that all numbers are float
     # Extract the threshold value(s)
     parts = old_value_type.replace('gte_', '').replace('lte_', '').split('_')
     try:
@@ -533,8 +604,17 @@ def _find_matching_intervals(old_value_type: str, thresholds: List[float]) -> Li
             return [old_value_type]
     except (ValueError, IndexError):
         return [old_value_type]
-    
-    thresholds_sorted = sorted(thresholds)
+
+    upper_threshold_val = None
+
+    if is_lower_bound and is_upper_bound:
+        try:
+            upper_threshold_val = float(f"{parts[2]}.{parts[3]}")
+        except:
+            pass
+
+
+    thresholds_sorted = sorted(thresholds) if thresholds_sort else thresholds
     
     # Generate consolidated interval names
     for i, thresh in enumerate(thresholds_sorted):
@@ -548,6 +628,7 @@ def _find_matching_intervals(old_value_type: str, thresholds: List[float]) -> Li
                 # Old type is lte_Y, matches if thresh >= threshold_val
                 if thresh >= threshold_val:
                     matching.append(interval_name)
+            #  Fixme: add logs, this should never happen
             elif not is_upper_bound and not is_lower_bound:
                 matching.append(interval_name)
         
@@ -568,8 +649,9 @@ def _find_matching_intervals(old_value_type: str, thresholds: List[float]) -> Li
                     matching.append(interval_name)
             elif is_lower_bound and is_upper_bound:
                 # Old type is gte_X_lte_Y, check overlap
-                # This is complex, for now add if it overlaps
-                matching.append(interval_name)
+                if not upper_threshold_val or \
+                    (thresh >= threshold_val and thresholds_sorted[i + 1] <= upper_threshold_val):
+                    matching.append(interval_name)
         
         # Last interval: gte_X
         if i == len(thresholds_sorted) - 1:
@@ -583,9 +665,9 @@ def _find_matching_intervals(old_value_type: str, thresholds: List[float]) -> Li
     return matching if matching else [old_value_type]
 
 def _remap_samples_to_consolidated_intervals(
-    samples: List[Dict[str, Any]], 
+    samples: List[Dict[str, Union[str, Set[str]]]],
     value_type_mappings: Dict[str, Dict[str, List[str]]]
-) -> List[Dict[str, Any]]:
+) -> List[Dict[str, Union[str, Set[str]]]]:
     """
     Remap guards in samples to use consolidated non-overlapping intervals.
     If a guard maps to multiple intervals, create duplicate samples for each.
@@ -617,6 +699,7 @@ def _remap_samples_to_consolidated_intervals(
                         matching_intervals = value_type_mappings[attr][value_type]
                         if len(matching_intervals) > 1:
                             # Multiple intervals match - store for creating variants
+                            # works because no attr appear more than once in the condition for a branch of the decision tree
                             attr_alternatives[attr] = matching_intervals
                         elif len(matching_intervals) == 1:
                             # Single match - remap directly
@@ -635,14 +718,15 @@ def _remap_samples_to_consolidated_intervals(
         if attr_alternatives:
             # For now, create a sample for each alternative of the first attribute
             # This is a simplification - full expansion would create all combinations
-            first_attr = list(attr_alternatives.keys())[0]
-            for alt_value in attr_alternatives[first_attr]:
-                new_preconditions = set(fixed_preconditions)
-                new_preconditions.add(f'({first_attr} {alt_value})')
-                remapped_samples.append({
-                    'activity': activity,
-                    'preconditions': new_preconditions
-                })
+
+            for attr, new_thresholds_precond in attr_alternatives.items():
+                for alt_value in new_thresholds_precond:
+                    new_preconditions = set(fixed_preconditions)
+                    new_preconditions.add(f'({attr} {alt_value})')
+                    remapped_samples.append({
+                        'activity': activity,
+                        'preconditions': new_preconditions
+                    })
         else:
             remapped_samples.append({
                 'activity': activity,
@@ -652,7 +736,7 @@ def _remap_samples_to_consolidated_intervals(
     return remapped_samples
 
 def get_attribute_domains(
-    samples: List[Dict[str, Any]], 
+    samples: List[Dict[str, Union[str, Set[str]]]],
     intervals: Optional[Dict[str, List[float]]] = None
 ) -> Dict[str, Set[Union[str, bool]]]:
     """
@@ -698,36 +782,33 @@ def get_attribute_domains(
             if inner.startswith('not ('):
                 attr = inner[5:-1]
                 # Skip if this attr has intervals (already processed above)
-                if intervals and attr in intervals:
-                    continue
-                attr_values[attr].add(False)
+                if not intervals or not attr in intervals:
+                    # add value for boolean attr
+                    if attr in all_bool_cols:
+                        attr_values[attr].add(True)
+                        attr_values[attr].add(False)
+                    else:
+                        attr_values[attr].add(False)
             elif ' = ' in inner:
                 attr, value = inner.split(' = ', 1)
-                if intervals and attr in intervals:
-                    continue
-                attr_values[attr].add(value)
+                if not intervals or not attr in intervals:
+                    attr_values[attr].add(value)
             elif inner in all_bool_cols:
                 attr = inner
-                if intervals and attr in intervals:
-                    continue
-                attr_values[attr].add(True)
+                if not intervals or not attr in intervals:
+                    attr_values[attr].add(True)
+                    attr_values[attr].add(False)
             else:
                 # numerical or other
                 parts = inner.split(' ', 1)
                 if len(parts) == 2:
                     attr, value = parts
                     # Skip if this attr has intervals (already processed above)
-                    if intervals and attr in intervals:
-                        continue
-                    attr_values[attr].add(value)
-    
-    domains = {}
-    for attr, values in attr_values.items():
-        if attr in all_bool_cols:
-            domains[utils.sanitize_name(attr)] = {True, False}
-        else:
-            domains[utils.sanitize_name(attr)] = values
-    return domains
+                    if not intervals or not attr in intervals:
+                        attr_values[attr].add(value)
+
+
+    return attr_values
 
 
 if __name__ == "__main__":

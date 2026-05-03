@@ -61,8 +61,8 @@ class Parser:
     use_activity_classifier: bool
     log: Any
     full_log: Any
-    train_df: tuple[EventLog, EventLog] | tuple[DataFrame, DataFrame]
-    test_df: tuple[EventLog, EventLog] | tuple[DataFrame, DataFrame]
+    train_df: Union[tuple[EventLog, EventLog], tuple[DataFrame, DataFrame]]
+    test_df: Union[tuple[EventLog, EventLog], tuple[DataFrame, DataFrame]]
     petrinet: PetriNet
     initial_marking: Marking
     final_marking: Marking
@@ -79,8 +79,8 @@ class Parser:
     decision_points_probabilities: Dict[str, Dict[str, float]]
     parallels: Dict[str, List[str]]
     direct_transition_graph: Dict[str, List[str]]
-    attribute_domains: Dict[str, Set[str]]
-    decision_samples: List[Dict[str, Any]]
+    attribute_domains: Dict[str, Set[Union[str, bool]]]
+    decision_samples: List[Dict[str, Union[str, Set[str]]]]
     IGNORED_ATTRIBUTES = {'case:concept:name', 'concept:name', 'time:timestamp', 'lifecycle:transition', 'org:resource', 'org:group', 'variant-index', 'Resource', 'org:role'}
     MIN_PROBABILITY_THRESHOLD = 0.1
     STRONG_PROBABILITY_THRESHOLD = 0.2
@@ -278,17 +278,22 @@ class Parser:
         return attr_categories
     
     
-    def _get_place_outgoing_transitions(self) -> Dict[PetriNet.Place, List[Transition]]:
+    def _get_place_outgoing_transitions(self, return_act_names: bool = False) -> \
+            Dict[PetriNet.Place, Union[List[Transition], List[str]]]:
         """Get mapping of places to their outgoing transitions."""
         place_outgoing_transitions = defaultdict(list)
         for arc in self.edges:
             source, target = arc.source, arc.target
             if isinstance(source, pm4py.objects.petri_net.obj.PetriNet.Place) and \
                isinstance(target, pm4py.objects.petri_net.obj.PetriNet.Transition):
-                place_outgoing_transitions[source].append(target)
+                place_outgoing_transitions[source].append(
+                    self._get_activity_name_for_transition(target)
+                    if return_act_names
+                    else target
+                )
         return place_outgoing_transitions
 
-    def _get_transition_outgoing_places(self) -> Dict[Any, List[Any]]:
+    def _get_transition_outgoing_places(self) -> Dict[Transition, List[PetriNet.Place]]:
         """Get mapping of transitions to their outgoing places."""
         transition_outgoing_places = defaultdict(list)
         for arc in self.edges:
@@ -312,9 +317,9 @@ class Parser:
         return df_counts
 
     def _compute_decision_probabilities(
-        self, 
-        decision_points: Dict[PetriNet.Place, List[Transition]],
-        df_counts: Dict[str, Dict[str, int]]
+            self,
+            decision_points: Dict[PetriNet.Place, List[Transition]],
+            df_counts: Dict[str, Dict[str, int]]
     ) -> Dict[str, Dict[str, float]]:
         """
         Compute probabilities for each branch at decision points.
@@ -328,50 +333,49 @@ class Parser:
         """
         # For each place contains a dict[next executable activity, probability to be executed]
         decision_probabilities = {}
+
         for place, outgoing_transitions in decision_points.items():
             #  activities executable from a certain place
-            all_transitions = [(t, self._get_activity_name_for_transition(t)) for t in outgoing_transitions]
-            # dict[next executable activity, probability to be executed]
-            place_probs = {}
-            incoming_activities = set()
-            for out_transition, out_label in all_transitions:
-                sanitized_out = utils.sanitize_name(out_label)
+            all_transitions = [
+                (t, self._get_activity_name_for_transition(t),
+                 utils.sanitize_name(self._get_activity_name_for_transition(t)))
+                for t in outgoing_transitions
+            ]
+
+            # predecessor activities (in the PetriNet without tau activities)
+            # set of all predecessors forall next executable actions
+            incoming_activities: set[str] = set()
+            for _, _, sanitized_out in all_transitions:
                 # iterate activities preceding the executable activities for this place
                 for pred in self.predecessors.get(sanitized_out, []):
                     self._add_non_tau_predecessors(pred, incoming_activities)
-            # predecessor activities (in the PetriNet without tau activities)
-            # set of all predecessors forall next executable actions
-            incoming_activities = list(incoming_activities)
 
             # count for each next activity how many times it happens after the incoming activities (in the log)
-            transition_counts = defaultdict(int)
+            transition_counts: Dict[Transition, int] = defaultdict(int)
             # sum of all transition_counts
             total_count = 0
             # for preceding activity
             for in_activity in incoming_activities:
                 # for next activities
-                for out_transition, out_label in all_transitions:
-                    sanitized_out = utils.sanitize_name(out_label)
-                    count = df_counts[in_activity].get(sanitized_out, 0)
+                for out_transition, _, sanitized_out in all_transitions:
+                    count = df_counts.get(in_activity, {}).get(sanitized_out, 0)
                     transition_counts[out_transition] += count
                     total_count += count
-            
+
+            # dict[next executable activity, probability to be executed]
+            place_probs = {}
             if total_count > 0:
                 for transition, count in transition_counts.items():
-                    probability = count / total_count
                     action_name = self._get_activity_name_for_transition(transition)
-                    place_probs[action_name] = round(probability, 2)
-                if place_probs:
-                    decision_probabilities[place.name] = place_probs
+                    place_probs[action_name] = round(count / total_count, 2)
             else:
                 # Assign equal probabilities if no data available
-                num_transitions = len(all_transitions)
-                if num_transitions > 0:
-                    equal_prob = round(1.0 / num_transitions, 2)
-                    for out_transition, out_label in all_transitions:
-                        action_name = self._get_activity_name_for_transition(out_transition)
-                        place_probs[action_name] = equal_prob
-                    decision_probabilities[place.name] = place_probs
+                equal_prob = round(1.0 / len(all_transitions), 2) if all_transitions else 0.0
+                for _, action_name, _ in all_transitions:
+                    place_probs[action_name] = equal_prob
+
+            if place_probs:
+                decision_probabilities[place.name] = place_probs
 
         return decision_probabilities
 
@@ -396,7 +400,9 @@ class Parser:
                 self._add_non_tau_predecessors(pred, incoming_set, visited)
 
     def compute_decision_points_probabilities(self) -> Dict[str, Dict[str, float]]:
-        """Compute decision point probabilities for the whole Petri net."""
+        """Compute decision point probabilities for the whole Petri net.
+        For each place which is a decision point computes the probability of executions
+        of executable actions"""
         place_outgoing_transitions = self._get_place_outgoing_transitions()
         
         decision_points = {
@@ -428,7 +434,7 @@ class Parser:
         
         return self._extract_parallel_patterns(transition_outgoing_places, place_outgoing_transitions, decision_point_places)
 
-    def _identify_decision_point_places(self, place_outgoing_transitions: Dict[Any, List[Any]]) -> Set[Any]:
+    def _identify_decision_point_places(self, place_outgoing_transitions: Dict[PetriNet.Place, List[Transition]]) -> Set[PetriNet.Place]:
         """Identify places that represent decision points (multiple outputs)."""
         decision_point_places = set()
         for place, transitions in place_outgoing_transitions.items():
@@ -438,41 +444,42 @@ class Parser:
 
     def _extract_parallel_patterns(
         self, 
-        transition_outgoing_places: Dict[Any, List[Any]], 
-        place_outgoing_transitions: Dict[Any, List[Any]], 
-        decision_point_places: Set[Any]
+        transition_outgoing_places: Dict[Transition, List[PetriNet.Place]],
+        place_outgoing_transitions: Dict[PetriNet.Place, List[Transition]],
+        decision_point_places: Set[PetriNet.Place]
     ) -> Dict[str, List[str]]:
-        """Extract parallel execution patterns from the Petri net structure."""
+        """Extract parallel execution patterns from the Petri net structure.
+        returns the dict [activity, list of activities to be executed right after and in parallel] """
         parallels = {}
         for transition, places in transition_outgoing_places.items():
-            if len(places) >= 2:
+            if len(places) > 1:
                 # Skip transitions that lead to decision points (exclusive choices)
                 if any(place in decision_point_places for place in places):
                     continue
                 
-                subsequent_transitions = self._get_subsequent_transitions(places, place_outgoing_transitions)
-                unique_subsequent_labels = set(self._get_activity_name_for_transition(t) for t in subsequent_transitions)
+                unique_subsequent_labels = self._get_subsequent_transitions(places, place_outgoing_transitions)
                 
-                if len(unique_subsequent_labels) >= 2:
+                if len(unique_subsequent_labels) > 1:
                     transition_key = self._get_activity_name_for_transition(transition)
-                    parallels[transition_key] = [
-                        self._get_activity_name_for_transition(t) for t in subsequent_transitions
-                    ]
+                    parallels[transition_key] = list(unique_subsequent_labels)
         
         return parallels
 
     def _get_subsequent_transitions(
         self, 
-        places: List[Any], 
-        place_outgoing_transitions: Dict[Any, List[Any]]
-    ) -> List[Any]:
+        places: List[PetriNet.Place],
+        place_outgoing_transitions: Dict[PetriNet.Place, List[Transition]],
+        return_activity: bool = True
+    ) -> Union[Set[Transition], Set[str]]:
         """Get all transitions following a list of places."""
-        subsequent_transitions = []
-        for place in places:
-            for next_transition in place_outgoing_transitions[place]:
-                # Include all transitions (labeled and silent)
-                subsequent_transitions.append(next_transition)
-        return subsequent_transitions
+        return {
+            self._get_activity_name_for_transition(next_transition)
+            if return_activity
+            else next_transition
+            for place in places
+            for next_transition in place_outgoing_transitions[place]
+        }
+
     
 
     def extract_predecessors(self) -> Dict[str, List[str]]:
@@ -498,7 +505,7 @@ class Parser:
             activity ,
             list of preceding activities (only activities executed right before the key activity)
         ]"""
-        predecessors: Dict[str, set[str] | list[str]] = defaultdict(set if remove_duplicates else list)
+        predecessors: Dict[str, Union[set[str], list[str]]] = defaultdict(set if remove_duplicates else list)
         for arc in self.edges:
             if (isinstance(arc.source, pm4py.objects.petri_net.obj.PetriNet.Place) and
                     isinstance(arc.target, pm4py.objects.petri_net.obj.PetriNet.Transition)):
@@ -725,32 +732,35 @@ class Parser:
         Returns a dict: {transition: [next_transition, ...]}
         """
         graph = defaultdict(list)
-        place_incoming_transitions = self._get_place_incoming_transitions()
-        place_outgoing_transitions = self._get_place_outgoing_transitions()
+        # get transactions outgoing and ingoing place already translated to activities
+        place_incoming_activities = self._get_place_incoming_transitions(return_act_names=True)
+        place_outgoing_activities = self._get_place_outgoing_transitions(return_act_names=True)
         
         for place in self.places:
-            incoming_transitions = place_incoming_transitions.get(place, [])
-            outgoing_transitions = place_outgoing_transitions.get(place, [])
-            
-            if not incoming_transitions or not outgoing_transitions:
+            incoming_activities = place_incoming_activities.get(place, [])
+            outgoing_activities = place_outgoing_activities.get(place, [])
+            # skip starting or ending places
+            if not incoming_activities or not outgoing_activities:
                 continue
             
-            # For each incoming transition, connect to all outgoing transitions
-            for incoming_t in incoming_transitions:
-                incoming_activity = self._get_activity_name_for_transition(incoming_t)
-                
-                for outgoing_t in outgoing_transitions:
-                    outgoing_activity = self._get_activity_name_for_transition(outgoing_t)
-                    graph[incoming_activity].append(outgoing_activity)
+            # For each incoming activity, connect to all outgoing activities
+            for incoming_a in incoming_activities:
+                for outgoing_a in outgoing_activities:
+                    graph[incoming_a].append(outgoing_a)
         
         return dict(graph)
 
 
-    def _get_place_incoming_transitions(self) -> Dict[Any, List[Any]]:
+    def _get_place_incoming_transitions(self, return_act_names: bool = False) -> \
+            Dict[PetriNet.Place, Union[List[Transition], List[str]]]:
         """Get mapping of places to their incoming transitions."""
         place_incoming_transitions = defaultdict(list)
         for arc in self.edges:
             if isinstance(arc.target, pm4py.objects.petri_net.obj.PetriNet.Place) and \
                isinstance(arc.source, pm4py.objects.petri_net.obj.PetriNet.Transition):
-                place_incoming_transitions[arc.target].append(arc.source)
+                place_incoming_transitions[arc.target].append(
+                    self._get_activity_name_for_transition(arc.source)
+                    if return_act_names
+                    else arc.source
+                )
         return place_incoming_transitions

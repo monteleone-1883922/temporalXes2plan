@@ -1249,7 +1249,7 @@ def convert_interval_to_lte_gte(interval_str: str) -> str:
     return interval_str
 
 
-def discretize_value(attr: str, value: Union[float, str, None], intervals: Optional[Dict[str, List[float]]] = None) -> str:
+def discretize_value(attr: Union[str, None], value: Union[float, str, None], intervals: Optional[Dict[str, List[float]]] = None) -> str:
     """
     Discretize a numeric or interval value based on defined thresholds.
 
@@ -1261,7 +1261,14 @@ def discretize_value(attr: str, value: Union[float, str, None], intervals: Optio
     Returns:
         The discretized value string (e.g., 'lte_10_0', 'gte_5_0_lte_10_0').
     """
-    if isinstance(value, str) and ('-inf' in value or ('-' in value and not value.replace('-', '').replace('.', '').replace('_', '').isalnum())):
+    if (isinstance(value, str) and
+            (
+                    '-inf' in value or
+                    (
+                            '-' in value and
+                            not value.replace('-', '').replace('.', '').replace('_', '').isalnum()
+                    )
+            )):
         return convert_interval_to_lte_gte(value)
     else:   # Numeric discretization
         if intervals is None or attr not in intervals or not intervals[attr] or value is None:
@@ -1270,13 +1277,11 @@ def discretize_value(attr: str, value: Union[float, str, None], intervals: Optio
         try:
             value = float(value)
             thresholds = sorted(intervals[attr])
-            if not thresholds:
-                return str(value)
             
             if value <= thresholds[0]:
                 thresh_str = str(thresholds[0]).replace('.', '_').replace('-', 'neg')
                 return f'lte_{thresh_str}'
-            elif value > thresholds[-1]:
+            elif value >= thresholds[-1]:
                 thresh_str = str(thresholds[-1]).replace('.', '_').replace('-', 'neg')
                 return f'gte_{thresh_str}'
             else:
