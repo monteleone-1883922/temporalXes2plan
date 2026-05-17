@@ -56,33 +56,34 @@ class Parser:
         decision_samples (List[Dict[str, Any]]): Samples for decision mining.
     """
 
-    log_path: str
-    coverage_percentage: float
-    discovery_algorithm: str
-    intervals: Dict[str, List[float]]
-    use_activity_classifier: bool
-    log: Any
-    full_log: Any
-    train_df: Union[tuple[EventLog, EventLog], tuple[DataFrame, DataFrame]]
-    test_df: Union[tuple[EventLog, EventLog], tuple[DataFrame, DataFrame]]
-    petrinet: PetriNet
-    initial_marking: Marking
-    final_marking: Marking
-    transitions: Set[Transition]
-    places: Set[PetriNet.Place]
-    edges: Set[PetriNet.Arc]
-    activities: Set[str]
-    silent_transitions: Dict[Transition, str]
-    start_activities: Dict[str, int]
-    end_activities: Dict[str, int]
-    attributes: Set[str]
-    attribute_categories: Dict[str, str]
-    predecessors: Dict[str, List[str]] #activities and the list of preceding activities (activities executed right before)
-    decision_points_probabilities: Dict[str, Dict[str, float]]
-    parallels: Dict[str, List[str]]
-    direct_transition_graph: Dict[str, List[str]]
-    attribute_domains: Dict[str, Set[Union[str, bool]]]
-    decision_samples: List[Dict[str, Union[str, Set[str]]]]
+    log_path: str  # Path to the XES event log file
+    coverage_percentage: float  # Minimum cumulative coverage for variant filtering
+    discovery_algorithm: str  # Name of the Petri net discovery algorithm to use
+    intervals: Dict[str, List[float]]  # Discretization intervals (split points) for numerical attributes
+    use_activity_classifier: bool  # Whether to combine concept:name and lifecycle:transition as activity names
+    log: Any  # The loaded and filtered event log used for discovery (training set)
+    full_log: Any  # The full event log after applying classifiers but before variant filtering
+    full_lifecycle_log: Any  # Copy of the log before filtering for 'complete' events
+    train_df: Union[tuple[EventLog, EventLog], tuple[DataFrame, DataFrame]]  # Training set split (80% of log)
+    test_df: Union[tuple[EventLog, EventLog], tuple[DataFrame, DataFrame]]  # Testing set split (20% of log)
+    petrinet: PetriNet  # The discovered Petri net model
+    initial_marking: Marking  # The initial token marking of the Petri net
+    final_marking: Marking  # The final token marking of the Petri net
+    transitions: Set[Transition]  # Set of transitions present in the Petri net
+    places: Set[PetriNet.Place]  # Set of places present in the Petri net
+    edges: Set[PetriNet.Arc]  # Set of arcs (edges) connecting places and transitions
+    activities: Set[str]  # Set of all unique sanitized activity names in the process
+    silent_transitions: Dict[Transition, str]  # Mapping from Petri net Transitions to their assigned tau names
+    start_activities: Dict[str, int]  # Frequency map of activities that start a process trace
+    end_activities: Dict[str, int]  # Frequency map of activities that end a process trace
+    attributes: Set[str]  # Set of all non-ignored event attributes in the log
+    attribute_categories: Dict[str, str]  # Mapping from attribute names to their types (boolean, numerical, categorical)
+    predecessors: Dict[str, List[str]]  # Map of activities to their direct preceding activities in the Petri net
+    decision_points_probabilities: Dict[str, Dict[str, float]]  # Execution probabilities for branches at XOR-splits  {place_name: {activity: probability}}
+    parallels: Dict[str, List[str]]  # Mapping of AND-splits to the set of parallel activities they enable
+    direct_transition_graph: Dict[str, List[str]]  # Graph representation of direct succession between activities (removed places from pretrinet)
+    attribute_domains: Dict[str, Set[Union[str, bool]]]  # Set of possible values or intervals for each attribute
+    decision_samples: List[Dict[str, Union[str, Set[str]]]]  # Extracted data samples used for decision mining
     IGNORED_ATTRIBUTES = {'case:concept:name', 'concept:name', 'time:timestamp', 'lifecycle:transition', 'org:resource', 'org:group', 'variant-index', 'Resource', 'org:role'}
     MIN_PROBABILITY_THRESHOLD = 0.1
     STRONG_PROBABILITY_THRESHOLD = 0.2
@@ -127,6 +128,10 @@ class Parser:
         if discovery_algorithm not in self.DISCOVERY_ALGORITHMS:
             raise ValueError(f"Unsupported discovery algorithm: {discovery_algorithm}. "
                            f"Supported algorithms: {list(self.DISCOVERY_ALGORITHMS.keys())}")
+        
+        # Initialize fields to None before they are properly assigned
+        self.full_lifecycle_log = None
+        
         self.intervals = intervals or {}
         self.discovery_algorithm = discovery_algorithm
         self.use_activity_classifier = use_activity_classifier
@@ -680,7 +685,7 @@ class Parser:
             return self.silent_transitions.get(transition, fallback_name)
 
 
-    def discover_attribute_activity_relationships(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    def discover_attribute_activity_relationships(self) -> Dict[str, Dict[str, Dict[str, Union[int, float]]]]:
         """
         Discover how specific attribute values influence subsequent activities.
         
@@ -715,6 +720,7 @@ class Parser:
                         sanitized_attr = utils.sanitize_name(attr)
                         relationships[sanitized_attr][str(val)][sanitized_target] += 1
         significant_relationships = {}
+
         for attr, values in relationships.items():
             if len(values) <= 1:
                 logger.debug(f"Skipping attribute {attr} in relationship discovery (only {len(values)} unique value(s) found)")
@@ -731,7 +737,7 @@ class Parser:
                     significant_activities = {
                         activity: {'count': count, 'probability': count/total}
                         for activity, count in activities.items()
-                        if activity not in non_discriminative and count/total >= 0.2
+                        if activity not in non_discriminative and count/total >= 0.2 #FIXME: add param
                     }
                     if significant_activities:
                         significant_attr_relationships[val] = significant_activities
@@ -742,7 +748,7 @@ class Parser:
         return significant_relationships
     
 
-    def discover_activity_attribute_effects(self) -> Dict[str, Dict[str, Any]]:
+    def discover_activity_attribute_effects(self) -> Dict[str, Dict[str, Dict[str,  Dict[str, Dict[str, Union[int, float]]]]]]:
         """
         Discover how activities affect attribute values.
         
@@ -778,11 +784,10 @@ class Parser:
         Returns:
             Set of tuples (source_activity, target_activity).
         """
-        valid_transitions = set()
-        for target_activity, source_activities in self.predecessors.items():
-            for source_activity in source_activities:
-                valid_transitions.add((source_activity, target_activity))
-        return valid_transitions
+        return {
+            (source_activity, target_activity)
+            for target_activity, source_activities in self.predecessors.items() for source_activity in source_activities
+        }
 
     def _collect_attribute_effects(
         self, 
@@ -860,18 +865,18 @@ class Parser:
         """
         prev_activity = prev_event['concept:name']
         sanitized_prev_activity = utils.sanitize_name(prev_activity)
-        
+        # Return if invalid transition
         if (sanitized_prev_activity, sanitized_activity) not in valid_transitions:
             return
         
         # Look for attribute values that changed after the previous activity
-        for attr in set(prev_event.keys()).union(event.keys()):
+        for attr in set(prev_event.keys()).intersection(event.keys()):
             if attr in self.IGNORED_ATTRIBUTES:
                 continue
-                
+
             prev_val = prev_event.get(attr)
             curr_val = event.get(attr)
-            if prev_val is None or curr_val is None or prev_val == curr_val:
+            if prev_val == curr_val:
                 continue
                 
             sanitized_attr = utils.sanitize_name(attr)
@@ -883,7 +888,7 @@ class Parser:
         self, 
         effects: Dict[str, Dict[str, Dict[str, Dict[str, int]]]], 
         new_value_introductions: Dict[str, Dict[str, Dict[str, int]]]
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> Dict[str, Dict[str, Dict[str,  Dict[str, Dict[str, Union[int, float]]]]]]:
         """
         Process the raw counters into significant attribute effect probabilities.
         
@@ -922,7 +927,7 @@ class Parser:
         
         return significant_effects
 
-    def _filter_significant_transitions(self, from_values: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, Any]]:
+    def _filter_significant_transitions(self, from_values: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, Union[int, float]]]:
         """
         Filter attribute transitions based on minimum probability and support count thresholds.
         

@@ -27,14 +27,14 @@ class BatchEvaluator:
         config (Dict[str, Any]): The active configuration for the current run.
     """
 
-    config_name: Optional[str]
-    output_dir: Path
-    resume: bool
-    checkpoint_file: Path
-    interrupted: bool
-    predefined_configs: Dict[str, Dict[str, Any]]
-    default_config: Dict[str, Any]
-    config: Dict[str, Any]
+    config_name: Optional[str]  # Name of the predefined configuration to use (e.g., 'planning', 'full')
+    output_dir: Path  # Directory where evaluation results, logs, and summaries will be stored
+    resume: bool  # Whether to attempt resuming from a previously saved checkpoint
+    checkpoint_file: Path  # Path to the JSON file storing the state of the current batch execution
+    interrupted: bool  # Flag indicating if the user has requested to stop the evaluation (SIGINT/SIGTERM)
+    predefined_configs: Dict[str, Dict[str, Any]]  # Mapping of preset names to their configuration parameters
+    default_config: Dict[str, Any]  # The default configuration parameters used if no preset is selected
+    config: Dict[str, Any]  # The actual configuration being used for the current run
     def __init__(
         self, 
         config_name: Optional[str] = None, 

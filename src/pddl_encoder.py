@@ -27,25 +27,27 @@ class Encoder:
         minimal_preconditions (bool): Whether to use minimal preconditions for planning.
     """
 
-    parser: Parser
-    domain_name: str
-    init: Optional[List[str]]
-    goal: Optional[List[str]]
-    min_confidence: float
-    activities: Set[str]
-    attribute_categories: Dict[str, str]
-    _value_mappings: Dict[str, Any]
-    attr_activity_relationships: Dict[str, Any]
-    activity_attr_effects: Dict[str, Any]
-    tau_activities: Set[str]
-    decision_points: Dict[str, Dict[str, float]]
-    decision_preconditions: Dict[str, List[Set[str]]]
-    decision_attributes: Set[str]
-    parallel_activities: Dict[str, List[str]]
-    parallel_activity_map: Dict[str, Set[str]]
-    split_actions: Dict[str, Any]
-    effect_alternatives: Dict[str, Any]
-    minimal_preconditions: bool
+    parser: Parser  # XES parser instance containing discovered process data and model
+    domain_name: str  # Name of the PDDL domain to be generated
+    init: Optional[List[str]]  # Custom initial state predicates for the PDDL problem
+    goal: Optional[List[str]]  # Custom goal state predicates for the PDDL problem
+    min_confidence: float  # Minimum confidence threshold for including data-driven rules
+    activities: Set[str]  # Set of all activities (sanitized) in the process
+    attribute_categories: Dict[str, str]  # Mapping of attributes to their data types
+    _value_mappings: Dict[str, Any]  # Internal mapping for attribute value sanitization
+    attr_activity_relationships: Dict[str, Dict[str, Dict[str, Union[int, float]]]]  # Influence of attributes on activities
+    activity_attr_effects: Dict[str, Dict[str, Dict[str,  Dict[str, Dict[str, Union[int, float]]]]]]  # Empirical effects of activities on attribute values
+    tau_activities: Set[str]  # Set of silent (tau) activity names
+    decision_points: Dict[str, Dict[str, float]]  # Branch probabilities for XOR-splits in the process
+    decision_preconditions: Dict[str, List[Set[str]]]  # Data-driven preconditions for activities from decision mining
+    decision_attributes: Set[str]  # Set of attributes involved in decision-making logic
+    parallel_activities: Dict[str, List[str]]  # Parallel activities (AND-splits) from the parser
+    parallel_activity_map: Dict[str, Set[str]]  # Mapping of all activities that can execute in parallel
+    split_actions: Dict[str, Any]  # Map of base actions to their generated variants (e.g., for OR-preconditions)
+    effect_alternatives: Dict[str, Any]  # Mapping of actions to alternative effects based on attribute conditions
+    processed_decision_points: Dict[str, Dict[str, float]]  # Normalized decision point probabilities mapped by activity
+    decision_points_conditions: Dict[Any, Any]  # Logical conditions associated with decision points
+    minimal_preconditions: bool  # Whether to use lightweight preconditions for suffix-only planning
     def __init__(
         self, 
         parser: Parser, 
@@ -67,6 +69,10 @@ class Encoder:
             minimal_preconditions: If True, generate lightweight preconditions suitable 
                                    for suffix planning (ignoring structural history).
         """
+        # Initialize fields to None before they are properly assigned
+        self.processed_decision_points = None
+        self.decision_points_conditions = None
+        
         self.parser = parser
         self.domain_name = domain_name
         self.init = init
@@ -91,14 +97,9 @@ class Encoder:
                     if p.startswith('(') and p.endswith(')'):
                         inner = p[1:-1]
                         parts = inner.split()
-                        if len(parts) == 1:
-                            attr = parts[0]
-                            if attr in self.attribute_categories:
-                                self.decision_attributes.add(attr)
-                        elif len(parts) == 2:
-                            attr, val = parts
-                            if attr in self.attribute_categories:
-                                self.decision_attributes.add(attr)
+                        attr = parts[0]
+                        if attr in self.attribute_categories:
+                            self.decision_attributes.add(attr)
         self.parallel_activities = parser.parallels
         self.parallel_activity_map = self._build_parallel_activity_map()
         self._process_decision_points()
@@ -191,11 +192,8 @@ class Encoder:
     def _generate_pddl_type_definitions(self) -> str:
         """Generate PDDL type definitions based on the predicates that will be used."""
         # Collect attributes that will have predicates
-        relevant_attrs = set()
-        
         # Include attributes that influence or are influenced by actions
-        for attr in self.attr_activity_relationships:
-            relevant_attrs.add(attr)
+        relevant_attrs = {attr for attr in self.attr_activity_relationships}
         
         # Include attributes affected by actions (measurement actions)
         for activity in self.activities:
@@ -240,16 +238,16 @@ class Encoder:
             action_name: The name of the activity
             variant_conditions: Optional list of specific conditions to include for this variant
         """
-        preconditions = []
+        preconditions = set()
 
         # Always include enabled marker for the action
-        preconditions.append(f"(enabled {action_name})")
+        preconditions.add(f"(enabled {action_name})")
 
         # Tau activities can also have action preconditions now
         # if self.is_tau_activity(action_name):
         #     return preconditions
         if action_name in self.parser.start_activities:
-            return preconditions
+            return list(preconditions)
             
         # Find direct predecessors using the direct transition graph
         direct_predecessors = []
@@ -258,7 +256,9 @@ class Encoder:
                 direct_predecessors.append(pred)
         
         if not direct_predecessors:
-            return preconditions
+            return list(preconditions)
+
+        action_attributes_param = self._get_attribute_params(action_name)
             
         # By default, include completed predecessor(s) as preconditions to follow
         # structural constraints. However, in minimal_preconditions mode we
@@ -268,12 +268,14 @@ class Encoder:
             # For now, require at least one direct predecessor to be completed
             # This represents OR logic at decision points
             if len(direct_predecessors) == 1:
-                preconditions.append(f"(completed {direct_predecessors[0]})")
+                preconditions.add(f"(completed {direct_predecessors[0]})")
             else:
+                #TODO: implement OR logic for multiple predecessors
+
                 # For multiple predecessors, we need OR logic
                 # Since PDDL doesn't have OR in preconditions directly, we'll use the first one as default
                 # This could be improved with action variants for different paths
-                preconditions.append(f"(completed {direct_predecessors[0]})")
+                preconditions.add(f"(completed {direct_predecessors[0]})")
 
         # Add attribute-based conditions (keep existing logic)
         attr_values = defaultdict(set)
@@ -286,32 +288,27 @@ class Encoder:
                             condition = f"({attr})" if val.lower() == 'true' else f"(not ({attr}))"
                             attr_values[attr].add(condition)
                         else:
-                            if attr in self._get_attribute_params(action_name) and action_name not in self.attribute_categories:
+                            if attr in action_attributes_param and action_name not in self.attribute_categories:
                                 attr_values[attr].add(f"({attr} ?v)")
         
         for attr, values in attr_values.items():
             values_list = list(values)
             if len(values_list) == 1:
-                preconditions.append(values_list[0])
+                preconditions.add(values_list[0])
             else:
                 if variant_conditions:
                     for value_cond in values_list:
                         if value_cond in variant_conditions:
-                            preconditions.append(value_cond)
+                            preconditions.add(value_cond)
                             break
                     else:
-                        preconditions.append(values_list[0])
+                        preconditions.add(values_list[0])
                 else:
-                    preconditions.append(values_list[0])
+                    preconditions.add(values_list[0])
         
-        unique_preconditions = []
-        seen = set()
-        for precond in preconditions:
-            if precond not in seen:
-                unique_preconditions.append(precond)
-                seen.add(precond)
+
         
-        return unique_preconditions
+        return list(preconditions)
 
 
     def _analyze_input_places(self, action_name: str) -> Dict[str, Any]:
@@ -663,7 +660,7 @@ class Encoder:
         
         return effects
 
-    def _generate_measurement_action_variants(self, action_name: str) -> List[Dict[str, Any]]:
+    def _generate_measurement_action_variants(self, action_name: str) -> List[Dict[str, Union[str, bool, List[str]]]]:
         """
         Generate separate actions for each measurement outcome to avoid
         PDDL semantic issues with simultaneous effects.
@@ -686,7 +683,7 @@ class Encoder:
             
         # Get possible values for this attribute
         possible_values = self.parser.attribute_domains.get(matching_attribute, set())
-        if matching_attribute in self._value_mappings:
+        if matching_attribute in self._value_mappings: #FIXME: never initialized
             possible_values = {self._value_mappings[matching_attribute].get(val, val) for val in possible_values}
         
         if not possible_values:
@@ -717,32 +714,32 @@ class Encoder:
         
         # Also check for categorical value suffixes (for attributes like diagnose)
         base_name = action_name
+        sanitized_action = action_name.lower()
         for attr in self.attribute_categories:
             if action_name.startswith(attr + '_'):
                 # This is likely a measurement variant like crp_high or diagnose_a
                 return param_attributes  # No parameters needed
-        
-        # Original logic for other types of actions that might need parameters
-        sanitized_action = action_name.lower()
-        for attr in self.attribute_categories:
             # Only add parameters for actions that manipulate attribute values generically,
             # not for specific measurement actions
-            if attr.lower() == sanitized_action and self.attribute_categories[attr] != 'boolean':
+            if attr.lower() == sanitized_action and self.attribute_categories[attr] != 'boolean' and \
+                    not any(f"{attr}_{suffix}" in [a for a in self.activities] for suffix in
+                            ['low', 'medium', 'high', 'very_low']):
                 # Skip if this looks like a measurement action (has variants)
-                if not any(f"{attr}_{suffix}" in [a for a in self.activities] for suffix in ['low', 'medium', 'high', 'very_low']):
-                    param_attributes.add(attr)
-                    return param_attributes
+                param_attributes.add(attr)
+                return param_attributes
+        
+        # Original logic for other types of actions that might need parameters
         
         # Check for actions that introduce new attribute values
         if action_name in self.activity_attr_effects:
             for attr, from_values in self.activity_attr_effects[action_name].items():
-                if 'NEW' in from_values and self.attribute_categories.get(attr) != 'boolean':
-                    # Only add parameter if this is not a measurement action setting specific values
-                    if not any(action_name.endswith(suffix) for suffix in discretized_suffixes):
-                        if not any(attr in attrs and any(from_val != 'NEW' and to_vals for from_val, to_vals in attrs[attr].items())
-                                  for act_name, attrs in self.activity_attr_effects.items() if attr in attrs):
-                            param_attributes.add(attr)
-        
+                # Only add parameter if this is not a measurement action setting specific values
+                if 'NEW' in from_values and self.attribute_categories.get(attr) != 'boolean' and \
+                        not any(action_name.endswith(suffix) for suffix in discretized_suffixes) and \
+                        not any(attr in attrs and any(
+                            from_val != 'NEW' and to_vals for from_val, to_vals in attrs[attr].items())
+                                for act_name, attrs in self.activity_attr_effects.items() if attr in attrs):
+                    param_attributes.add(attr)
         return param_attributes
 
 
@@ -1193,7 +1190,7 @@ class Encoder:
         
         return f"PRECOND[{precond_str}]_EFFECT[{effect_str}]"
 
-    def _deduplicate_variants(self, variants: List[Dict[str, Any]], action_name: str) -> List[Dict[str, Any]]:
+    def _deduplicate_variants(self, variants: List[Dict[str, Union[str, bool, List[str]]]], action_name: str) -> List[Dict[str, Union[str, bool, List[str]]]]:
         """Remove redundant action variants based on their preconditions and effects."""
         if not variants:
             return variants

@@ -22,13 +22,13 @@ class RDDLDataCollector:
         rddl_data (Dict[str, Any]): The compiled RDDL data.
     """
 
-    log_name: str
-    log_path: str
-    parser: Parser
-    decision_rules: List[Any]
-    intervals: Dict[str, List[float]]
-    decision_samples: List[Dict[str, Any]]
-    rddl_data: Dict[str, Any]
+    log_name: str  # Name of the XES event log file
+    log_path: str  # Full file system path to the XES log
+    parser: Parser  # XES parser instance used for structural and probability analysis
+    decision_rules: List[Any]  # List of rules discovered through decision mining
+    intervals: Dict[str, List[float]]  # Discretization thresholds for numerical attributes
+    decision_samples: List[Dict[str, Any]]  # Data samples used as input for decision mining
+    rddl_data: Dict[str, Any]  # Compiled dictionary containing all data needed for RDDL generation
     def __init__(
         self, 
         log_name: str, 
