@@ -6,9 +6,13 @@ from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
 from jellyfish._jellyfish import damerau_levenshtein_distance
 
-import utils
+import evaluation_helper as eval_helper
+import core_utils as utils
 from xes_parser import Parser
 from pddl_encoder import Encoder
+import pddl_helper as pddl_builder
+import argparse
+import planner_helper as planner_utils
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -18,7 +22,7 @@ def parse_arguments() -> argparse.Namespace:
     Returns:
         The parsed arguments as a Namespace object.
     """
-    parser = utils.create_base_argument_parser(
+    parser = eval_helper.create_base_argument_parser(
         "Run the evaluation of the framework for XES encoding in PDDL for numerical outcome prediction."
     )
     parser.add_argument('--target_attribute', type=str, default=None, 
@@ -127,7 +131,7 @@ if __name__ == "__main__":
     parser = Parser(args.xes_name, args.log_coverage, args.discovery_algorithm,
                      use_activity_classifier=args.use_activity_classifier)
 
-    numerical_attrs = utils.extract_numerical_attributes(parser)
+    numerical_attrs = eval_helper.extract_numerical_attributes(parser)
     print(f"Found numerical attributes: {numerical_attrs}")
     
     if not numerical_attrs:
@@ -155,11 +159,11 @@ if __name__ == "__main__":
     
     print(f"Evaluating outcome prediction for attributes: {target_attrs}")
 
-    test_traces, test_traces_with_events = utils.prepare_test_data(parser, args.max_traces)
+    test_traces, test_traces_with_events = eval_helper.prepare_test_data(parser, args.max_traces)
     
     # Set up incremental CSV output with resume support
-    evaluation_dir = utils.create_evaluation_directories(script_dir)
-    filename = utils.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'outcome_prediction')
+    evaluation_dir = eval_helper.create_evaluation_directories(script_dir)
+    filename = eval_helper.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'outcome_prediction')
     evaluation_file_path = os.path.join(evaluation_dir, filename)
     
     # Check for existing results to resume from
@@ -215,7 +219,7 @@ if __name__ == "__main__":
             # Find the final value of the target attribute from any event in the trace
             actual_final_value = None
             for event in reversed(trace_events):  # Start from the end
-                actual_final_value = utils.get_goal_attribute_value(parser, event, target_attr)
+                actual_final_value = eval_helper.get_goal_attribute_value(parser, event, target_attr)
                 if actual_final_value is not None:
                     break
             
@@ -232,7 +236,7 @@ if __name__ == "__main__":
                     continue
                 
                 # Compute initial state (including current target attribute value) - restrict enabled activities to successors of last prefix activity
-                init_condition = utils.compute_initial_state_from_last_activity(parser, prefix, trace_events, prefix_len, target_attr)
+                init_condition = pddl_builder.compute_initial_state_from_last_activity(parser, prefix, trace_events, prefix_len, target_attr)
                 
                 # Get the initial attribute value to compare with goal
                 sanitized_attr = target_attr.lower().replace(':', '_').replace(' ', '_')
@@ -320,7 +324,7 @@ if __name__ == "__main__":
                                    output_path=problem_file_path)
 
             plan_path = os.path.join(script_dir, '..', 'pddl', 'plan_problem.txt')
-            planner_success, planner_message, planning_metrics, solvability = utils.run_planner(plan_path, args.search)
+            planner_success, planner_message, planning_metrics, solvability = planner_utils.run_planner(plan_path, args.search)
             
             sample[11] = solvability  # Store solvability status
             
@@ -329,7 +333,7 @@ if __name__ == "__main__":
                 sample[7] = True  # Planning success
                 sample[8] = actual_discretized  # Predicted value is the tested goal
                 print(f"SUCCESS: Plan found to achieve {actual_discretized}")
-                predicted_sequence = utils.parse_plan_file(plan_path)
+                predicted_sequence = planner_utils.parse_plan_file(plan_path)
                 sample[13] = predicted_sequence  # Store predicted suffix
                 print(f"Predicted sequence: {predicted_sequence}")
             else:
@@ -401,7 +405,7 @@ if __name__ == "__main__":
     # Close the CSV file
     csv_file.close()
 
-    metrics_filename = utils.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'outcome_prediction_metrics')
+    metrics_filename = eval_helper.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'outcome_prediction_metrics')
     metrics_filename = metrics_filename.replace('.csv', '.txt')
     metrics_file_path = os.path.join(evaluation_dir, metrics_filename)
 
@@ -453,9 +457,9 @@ if __name__ == "__main__":
             if attr_samples:
                 # Compute solvability statistics
                 total_samples = len(attr_samples)
-                solved_samples = [s for s in attr_samples if s['solvability'] == utils.SOLVABILITY_SOLVED]
-                unsolvable_structural_samples = [s for s in attr_samples if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL]
-                unsolvable_resource_samples = [s for s in attr_samples if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_RESOURCE]
+                solved_samples = [s for s in attr_samples if s['solvability'] == planner_utils.SOLVABILITY_SOLVED]
+                unsolvable_structural_samples = [s for s in attr_samples if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL]
+                unsolvable_resource_samples = [s for s in attr_samples if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_RESOURCE]
                 
                 solved_count = len(solved_samples)
                 unsolvable_structural_count = len(unsolvable_structural_samples)
@@ -502,7 +506,7 @@ if __name__ == "__main__":
                         metrics_file.write(f"Discretized Value Accuracy: {accuracy:.2f}%\n")
                 
                 # Damerau-Levenshtein similarity metrics (like suffix prediction)
-                valid_samples = [s for s in attr_samples if s['solvability'] == utils.SOLVABILITY_SOLVED]
+                valid_samples = [s for s in attr_samples if s['solvability'] == planner_utils.SOLVABILITY_SOLVED]
                 if valid_samples:
                     total_distance = sum(item['distance'] for item in valid_samples)
                     average_distance = total_distance / len(valid_samples)
@@ -538,9 +542,9 @@ if __name__ == "__main__":
                         prefix_success_rate = len(prefix_successful) / len(prefix_samples) * 100
                         
                         # Solvability breakdown for this prefix
-                        prefix_solved = len([s for s in prefix_samples if s['solvability'] == utils.SOLVABILITY_SOLVED])
-                        prefix_struct = len([s for s in prefix_samples if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL])
-                        prefix_resource = len([s for s in prefix_samples if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_RESOURCE])
+                        prefix_solved = len([s for s in prefix_samples if s['solvability'] == planner_utils.SOLVABILITY_SOLVED])
+                        prefix_struct = len([s for s in prefix_samples if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL])
+                        prefix_resource = len([s for s in prefix_samples if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_RESOURCE])
 
                         print(f"  Prefix Length {prefix_len}: Success Rate = {prefix_success_rate:.2f}% ({len(prefix_successful)}/{len(prefix_samples)} samples)")
                         print(f"    Solvability: Solved={prefix_solved}, Structural={prefix_struct}, Resource={prefix_resource}")
@@ -553,7 +557,7 @@ if __name__ == "__main__":
                             print(f"    Discretized Accuracy: {prefix_accuracy:.2f}%")
                         
                         # Damerau-Levenshtein metrics for this prefix
-                        prefix_solved_samples = [s for s in prefix_samples if s['solvability'] == utils.SOLVABILITY_SOLVED]
+                        prefix_solved_samples = [s for s in prefix_samples if s['solvability'] == planner_utils.SOLVABILITY_SOLVED]
                         if prefix_solved_samples:
                             prefix_avg_distance = sum(s['distance'] for s in prefix_solved_samples) / len(prefix_solved_samples)
                             prefix_avg_similarity = sum(s['similarity'] for s in prefix_solved_samples) / len(prefix_solved_samples)

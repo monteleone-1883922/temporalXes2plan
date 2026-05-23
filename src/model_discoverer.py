@@ -3,7 +3,7 @@ from typing import Set, Dict, Tuple, Any, Optional
 import pm4py
 from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
-import utils
+import core_utils as utils
 
 logger = utils.get_logger(__name__)
 

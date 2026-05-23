@@ -5,9 +5,14 @@ import time
 import csv
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
-import utils
 from pddl_encoder import Encoder
 from xes_parser import Parser
+
+import evaluation_helper as eval_helper
+import pddl_helper as pddl_builder
+import argparse
+import planner_helper as planner_utils
+import core_utils as utils
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -17,7 +22,7 @@ def parse_arguments() -> argparse.Namespace:
     Returns:
         The parsed arguments as a Namespace object.
     """
-    parser = utils.create_base_argument_parser(
+    parser = eval_helper.create_base_argument_parser(
         "Run the evaluation of the framework for XES encoding in PDDL and generation of predictions through FOND planning."
     )
     return parser.parse_args()
@@ -63,7 +68,7 @@ def compute_goal_condition_suffix(
     
     if trace_events and full_trace_length > 0:
         last_trace_event = trace_events[-1]
-        goal_predicates.extend(utils.extract_attribute_predicates(parser, last_trace_event))
+        goal_predicates.extend(pddl_builder.extract_attribute_predicates(parser, last_trace_event))
     
     # Remove duplicates while preserving order
     seen = set()
@@ -89,11 +94,11 @@ if __name__ == "__main__":
     problem_file_path = os.path.join(script_dir, '..', 'pddl', f'problem.pddl')
     parser = Parser(args.xes_name, args.log_coverage, args.discovery_algorithm,
                      use_activity_classifier=args.use_activity_classifier)
-    test_traces, test_traces_with_events = utils.prepare_test_data(parser, args.max_traces)
+    test_traces, test_traces_with_events = eval_helper.prepare_test_data(parser, args.max_traces)
     
     evaluation_samples = []  # [full_real_trace, prefix_len, real_suffix, last_event, init_cond, goal_cond, predicted_suffix, distance, similarity, execution_time, trace_events, solvability, full_suffix_match]
     
-    prefix_lengths_to_test = utils.calculate_all_prefix_lengths(test_traces)
+    prefix_lengths_to_test = eval_helper.calculate_all_prefix_lengths(test_traces)
     print(f"Testing on {len(test_traces)} traces with all possible prefix lengths: {prefix_lengths_to_test}")
 
     stop_generation = False
@@ -108,7 +113,7 @@ if __name__ == "__main__":
                 prefix = sanitized_trace[:prefix_len]
                 real_suffix = sanitized_trace[prefix_len:]
                 # Use initial state that enables successors of the last prefix activity only
-                init_condition = utils.compute_initial_state_from_last_activity(parser, prefix, trace_events, prefix_len)
+                init_condition = pddl_builder.compute_initial_state_from_last_activity(parser, prefix, trace_events, prefix_len)
                 # Use goal condition requiring all activities in the real suffix to be completed
                 goal_condition = compute_goal_condition_suffix(parser, last_event, trace_events, len(trace_events), suffix=real_suffix)
                 evaluation_samples.append([
@@ -137,8 +142,8 @@ if __name__ == "__main__":
     print(f"Generated {len(evaluation_samples)} evaluation samples for all possible prefix lengths.")
 
     # Set up incremental CSV output with resume support
-    evaluation_dir = utils.create_evaluation_directories(script_dir)
-    filename = utils.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'suffix_prediction')
+    evaluation_dir = eval_helper.create_evaluation_directories(script_dir)
+    filename = eval_helper.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'suffix_prediction')
     evaluation_file_path = os.path.join(evaluation_dir, filename)
     
     # Check for existing results to resume from
@@ -207,12 +212,12 @@ if __name__ == "__main__":
         plan_path = os.path.join(script_dir, '..', 'pddl', 'plan_problem.txt')
         print(f"Running planner...")
         
-        planner_success, planner_message, planning_metrics, solvability = utils.run_planner(plan_path, args.search)
+        planner_success, planner_message, planning_metrics, solvability = planner_utils.run_planner(plan_path, args.search)
         sample[11] = solvability  # Store solvability status
         
         if planner_success:
             print("Planning executed successfully.")
-            predicted_suffix = utils.parse_plan_file(plan_path)
+            predicted_suffix = planner_utils.parse_plan_file(plan_path)
             sample[6] = predicted_suffix
         else:
             print(f"Planning failed: {planner_message} (solvability: {solvability})")
@@ -220,13 +225,13 @@ if __name__ == "__main__":
             sample[6] = predicted_suffix
 
             # Diagnostic: show why structural failures happen
-            if solvability == utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL:
+            if solvability == planner_utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL:
                 try:
                     print("  Diagnostic Info: Structural unsolvable sample details:")
                     print(f"    Init predicates: {init_condition}")
-                    enabled_from_last = utils.compute_enabled_activities_after_last_activity(parser, last_event)
+                    enabled_from_last = pddl_builder.compute_enabled_activities_after_last_activity(parser, last_event)
                     print(f"    Enabled after last activity (direct/petri): {sorted(list(enabled_from_last))}")
-                    reachable = utils.compute_reachable_activities_from_last_activity(parser, last_event, max_depth=5)
+                    reachable = pddl_builder.compute_reachable_activities_from_last_activity(parser, last_event, max_depth=5)
                     print(f"    Reachable activities from last activity via direct graph (depth 5): {sorted(list(reachable))}")
                     print(f"    Goal predicates: {goal_condition}")
                 except Exception as e:
@@ -286,7 +291,7 @@ if __name__ == "__main__":
     # Close the CSV file
     csv_file.close()
     
-    metrics_filename = utils.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'suffix_prediction_metrics')
+    metrics_filename = eval_helper.generate_evaluation_filename(pddl_name, args.log_coverage, args.search, 'suffix_prediction_metrics')
     metrics_filename = metrics_filename.replace('.csv', '.txt')
     metrics_file_path = os.path.join(evaluation_dir, metrics_filename)
 
@@ -327,9 +332,9 @@ if __name__ == "__main__":
         if all_results:
             # Compute solvability statistics
             total_samples = len(all_results)
-            solved_samples = [s for s in all_results if s['solvability'] == utils.SOLVABILITY_SOLVED]
-            unsolvable_structural_samples = [s for s in all_results if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL]
-            unsolvable_resource_samples = [s for s in all_results if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_RESOURCE]
+            solved_samples = [s for s in all_results if s['solvability'] == planner_utils.SOLVABILITY_SOLVED]
+            unsolvable_structural_samples = [s for s in all_results if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL]
+            unsolvable_resource_samples = [s for s in all_results if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_RESOURCE]
             
             solved_count = len(solved_samples)
             unsolvable_structural_count = len(unsolvable_structural_samples)
@@ -355,7 +360,7 @@ if __name__ == "__main__":
                 metrics_file.write(f"Unsolvable (Resource): {unsolvable_resource_count} ({unsolvable_resource_pct:.2f}%)\n")
                 metrics_file.write(f"\n")
             
-            valid_samples = [s for s in all_results if s['solvability'] == utils.SOLVABILITY_SOLVED]
+            valid_samples = [s for s in all_results if s['solvability'] == planner_utils.SOLVABILITY_SOLVED]
 
             if valid_samples:
                 total_distance = sum(item['distance'] for item in valid_samples)
@@ -408,9 +413,9 @@ if __name__ == "__main__":
                     
                     # Compute solvability stats for this prefix
                     prefix_total = len(all_prefix_samples)
-                    prefix_solved = len([s for s in all_prefix_samples if s['solvability'] == utils.SOLVABILITY_SOLVED])
-                    prefix_struct = len([s for s in all_prefix_samples if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL])
-                    prefix_resource = len([s for s in all_prefix_samples if s['solvability'] == utils.SOLVABILITY_UNSOLVABLE_RESOURCE])
+                    prefix_solved = len([s for s in all_prefix_samples if s['solvability'] == planner_utils.SOLVABILITY_SOLVED])
+                    prefix_struct = len([s for s in all_prefix_samples if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_STRUCTURAL])
+                    prefix_resource = len([s for s in all_prefix_samples if s['solvability'] == planner_utils.SOLVABILITY_UNSOLVABLE_RESOURCE])
                     
                     prefix_solvability_stats[prefix_len] = {
                         'total': prefix_total,

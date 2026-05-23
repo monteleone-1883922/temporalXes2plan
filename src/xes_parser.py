@@ -15,7 +15,7 @@ from model_discoverer import ModelDiscoverer
 from structure_analyzer import StructureAnalyzer
 from probability_estimator import ProbabilityEstimator
 from correlation_miner import CorrelationMiner, RelationshipMetrics
-import utils
+import core_utils as utils
 
 SEED = 42
 random.seed(SEED)

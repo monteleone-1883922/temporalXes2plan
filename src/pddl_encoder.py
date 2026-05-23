@@ -3,7 +3,7 @@ import random
 from collections import defaultdict
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import pm4py
-import utils
+import core_utils as utils
 from xes_parser import Parser
 
 

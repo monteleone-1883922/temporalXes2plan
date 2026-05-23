@@ -2,7 +2,7 @@ import logging
 from collections import defaultdict
 from tqdm import tqdm
 from typing import Dict, List, Set, Tuple, Union, Any
-import utils
+import core_utils as utils
 
 logger = utils.get_logger(__name__)
 

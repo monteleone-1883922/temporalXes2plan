@@ -5,7 +5,7 @@ from typing import Dict, List, Set, Tuple, Union, Optional, Any
 import pm4py
 from pm4py import PetriNet
 from pm4py.objects.powl.obj import Transition
-import utils
+import core_utils as utils
 
 logger = utils.get_logger(__name__)
 

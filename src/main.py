@@ -4,7 +4,7 @@ import os
 from xes_parser import Parser
 from pddl_encoder import Encoder
 import subprocess
-import utils
+import pddl_helper as pddl_builder
 
 
 def parse_arguments() -> Namespace:
@@ -48,8 +48,8 @@ if __name__ == "__main__":
     parser = Parser(args.xes_name, args.log_coverage, args.discovery_algorithm,
                     use_activity_classifier=args.use_activity_classifier)
 
-    custom_init = utils.read_state_file(init_file_path)
-    custom_goal = utils.read_state_file(goal_file_path)
+    custom_init = pddl_builder.read_state_file(init_file_path)
+    custom_goal = pddl_builder.read_state_file(goal_file_path)
     if not custom_init:
         print("Using default empty initial state.")
     if not custom_goal:

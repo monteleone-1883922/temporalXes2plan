@@ -3,7 +3,7 @@ import copy
 from tqdm import tqdm
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import pm4py
-import utils
+import core_utils as utils
 
 logger = utils.get_logger(__name__)
 
