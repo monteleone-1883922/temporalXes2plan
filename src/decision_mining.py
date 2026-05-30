@@ -490,7 +490,7 @@ def discover_all_decision_rules(
                     all_value_types[feature].update(types)
                 
                 # Add samples
-                current_formatted = 'exec_' + utils.sanitize_name(point)
+                current_formatted = 'exec_' + utils.sanitize_name(point) #point is an activity not a place
                 for activity_name, guards_list in rules_for_point.items():
                     formatted_activity = 'exec_' + utils.sanitize_name(activity_name)
                     for guard in guards_list:
