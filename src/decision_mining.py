@@ -799,6 +799,7 @@ def get_attribute_domains(
                     else:
                         attr_values[attr].add(False)
             elif ' = ' in inner:
+                # TODO for now it is not handled in this way
                 attr, value = inner.split(' = ', 1)
                 if not intervals or not attr in intervals:
                     attr_values[attr].add(value)

@@ -38,7 +38,7 @@ class PreconditionCollector:
         
         if not direct_predecessors:
             return list(preconditions)
-
+        # TODO return the params for the action
         action_attributes_param = get_attribute_params(self.context, action_name)
             
         # By default, include completed predecessor(s) as preconditions to follow
@@ -59,6 +59,7 @@ class PreconditionCollector:
         # Add attribute-based conditions (keep existing logic)
 
         attr_values = defaultdict(set)
+        #iterate on dict that contains for each attr and value how likely a certain action will happen
         for attr, values in self.context.attr_activity_relationships.items():
             for val, activities in values.items():
                 if action_name in activities:
