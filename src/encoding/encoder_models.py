@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Set, Optional, Any, Union
 
-from correlation_miner import RelationshipMetrics
-from xes_parser import Parser
+from parsing.correlation_miner import RelationshipMetrics
+from parsing.xes_parser import Parser
 
 
 @dataclass

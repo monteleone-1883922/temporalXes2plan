@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from core_utils import get_logger, sanitize_name
 
 # Import base activity extractor from state builder to keep logic clean
-from pddl_helper import extract_base_activity_name
+from encoding.pddl_helper import extract_base_activity_name
 
 logger = get_logger(__name__)
 

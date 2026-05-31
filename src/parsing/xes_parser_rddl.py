@@ -3,8 +3,8 @@ import sys
 import numpy as np
 from collections import defaultdict
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
-from xes_parser import Parser
-from decision_mining import discover_all_decision_rules, get_attribute_domains
+from .xes_parser import Parser
+from .decision_mining import discover_all_decision_rules, get_attribute_domains
 import core_utils as utils
 
 

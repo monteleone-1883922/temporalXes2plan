@@ -1,10 +1,10 @@
 from argparse import ArgumentParser, Namespace
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import os
-from xes_parser import Parser
-from pddl_encoder import Encoder
+from parsing.xes_parser import Parser
+from encoding.pddl_encoder import Encoder
 import subprocess
-import pddl_helper as pddl_builder
+from encoding import pddl_helper as pddl_builder
 
 
 def parse_arguments() -> Namespace:

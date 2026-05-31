@@ -1,7 +1,7 @@
 from typing import List, Set, Dict, Any, Optional
 from collections import defaultdict
-from encoder_models import PDDLEncodingContext, ConditionalEffect
-from pddl_action_utils import is_tau_activity, get_attribute_params, get_successors, get_decision_point_for_activity
+from .encoder_models import PDDLEncodingContext, ConditionalEffect
+from .pddl_action_utils import is_tau_activity, get_attribute_params, get_successors, get_decision_point_for_activity
 
 class EffectCollector:
     """

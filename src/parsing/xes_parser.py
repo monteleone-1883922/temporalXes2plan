@@ -9,12 +9,12 @@ from pm4py import PetriNet, Marking
 from pm4py.objects.log.obj import EventLog
 from pm4py.objects.powl.obj import Transition
 
-from decision_mining import discover_all_decision_rules, get_attribute_domains
-from log_processor import LogProcessor
-from model_discoverer import ModelDiscoverer
-from structure_analyzer import StructureAnalyzer
-from probability_estimator import ProbabilityEstimator
-from correlation_miner import CorrelationMiner, RelationshipMetrics
+from .decision_mining import discover_all_decision_rules, get_attribute_domains
+from .log_processor import LogProcessor
+from .model_discoverer import ModelDiscoverer
+from .structure_analyzer import StructureAnalyzer
+from .probability_estimator import ProbabilityEstimator
+from .correlation_miner import CorrelationMiner, RelationshipMetrics
 import core_utils as utils
 
 SEED = 42

@@ -1,8 +1,8 @@
 from typing import List, Dict, Any, Optional, Set, Union
-from encoder_models import PDDLEncodingContext, ActionVariant, MeasurementVariant
-from pddl_precondition_collector import PreconditionCollector
-from pddl_effect_collector import EffectCollector
-from pddl_action_utils import get_attribute_params, get_successors
+from .encoder_models import PDDLEncodingContext, ActionVariant, MeasurementVariant
+from .pddl_precondition_collector import PreconditionCollector
+from .pddl_effect_collector import EffectCollector
+from .pddl_action_utils import get_attribute_params, get_successors
 
 class ActionBuilder:
     """

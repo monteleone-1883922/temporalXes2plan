@@ -2,14 +2,14 @@ import os
 from collections import defaultdict
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import core_utils as utils
-from xes_parser import Parser
+from parsing.xes_parser import Parser
 
-from encoder_models import PDDLEncodingContext
-from pddl_precondition_collector import PreconditionCollector
-from pddl_effect_collector import EffectCollector
-from pddl_action_builder import ActionBuilder
-from pddl_domain_builder import DomainBuilder
-from pddl_problem_builder import ProblemBuilder
+from .encoder_models import PDDLEncodingContext
+from .pddl_precondition_collector import PreconditionCollector
+from .pddl_effect_collector import EffectCollector
+from .pddl_action_builder import ActionBuilder
+from .pddl_domain_builder import DomainBuilder
+from .pddl_problem_builder import ProblemBuilder
 
 class Encoder:
     """

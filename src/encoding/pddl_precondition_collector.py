@@ -2,8 +2,8 @@ from typing import List, Dict, Any, Optional
 import pm4py
 import core_utils as utils
 from collections import defaultdict
-from encoder_models import PDDLEncodingContext
-from pddl_action_utils import get_attribute_params
+from .encoder_models import PDDLEncodingContext
+from .pddl_action_utils import get_attribute_params
 
 class PreconditionCollector:
     """

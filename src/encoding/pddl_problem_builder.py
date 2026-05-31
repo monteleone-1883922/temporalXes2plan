@@ -1,8 +1,8 @@
 import os
 import random
 from typing import Optional, List
-from encoder_models import PDDLEncodingContext
-from pddl_action_builder import ActionBuilder
+from .encoder_models import PDDLEncodingContext
+from .pddl_action_builder import ActionBuilder
 
 class ProblemBuilder:
     """

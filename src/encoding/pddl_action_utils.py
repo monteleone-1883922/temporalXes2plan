@@ -1,5 +1,5 @@
 from typing import Set, List, Optional, Dict
-from encoder_models import PDDLEncodingContext
+from .encoder_models import PDDLEncodingContext
 
 def is_tau_activity(activity_name: str) -> bool:
     """Check if an activity is a silent (tau) transition."""
