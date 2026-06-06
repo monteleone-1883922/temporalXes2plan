@@ -1,43 +1,74 @@
-import logging
 from collections import defaultdict
-from tqdm import tqdm
-from typing import Dict, List, Set, Tuple, Union, Optional, Any
+from typing import Dict, List, Set, Any
+
 import pm4py
-from pm4py import PetriNet
+from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
+
 import core_utils as utils
+from models import AnalysisConfig
 
 logger = utils.get_logger(__name__)
 
+
 class ProbabilityEstimator:
     """
-    Computes branch/decision probabilities based on the event log data.
+    Computes XOR-split branch probabilities via token-based replay against the Petri net.
+
+    Token replay assigns each trace to an exact execution path through the net,
+    eliminating the ambiguity of raw directly-follows counting.  Traces whose
+    replay fitness falls below config.replay_min_fitness are excluded from the
+    branch counts and logged.
     """
+
     def __init__(
-        self, 
-        edges: Set[PetriNet.Arc], 
-        predecessors: Dict[str, List[str]], 
-        silent_transitions: Dict[Transition, str]
+        self,
+        petrinet: PetriNet,
+        initial_marking: Marking,
+        final_marking: Marking,
+        edges: Set[PetriNet.Arc],
+        silent_transitions: Dict[Transition, str],
+        config: AnalysisConfig,
     ) -> None:
         """
         Initialize ProbabilityEstimator.
 
         Args:
-            edges: Set of arcs (edges) in the Petri Net.
-            predecessors: Mapping of activity names to their predecessors.
+            petrinet: The discovered Petri net.
+            initial_marking: Initial token marking of the Petri net.
+            final_marking: Final token marking of the Petri net.
+            edges: Set of arcs in the Petri net (used to build input/output place maps).
             silent_transitions: Mapping from Transition objects to their tau names.
+            config: Analysis configuration (replay_min_fitness threshold, etc.).
         """
-        self.edges = edges
-        self.predecessors = predecessors
+        self.petrinet = petrinet
+        self.initial_marking = initial_marking
+        self.final_marking = final_marking
         self.silent_transitions = silent_transitions
+        self.config = config
 
-    def compute_decision_points_probabilities(self, full_log: Any) -> Dict[str, Dict[str, float]]:
+        # Pre-build input/output place maps for marking simulation
+        self._trans_inputs: Dict[Transition, Set[PetriNet.Place]] = defaultdict(set)
+        self._trans_outputs: Dict[Transition, Set[PetriNet.Place]] = defaultdict(set)
+        for arc in edges:
+            if isinstance(arc.source, PetriNet.Place) and isinstance(arc.target, PetriNet.Transition):
+                self._trans_inputs[arc.target].add(arc.source)
+            elif isinstance(arc.source, PetriNet.Transition) and isinstance(arc.target, PetriNet.Place):
+                self._trans_outputs[arc.source].add(arc.target)
+
+    def compute_decision_points_probabilities(
+        self,
+        full_log: Any,
+        decision_points: Dict[PetriNet.Place, List[Transition]],
+    ) -> Dict[str, Dict[str, float]]:
         """
-        Identify decision points (XOR-splits) in the Petri net and compute their branch probabilities
-        by analyzing transition frequencies in the event log.
+        Compute branch probabilities for the given XOR-split decision points via
+        token-based replay.
 
         Args:
-            full_log: The full event log to analyze frequencies from.
+            full_log: The full event log to replay.
+            decision_points: XOR-split places mapped to their outgoing transitions,
+                as returned by StructureAnalyzer.identify_xor_splits().
 
         Returns:
             Dictionary mapping place names to branch probabilities:
@@ -55,188 +86,159 @@ class ProbabilityEstimator:
                 }
             }
         """
-        # Step 1: Get place-to-outgoing-transitions mapping
-        place_outgoing_transitions = self._get_place_outgoing_transitions()
-        
-        # Step 2: Keep only places with more than 1 outgoing path (XOR-splits)
-        decision_points = {
-            place: transitions
-            for place, transitions in place_outgoing_transitions.items()
-            if len(transitions) > 1
+        replay_results = self._replay_log(full_log)
+        branch_counts = self._count_branches_from_replay(replay_results, decision_points)
+        return self._normalize_branch_counts(branch_counts, decision_points)
+
+    def _replay_log(self, full_log: Any) -> List[Dict]:
+        """
+        Replay the event log against the Petri net and return only traces that meet
+        the minimum fitness threshold.
+
+        Traces below config.replay_min_fitness are skipped; a summary warning is
+        logged at the end showing the percentage of skipped traces.
+
+        Args:
+            full_log: The event log to replay.
+
+        Returns:
+            List of replay result dicts for traces that passed the fitness filter.
+            Each dict contains at least 'activated_transitions' and 'trace_fitness'.
+        """
+        logger.info("Running token-based replay to estimate XOR-split probabilities...")
+        # return_object_names=False → activated_transitions contains Transition
+        # objects instead of name strings, required for marking simulation.
+        replayed = pm4py.conformance_diagnostics_token_based_replay(
+            full_log, self.petrinet, self.initial_marking, self.final_marking,
+            opt_parameters={"return_object_names": False},
+        )
+
+        total = len(replayed)
+        skipped = 0
+        filtered = []
+
+        for i, trace_result in enumerate(replayed):
+            fitness = trace_result.get("trace_fitness", 0.0)
+            if fitness < self.config.replay_min_fitness:
+                logger.debug(
+                    f"Skipping trace {i}: fitness={fitness:.3f} < threshold={self.config.replay_min_fitness}"
+                )
+                skipped += 1
+            else:
+                filtered.append(trace_result)
+
+        if skipped > 0:
+            skip_pct = 100.0 * skipped / total if total > 0 else 0.0
+            logger.warning(
+                f"Token replay: skipped {skipped}/{total} traces ({skip_pct:.1f}%) "
+                f"with fitness < {self.config.replay_min_fitness}"
+            )
+        else:
+            logger.info(f"Token replay: all {total} traces passed fitness threshold.")
+
+        return filtered
+
+    def _count_branches_from_replay(
+        self,
+        replay_results: List[Dict],
+        decision_points: Dict[PetriNet.Place, List[Transition]],
+    ) -> Dict[PetriNet.Place, Dict[Transition, int]]:
+        """
+        Count XOR-split branch activations by simulating the token marking over
+        each replayed trace.
+
+        For each trace we start from initial_marking and process activated_transitions
+        in order.  Before firing each transition T we check which of its input places
+        are XOR-split places that currently hold a token: only those get a +1 for
+        branch T.  We then update the marking (consume inputs, produce outputs) before
+        moving to the next transition.
+
+        This is the only correct approach: it ties each branch count to the actual
+        token state at the moment of firing, so overlapping XOR-split structures and
+        loops are handled without ambiguity.
+
+        Args:
+            replay_results: Filtered replay results from _replay_log().
+                activated_transitions must contain Transition objects
+                (requires return_object_names=False in the replay call).
+            decision_points: XOR-split places mapped to their outgoing transitions.
+
+        Returns:
+            Nested dict: Place -> Transition -> activation count.
+        """
+        xor_places: Set[PetriNet.Place] = set(decision_points.keys())
+        branch_counts: Dict[PetriNet.Place, Dict[Transition, int]] = {
+            place: defaultdict(int) for place in decision_points
         }
 
-        # Step 3: Compute how often activity A is directly followed by activity B in the log
-        df_counts = self._compute_activity_frequencies(full_log)
-        
-        # Step 4: Calculate branch probabilities based on frequencies
-        decision_probabilities = self._compute_decision_probabilities(decision_points, df_counts)
+        for trace_result in replay_results:
+            marking: Dict[PetriNet.Place, int] = dict(self.initial_marking)
 
-        return decision_probabilities
+            for transition in trace_result.get("activated_transitions", []):
+                # Step 1 — count: which XOR-split places have a token and lead to T?
+                for place in self._trans_inputs[transition]:
+                    if place in xor_places and marking.get(place, 0) > 0:
+                        branch_counts[place][transition] += 1
 
-    def _get_place_outgoing_transitions(self) -> Dict[PetriNet.Place, List[Transition]]:
-        return self._get_place_outgoing_transitions_activities()
+                # Step 2 — fire: consume one token from each input place
+                for place in self._trans_inputs[transition]:
+                    tokens = marking.get(place, 0)
+                    if tokens == 1:
+                        del marking[place]
+                    elif tokens > 1:
+                        marking[place] = tokens - 1
 
-    def _get_place_outgoing_transitions_activities(self, return_act_names: bool = False) -> \
-            Dict[PetriNet.Place, Union[List[Transition], List[str]]]:
-        """
-        Maps each Petri Net Place to its list of outgoing Transitions or activity names.
+                # Step 3 — fire: produce one token in each output place
+                for place in self._trans_outputs[transition]:
+                    marking[place] = marking.get(place, 0) + 1
 
-        Args:
-            return_act_names: If True, resolves and returns sanitized activity names instead of Transition objects.
+        return branch_counts
 
-        Returns:
-            Dictionary mapping Places to lists of Transitions or sanitized activity name strings.
-            E.g. (when return_act_names=False):
-            {
-                Place("place_1"): [Transition("t1"), Transition("t2")]
-            }
-            E.g. (when return_act_names=True):
-            {
-                Place("place_1"): ["ER_Triage", "ER_Sepsis_Triage"]
-            }
-        """
-        place_outgoing_transitions = defaultdict(list)
-        for arc in self.edges:
-            source, target = arc.source, arc.target
-            if isinstance(source, pm4py.objects.petri_net.obj.PetriNet.Place) and \
-               isinstance(target, pm4py.objects.petri_net.obj.PetriNet.Transition):
-                place_outgoing_transitions[source].append(
-                    self._get_activity_name_for_transition(target)
-                    if return_act_names
-                    else target
-                )
-        return place_outgoing_transitions
-
-    def _compute_activity_frequencies(self, full_log: Any) -> Dict[str, Dict[str, int]]:
-        """
-        Computes the direct succession (directly-follows) frequencies from the event log.
-
-        Args:
-            full_log: The event log log to iterate over.
-
-        Returns:
-            Nested dictionary representing:
-            SourceActivity -> TargetActivity -> AbsoluteFrequencyCount
-
-            ESEMPIO DI OUTPUT RITORNATO:
-            {
-                "ER_Registration": {
-                    "ER_Triage": 450,
-                    "ER_Sepsis_Triage": 50
-                },
-                "ER_Triage": {
-                    "LacticAcid_Measurement": 380,
-                    "Release_A": 70
-                }
-            }
-        """
-        df_counts = defaultdict(lambda: defaultdict(int))
-        for trace in tqdm(full_log, desc="Computing activity frequencies"):
-            for i in range(len(trace) - 1):
-                current_activity = utils.sanitize_name(trace[i]["concept:name"])
-                next_activity = utils.sanitize_name(trace[i+1]["concept:name"])
-                df_counts[current_activity][next_activity] += 1
-        return df_counts
-
-    def _compute_decision_probabilities(
+    def _normalize_branch_counts(
         self,
+        branch_counts: Dict[PetriNet.Place, Dict[Transition, int]],
         decision_points: Dict[PetriNet.Place, List[Transition]],
-        df_counts: Dict[str, Dict[str, int]]
     ) -> Dict[str, Dict[str, float]]:
         """
-        Estimates conditional branch probabilities at each choice place.
-        For a choice place with branches B1, B2...:
-        We find the incoming activities I1, I2... that structurally precede the branches.
-        We count how often B1, B2... execute directly after I1, I2... in the event log.
-        Finally we divide by the total count to get the branch probability.
+        Normalize branch activation counts into probabilities.
+
+        Branches with zero total count fall back to equal probabilities and a
+        warning is logged.
 
         Args:
-            decision_points: Dictionary mapping Places to list of outgoing branch transitions.
-            df_counts: Directly-follows frequency counts mapped by source -> target activity.
+            branch_counts: Activation counts per place and transition.
+            decision_points: XOR-split places mapped to their outgoing transitions.
 
         Returns:
-            Dictionary mapping place names to branch probabilities:
-            PlaceName -> BranchActivityName -> Probability
-            E.g. {"place_XOR_1": {"ER_Triage": 0.40, "ER_Sepsis_Triage": 0.60}}
+            Dictionary mapping place names to branch probabilities.
         """
-        decision_probabilities = {}
+        result: Dict[str, Dict[str, float]] = {}
 
-        for place, outgoing_transitions in decision_points.items():
-            # Get the transitions outgoing from this choice point
-            # all_transitions is a list of tuples: (TransitionObj, raw_label, sanitized_label)
-            all_transitions = [
-                (t, self._get_activity_name_for_transition(t),
-                 utils.sanitize_name(self._get_activity_name_for_transition(t)))
-                for t in outgoing_transitions
-            ]
+        for place, transitions in decision_points.items():
+            counts = branch_counts[place]
+            total = sum(counts.values())
 
-            # Collect structural predecessor activities that lead to this choice point
-            incoming_activities: set[str] = set()
-            for _, _, sanitized_out in all_transitions:
-                preds = self.predecessors.get(sanitized_out, [])
-                if not preds:
-                    logger.debug(f"Activity {sanitized_out} has no predecessors in the Petri net")
-                for pred in preds:
-                    self._add_non_tau_predecessors(pred, incoming_activities)
-            
-            if not incoming_activities:
-                logger.debug(f"No incoming activities found for decision point {place.name}")
-
-            # Sum up observed transitions in the log from any incoming activity to each choice branch
-            transition_counts: Dict[Transition, int] = defaultdict(int)
-            total_count = 0
-            for in_activity in incoming_activities:
-                for out_transition, _, sanitized_out in all_transitions:
-                    count = df_counts.get(in_activity, {}).get(sanitized_out, 0)
-                    transition_counts[out_transition] += count
-                    total_count += count
-
-            # Calculate branch probabilities
-            place_probs = {}
-            if total_count > 0:
-                for transition, count in transition_counts.items():
-                    action_name = self._get_activity_name_for_transition(transition)
-                    place_probs[action_name] = round(count / total_count, 2)
+            if total > 0:
+                place_probs = {
+                    self._get_activity_name_for_transition(t): round(counts[t] / total, 2)
+                    for t in transitions
+                }
             else:
-                # Fallback: if no logs matched this structural choice, assign equal probabilities
-                logger.warning(f"No log data found for decision point {place.name} (incoming: {incoming_activities}, outgoing: {[t[2] for t in all_transitions]}). Assigning equal probabilities.")
-                equal_prob = round(1.0 / len(all_transitions), 2) if all_transitions else 0.0
-                for _, action_name, _ in all_transitions:
-                    place_probs[action_name] = equal_prob
+                branch_names = [self._get_activity_name_for_transition(t) for t in transitions]
+                logger.warning(
+                    f"No replay data for XOR-split '{place.name}' "
+                    f"(branches: {branch_names}). Assigning equal probabilities."
+                )
+                equal_prob = round(1.0 / len(transitions), 2) if transitions else 0.0
+                place_probs = {
+                    self._get_activity_name_for_transition(t): equal_prob
+                    for t in transitions
+                }
 
             if place_probs:
-                decision_probabilities[place.name] = place_probs
+                result[place.name] = place_probs
 
-        return decision_probabilities
-
-    def _add_non_tau_predecessors(
-        self, 
-        activity: str, 
-        incoming_set: Set[str], 
-        visited: Optional[Set[str]] = None
-    ) -> None:
-        """
-        Recursively traces back through silent ('tau') transitions to find 
-        the nearest actual (labeled) predecessor activities.
-
-        Args:
-            activity: The predecessor activity name (possibly silent).
-            incoming_set: The output set where found labeled predecessor names are collected.
-            visited: Set to track visited activity names to prevent infinite recursion in cyclic nets.
-        """
-        if visited is None:
-            visited = set()
-        
-        if activity in visited:
-            logger.debug(f"Cycle detected in tau transitions at activity: {activity}")
-            return
-        visited.add(activity)
-        
-        if not activity.startswith('tau'):
-            incoming_set.add(activity)
-        else:
-            for pred in self.predecessors.get(activity, []):
-                self._add_non_tau_predecessors(pred, incoming_set, visited)
+        return result
 
     def _get_activity_name_for_transition(self, transition: Transition) -> str:
         """
@@ -251,6 +253,5 @@ class ProbabilityEstimator:
         """
         if transition.label is not None:
             return utils.sanitize_name(transition.label)
-        else:
-            fallback_name = f"tau_unknown_{id(transition)}"
-            return self.silent_transitions.get(transition, fallback_name)
+        fallback_name = f"tau_unknown_{id(transition)}"
+        return self.silent_transitions.get(transition, fallback_name)
