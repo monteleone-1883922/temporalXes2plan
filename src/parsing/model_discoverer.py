@@ -1,9 +1,8 @@
-import logging
-from typing import Set, Dict, Tuple, Any, Optional
+from typing import Set, Dict, Tuple, Any, Collection
 import pm4py
-from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
 import core_utils as utils
+from models import PetriNetModel
 
 logger = utils.get_logger(__name__)
 
@@ -31,28 +30,16 @@ class ModelDiscoverer:
                              f"Supported algorithms: {list(self.DISCOVERY_ALGORITHMS.keys())}")
         self.discovery_algorithm = discovery_algorithm
 
-    def discover(self, train_log: Any) -> Tuple[
-        PetriNet,
-        Marking,
-        Marking,
-        Set[Transition],
-        Set[PetriNet.Place],
-        Set[PetriNet.Arc]
-    ]:
+    def discover(self, train_log: Any) -> PetriNetModel:
         """
-        Discover the Petri net from the log and return the structural sets.
+        Discover the Petri net from the log and return a complete structural model.
 
         Args:
             train_log: The training event log.
 
         Returns:
-            Tuple containing:
-            - petrinet: The discovered PetriNet.
-            - initial_marking: Initial Marking of the Petri Net.
-            - final_marking: Final Marking of the Petri Net.
-            - transitions: Set of Transition objects in the Petri net.
-            - places: Set of Place objects in the Petri net.
-            - edges: Set of Arc (edge) objects in the Petri net.
+            PetriNetModel containing the Petri net, markings(initial and final,
+            activity names, and silent transition mapping.
         """
         discovery_function = self.DISCOVERY_ALGORITHMS[self.discovery_algorithm]
         try:
@@ -62,51 +49,45 @@ class ModelDiscoverer:
             if not final_marking:
                 logger.warning("Discovered Petri net has an empty final marking")
 
-            transitions = set(petrinet.transitions)
-            places = set(petrinet.places)
-            edges = set(petrinet.arcs)
+            activities, silent_transitions = self._extract_activities_and_silent(petrinet.transitions)
+
             logger.info(f"Successfully discovered Petri net using {self.discovery_algorithm} algorithm")
-            return petrinet, initial_marking, final_marking, transitions, places, edges
+            return PetriNetModel(
+                petrinet=petrinet,
+                initial_marking=initial_marking,
+                final_marking=final_marking,
+                activities=activities,
+                silent_transitions=silent_transitions,
+            )
         except Exception as e:
             logger.error(f"Error discovering Petri net with {self.discovery_algorithm} algorithm: {e}")
             raise e
 
-    def extract_basic_properties(
-            self,
-            transitions: Set[Transition],
-            full_log: Any
-    ) -> Tuple[Set[str], Dict[Transition, str], Dict[str, int], Dict[str, int]]:
+    def _extract_activities_and_silent(
+        self,
+        transitions: Collection[Transition]
+    ) -> Tuple[Set[str], Dict[Transition, str]]:
         """
-        Extract core properties from the discovered transitions and event log.
+        Build the activity name set and silent transition mapping from the transition set.
 
         Args:
             transitions: Set of all Petri net transitions.
-            full_log: Full event log to calculate start and end frequencies.
 
         Returns:
-            Tuple containing:
-            - activities: Set of all sanitized unique activity names.
-            - silent_transitions: Map of Petri Net Transitions to tau names.
-            - start_activities: Frequency map of start activities.
-            - end_activities: Frequency map of end activities.
+            Tuple of (activities, silent_transitions).
         """
-        silent_transitions = {}
-        activities_set = set()
+        silent_transitions: Dict[Transition, str] = {}
+        activities: Set[str] = set()
         tau_counter = 1
 
         for transition in transitions:
-            if transition.label is None:  # Create a tau action for a silent transition
+            if transition.label is None:
                 tau_name = f"tau_{tau_counter}"
                 silent_transitions[transition] = tau_name
-                activities_set.add(tau_name)
+                activities.add(tau_name)
                 tau_counter += 1
-            else:  # Regular labeled transition
-                sanitized_name = utils.sanitize_name(transition.label)
-                activities_set.add(sanitized_name)
+            else:
+                activities.add(utils.sanitize_name(transition.label))
 
-        start_activities = {utils.sanitize_name(activity): freq
-                            for activity, freq in pm4py.get_start_activities(full_log).items()}
-        end_activities = {utils.sanitize_name(activity): freq
-                          for activity, freq in pm4py.get_end_activities(full_log).items()}
+        return activities, silent_transitions
 
-        return activities_set, silent_transitions, start_activities, end_activities
