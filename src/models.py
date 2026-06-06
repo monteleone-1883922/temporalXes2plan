@@ -1,8 +1,57 @@
 from dataclasses import dataclass, field
-from typing import Dict, Set
+from typing import Any, Dict, List, Set
 
 from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
+
+
+@dataclass
+class FiringStep:
+    """A single transition firing in a Petri net execution, annotated with event attributes.
+
+    Produced by PetriNetLogBuilder for each activated transition during replay.
+    from_places contains only input places that actually held a token when the
+    transition fired (runtime state). Output places are static structure and can
+    be looked up via StructureAnalyzer.build_arc_maps() trans_outputs.
+    """
+    transition: PetriNet.Transition
+    activity_name: str
+    is_tau: bool
+    from_places: Set[PetriNet.Place]
+    attributes: Dict[str, Any]
+
+
+@dataclass
+class TraceExecution:
+    """A complete Petri net execution for one log trace.
+
+    steps is an ordered list of FiringSteps, one per activated transition
+    (including tau transitions). Navigation helpers allow querying by place
+    or by transition without iterating steps manually.
+    """
+    trace_id: str
+    steps: List[FiringStep]
+
+    def steps_through_place(self, place: PetriNet.Place) -> List[FiringStep]:
+        """All steps that consumed a token from the given place."""
+        return [s for s in self.steps if place in s.from_places]
+
+    def steps_for_transition(self, transition: PetriNet.Transition) -> List[FiringStep]:
+        """All steps where the given transition fired."""
+        return [s for s in self.steps if s.transition is transition]
+
+
+@dataclass
+class PetriNetLog:
+    """Event log expressed as Petri net executions with annotated attributes.
+
+    Replaces the raw pm4py EventLog for all downstream analysis. Each execution
+    corresponds to one log trace that met the replay fitness threshold.
+    """
+    executions: List[TraceExecution]
+    net: PetriNet
+    initial_marking: Marking
+    final_marking: Marking
 
 
 @dataclass

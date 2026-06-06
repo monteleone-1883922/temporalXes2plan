@@ -1,24 +1,19 @@
 """
 Tests for parsing.probability_estimator.ProbabilityEstimator.
 
-_count_branches_from_replay, _normalize_branch_counts, and
-_get_activity_name_for_transition are tested with fully synthetic Petri net
-components and fabricated replay results — no real event log or pm4py
-discovery algorithm is involved.
-
-_replay_log is tested with unittest.mock.patch to replace pm4py's conformance
-checking with controlled fake results.
+All tests use synthetic Petri net components and manually constructed
+FiringStep / TraceExecution / PetriNetLog objects — no real event log,
+pm4py discovery algorithm, or token-based replay is involved.
 """
 import pytest
 from collections import defaultdict
 from typing import Set, TypedDict
-from unittest.mock import patch
 
 from pm4py import PetriNet, Marking
 
 from tests.helpers import _transition, _place, _arc
 from parsing.probability_estimator import ProbabilityEstimator
-from models import AnalysisConfig, XorSplitStats
+from models import FiringStep, TraceExecution, PetriNetLog, XorSplitStats
 
 
 # ---------------------------------------------------------------------------
@@ -43,8 +38,6 @@ def _xor_net() -> _XorNet:
     Structure:
         p_in -> t_src -> p_xor -> t_b -> p_out_b
                                -> t_c -> p_out_c
-
-    Returns all components in a TypedDict for clear access in tests.
     """
     t_src = _transition("t_src", "Src")
     t_b   = _transition("t_b",   "B")
@@ -65,104 +58,107 @@ def _xor_net() -> _XorNet:
     )
 
 
-def _make_estimator(arcs, initial_marking, silent_transitions=None, config=None):
-    return ProbabilityEstimator(
-        petrinet=PetriNet("test"),
-        initial_marking=initial_marking,
-        final_marking=Marking(),
-        edges=arcs,
-        silent_transitions=silent_transitions or {},
-        config=config or AnalysisConfig(),
+def _make_estimator(silent_transitions=None) -> ProbabilityEstimator:
+    return ProbabilityEstimator(silent_transitions=silent_transitions or {})
+
+
+def _make_step(transition: PetriNet.Transition, from_places) -> FiringStep:
+    return FiringStep(
+        transition=transition,
+        activity_name=transition.label.lower() if transition.label else "tau",
+        is_tau=transition.label is None,
+        from_places=set(from_places),
+        attributes={},
     )
 
 
-def _fake_replay(fitnesses):
-    """Produce synthetic replay results with the given fitness scores."""
-    return [{"trace_fitness": f, "activated_transitions": []} for f in fitnesses]
+def _make_log(executions) -> PetriNetLog:
+    return PetriNetLog(
+        executions=executions,
+        net=PetriNet("test"),
+        initial_marking=Marking(),
+        final_marking=Marking(),
+    )
 
 
 # ===========================================================================
-# __init__ — arc map construction
+# compute_from_petri_net_log
 # ===========================================================================
 
-class TestInit:
-    def test_trans_inputs_built_from_place_to_transition_arcs(self):
+class TestComputeFromPetriNetLog:
+    def test_branch_counts_reflect_from_places(self):
+        """B chosen 2×, C chosen 1× — probabilities must reflect 2:1 ratio."""
         net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
-        assert net["p_in"]  in est._trans_inputs[net["t_src"]]
-        assert net["p_xor"] in est._trans_inputs[net["t_b"]]
-        assert net["p_xor"] in est._trans_inputs[net["t_c"]]
-
-    def test_trans_outputs_built_from_transition_to_place_arcs(self):
-        net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
-        assert net["p_xor"]   in est._trans_outputs[net["t_src"]]
-        assert net["p_out_b"] in est._trans_outputs[net["t_b"]]
-        assert net["p_out_c"] in est._trans_outputs[net["t_c"]]
-
-
-# ===========================================================================
-# _count_branches_from_replay
-# ===========================================================================
-
-class TestCountBranchesFromReplay:
-    def test_basic_xor_branch_counts_match_replay(self):
-        """B chosen 2×, C chosen 1× → counts reflect this."""
-        net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        replay_results = [
-            {"activated_transitions": [net["t_src"], net["t_b"]]},
-            {"activated_transitions": [net["t_src"], net["t_b"]]},
-            {"activated_transitions": [net["t_src"], net["t_c"]]},
+        executions = [
+            TraceExecution("c1", [_make_step(net["t_src"], {net["p_in"]}),
+                                   _make_step(net["t_b"],  {net["p_xor"]})]),
+            TraceExecution("c2", [_make_step(net["t_src"], {net["p_in"]}),
+                                   _make_step(net["t_b"],  {net["p_xor"]})]),
+            TraceExecution("c3", [_make_step(net["t_src"], {net["p_in"]}),
+                                   _make_step(net["t_c"],  {net["p_xor"]})]),
         ]
-        counts = est._count_branches_from_replay(replay_results, decision_points)
+        result = _make_estimator().compute_from_petri_net_log(
+            _make_log(executions), decision_points
+        )
 
-        assert counts[net["p_xor"]][net["t_b"]] == 2
-        assert counts[net["p_xor"]][net["t_c"]] == 1
+        stats = result[net["p_xor"].name]
+        assert abs(stats.probabilities["b"] - round(2 / 3, 2)) < 0.01
+        assert abs(stats.probabilities["c"] - round(1 / 3, 2)) < 0.01
 
-    def test_branch_not_counted_when_xor_place_has_no_token(self):
-        """
-        If t_src never fires, p_xor never receives a token.
-        t_b firing in that state must not be counted for p_xor.
-        """
+    def test_total_executions_equals_number_of_xor_firings(self):
         net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        replay_results = [{"activated_transitions": [net["t_b"]]}]
-        counts = est._count_branches_from_replay(replay_results, decision_points)
-
-        assert counts[net["p_xor"]][net["t_b"]] == 0
-        assert counts[net["p_xor"]][net["t_c"]] == 0
-
-    def test_marking_resets_to_initial_between_traces(self):
-        """
-        Each trace must start from initial_marking independently.
-        Two traces each firing t_src then t_b should yield count 2, not 1.
-        """
-        net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
-        decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
-
-        replay_results = [
-            {"activated_transitions": [net["t_src"], net["t_b"]]},
-            {"activated_transitions": [net["t_src"], net["t_b"]]},
+        executions = [
+            TraceExecution("c1", [_make_step(net["t_b"], {net["p_xor"]})]),
+            TraceExecution("c2", [_make_step(net["t_b"], {net["p_xor"]})]),
+            TraceExecution("c3", [_make_step(net["t_c"], {net["p_xor"]})]),
         ]
-        counts = est._count_branches_from_replay(replay_results, decision_points)
+        result = _make_estimator().compute_from_petri_net_log(
+            _make_log(executions), decision_points
+        )
 
-        assert counts[net["p_xor"]][net["t_b"]] == 2
+        assert result[net["p_xor"].name].total_executions == 3
 
-    def test_empty_replay_results_yield_zero_counts(self):
+    def test_step_not_counted_when_xor_place_absent_from_from_places(self):
+        """t_b fires but p_xor is not in from_places — no count for p_xor."""
         net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        counts = est._count_branches_from_replay([], decision_points)
+        executions = [
+            TraceExecution("c1", [_make_step(net["t_b"], {net["p_in"]})]),
+        ]
+        result = _make_estimator().compute_from_petri_net_log(
+            _make_log(executions), decision_points
+        )
 
-        assert counts[net["p_xor"]][net["t_b"]] == 0
-        assert counts[net["p_xor"]][net["t_c"]] == 0
+        assert result[net["p_xor"].name].total_executions == 0
+
+    def test_empty_log_yields_equal_probability_fallback(self):
+        net = _xor_net()
+        decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
+
+        result = _make_estimator().compute_from_petri_net_log(
+            _make_log([]), decision_points
+        )
+
+        stats = result[net["p_xor"].name]
+        assert stats.probabilities["b"] == 0.5
+        assert stats.probabilities["c"] == 0.5
+        assert stats.total_executions == 0
+
+    def test_returns_xor_split_stats_instance(self):
+        net = _xor_net()
+        decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
+        executions = [TraceExecution("c1", [_make_step(net["t_b"], {net["p_xor"]})])]
+
+        result = _make_estimator().compute_from_petri_net_log(
+            _make_log(executions), decision_points
+        )
+
+        assert isinstance(result[net["p_xor"].name], XorSplitStats)
 
 
 # ===========================================================================
@@ -178,11 +174,10 @@ class TestNormalizeBranchCounts:
 
     def test_probabilities_reflect_branch_counts(self):
         net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
         branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 3, 1)
-        result = est._normalize_branch_counts(branch_counts, decision_points)
+        result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         stats = result[net["p_xor"].name]
         assert isinstance(stats, XorSplitStats)
@@ -191,32 +186,29 @@ class TestNormalizeBranchCounts:
 
     def test_total_executions_equals_sum_of_branch_counts(self):
         net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
         branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 3, 1)
-        result = est._normalize_branch_counts(branch_counts, decision_points)
+        result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         assert result[net["p_xor"].name].total_executions == 4
 
     def test_probabilities_sum_to_approximately_one(self):
         net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
         branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 7, 3)
-        result = est._normalize_branch_counts(branch_counts, decision_points)
+        result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         total = sum(result[net["p_xor"].name].probabilities.values())
         assert abs(total - 1.0) < 0.02
 
     def test_zero_counts_produce_equal_probability_fallback(self):
         net = _xor_net()
-        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
         branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 0, 0)
-        result = est._normalize_branch_counts(branch_counts, decision_points)
+        result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         stats = result[net["p_xor"].name]
         assert stats.probabilities["b"] == 0.5
@@ -229,49 +221,16 @@ class TestNormalizeBranchCounts:
 # ===========================================================================
 
 class TestGetActivityNameForTransition:
-    def _est(self, silent=None):
-        return _make_estimator(set(), Marking(), silent_transitions=silent or {})
-
     def test_labeled_transition_returns_sanitized_name(self):
         t = _transition("t1", "ER Registration")
-        assert self._est()._get_activity_name_for_transition(t) == "er_registration"
+        assert _make_estimator()._get_activity_name_for_transition(t) == "er_registration"
 
     def test_silent_transition_returns_known_tau_name(self):
         t = _transition("t1", None)
-        name = self._est({t: "tau_5"})._get_activity_name_for_transition(t)
+        name = _make_estimator({t: "tau_5"})._get_activity_name_for_transition(t)
         assert name == "tau_5"
 
     def test_silent_transition_not_in_dict_returns_tau_unknown_fallback(self):
         t = _transition("t1", None)
-        name = self._est()._get_activity_name_for_transition(t)
+        name = _make_estimator()._get_activity_name_for_transition(t)
         assert name.startswith("tau_unknown_")
-
-
-# ===========================================================================
-# _replay_log — fitness filtering (pm4py call is mocked)
-# ===========================================================================
-
-class TestReplayLog:
-    def _est(self, config=None):
-        net = _xor_net()
-        return _make_estimator(net["arcs"], Marking({net["p_in"]: 1}), config=config)
-
-    def test_all_traces_above_threshold_are_kept(self):
-        with patch("pm4py.conformance_diagnostics_token_based_replay",
-                   return_value=_fake_replay([1.0, 0.9, 0.85])):
-            result = self._est()._replay_log(None)
-        assert len(result) == 3
-
-    def test_traces_below_default_threshold_are_filtered(self):
-        with patch("pm4py.conformance_diagnostics_token_based_replay",
-                   return_value=_fake_replay([1.0, 0.5, 0.3])):
-            result = self._est()._replay_log(None)
-        assert len(result) == 1
-        assert result[0]["trace_fitness"] == 1.0
-
-    def test_custom_threshold_in_config_is_respected(self):
-        config = AnalysisConfig(replay_min_fitness=0.5)
-        with patch("pm4py.conformance_diagnostics_token_based_replay",
-                   return_value=_fake_replay([1.0, 0.6, 0.4])):
-            result = self._est(config)._replay_log(None)
-        assert len(result) == 2
