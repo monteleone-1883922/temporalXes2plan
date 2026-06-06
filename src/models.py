@@ -6,6 +6,17 @@ from pm4py.objects.powl.obj import Transition
 
 
 @dataclass
+class XorSplitStats:
+    """Branch probabilities and sample size for a single XOR-split decision point.
+
+    Produced by ProbabilityEstimator.compute_decision_points_probabilities() for
+    each XOR-split place in the Petri net.
+    """
+    probabilities: Dict[str, float]
+    total_executions: int
+
+
+@dataclass
 class PetriNetModel:
     """Complete structural description of a discovered Petri net.
 
@@ -48,6 +59,11 @@ class AnalysisConfig:
     effect_appearance_threshold: float = 0.20
     # value (2B): majority_only | duplicate
     effect_value_mode: str = "duplicate"
+
+    # --- Token replay (XOR split probability estimation) ---
+    # Minimum trace_fitness for a replayed trace to be included in branch counting.
+    # Traces below this threshold are skipped and logged.
+    replay_min_fitness: float = 0.8
 
     # --- Logging ---
     log_removed_effects: bool = True

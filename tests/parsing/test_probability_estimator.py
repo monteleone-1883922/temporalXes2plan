@@ -18,7 +18,7 @@ from pm4py import PetriNet, Marking
 
 from tests.helpers import _transition, _place, _arc
 from parsing.probability_estimator import ProbabilityEstimator
-from models import AnalysisConfig
+from models import AnalysisConfig, XorSplitStats
 
 
 # ---------------------------------------------------------------------------
@@ -184,9 +184,20 @@ class TestNormalizeBranchCounts:
         branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 3, 1)
         result = est._normalize_branch_counts(branch_counts, decision_points)
 
-        probs = result[net["p_xor"].name]
-        assert probs["b"] == 0.75
-        assert probs["c"] == 0.25
+        stats = result[net["p_xor"].name]
+        assert isinstance(stats, XorSplitStats)
+        assert stats.probabilities["b"] == 0.75
+        assert stats.probabilities["c"] == 0.25
+
+    def test_total_executions_equals_sum_of_branch_counts(self):
+        net = _xor_net()
+        est = _make_estimator(net["arcs"], Marking({net["p_in"]: 1}))
+        decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
+
+        branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 3, 1)
+        result = est._normalize_branch_counts(branch_counts, decision_points)
+
+        assert result[net["p_xor"].name].total_executions == 4
 
     def test_probabilities_sum_to_approximately_one(self):
         net = _xor_net()
@@ -196,7 +207,7 @@ class TestNormalizeBranchCounts:
         branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 7, 3)
         result = est._normalize_branch_counts(branch_counts, decision_points)
 
-        total = sum(result[net["p_xor"].name].values())
+        total = sum(result[net["p_xor"].name].probabilities.values())
         assert abs(total - 1.0) < 0.02
 
     def test_zero_counts_produce_equal_probability_fallback(self):
@@ -207,9 +218,10 @@ class TestNormalizeBranchCounts:
         branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 0, 0)
         result = est._normalize_branch_counts(branch_counts, decision_points)
 
-        probs = result[net["p_xor"].name]
-        assert probs["b"] == 0.5
-        assert probs["c"] == 0.5
+        stats = result[net["p_xor"].name]
+        assert stats.probabilities["b"] == 0.5
+        assert stats.probabilities["c"] == 0.5
+        assert stats.total_executions == 0
 
 
 # ===========================================================================

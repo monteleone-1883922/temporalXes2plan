@@ -6,7 +6,7 @@ from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
 
 import core_utils as utils
-from models import AnalysisConfig
+from models import AnalysisConfig, XorSplitStats
 
 logger = utils.get_logger(__name__)
 
@@ -60,10 +60,10 @@ class ProbabilityEstimator:
         self,
         full_log: Any,
         decision_points: Dict[PetriNet.Place, List[Transition]],
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> Dict[str, XorSplitStats]:
         """
-        Compute branch probabilities for the given XOR-split decision points via
-        token-based replay.
+        Compute branch probabilities and sample sizes for the given XOR-split decision
+        points via token-based replay.
 
         Args:
             full_log: The full event log to replay.
@@ -71,20 +71,9 @@ class ProbabilityEstimator:
                 as returned by StructureAnalyzer.identify_xor_splits().
 
         Returns:
-            Dictionary mapping place names to branch probabilities:
-            PlaceName -> BranchActivityName -> Probability
-
-            ESEMPIO DI OUTPUT RITORNATO:
-            {
-                "place_XOR_1": {
-                    "ER_Triage": 0.40,
-                    "ER_Sepsis_Triage": 0.60
-                },
-                "place_XOR_2": {
-                    "Admission_ICU": 0.15,
-                    "Release_A": 0.85
-                }
-            }
+            Dictionary mapping place names to XorSplitStats (probabilities + total
+            number of traces that passed through that split):
+            PlaceName -> XorSplitStats(probabilities={BranchName: prob}, total_executions=N)
         """
         replay_results = self._replay_log(full_log)
         branch_counts = self._count_branches_from_replay(replay_results, decision_points)
@@ -198,9 +187,9 @@ class ProbabilityEstimator:
         self,
         branch_counts: Dict[PetriNet.Place, Dict[Transition, int]],
         decision_points: Dict[PetriNet.Place, List[Transition]],
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> Dict[str, XorSplitStats]:
         """
-        Normalize branch activation counts into probabilities.
+        Normalize branch activation counts into probabilities and capture sample sizes.
 
         Branches with zero total count fall back to equal probabilities and a
         warning is logged.
@@ -210,9 +199,10 @@ class ProbabilityEstimator:
             decision_points: XOR-split places mapped to their outgoing transitions.
 
         Returns:
-            Dictionary mapping place names to branch probabilities.
+            Dictionary mapping place names to XorSplitStats (probabilities + total
+            number of traces that executed that split).
         """
-        result: Dict[str, Dict[str, float]] = {}
+        result: Dict[str, XorSplitStats] = {}
 
         for place, transitions in decision_points.items():
             counts = branch_counts[place]
@@ -236,7 +226,10 @@ class ProbabilityEstimator:
                 }
 
             if place_probs:
-                result[place.name] = place_probs
+                result[place.name] = XorSplitStats(
+                    probabilities=place_probs,
+                    total_executions=total,
+                )
 
         return result
 
