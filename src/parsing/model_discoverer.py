@@ -7,6 +7,7 @@ import core_utils as utils
 
 logger = utils.get_logger(__name__)
 
+
 class ModelDiscoverer:
     """
     Handles Petri net model discovery and basic structural extraction.
@@ -31,11 +32,11 @@ class ModelDiscoverer:
         self.discovery_algorithm = discovery_algorithm
 
     def discover(self, train_log: Any) -> Tuple[
-        PetriNet, 
-        Marking, 
-        Marking, 
-        Set[Transition], 
-        Set[PetriNet.Place], 
+        PetriNet,
+        Marking,
+        Marking,
+        Set[Transition],
+        Set[PetriNet.Place],
         Set[PetriNet.Arc]
     ]:
         """
@@ -60,7 +61,7 @@ class ModelDiscoverer:
                 logger.warning("Discovered Petri net has an empty initial marking")
             if not final_marking:
                 logger.warning("Discovered Petri net has an empty final marking")
-            
+
             transitions = set(petrinet.transitions)
             places = set(petrinet.places)
             edges = set(petrinet.arcs)
@@ -71,9 +72,9 @@ class ModelDiscoverer:
             raise e
 
     def extract_basic_properties(
-        self, 
-        transitions: Set[Transition], 
-        full_log: Any
+            self,
+            transitions: Set[Transition],
+            full_log: Any
     ) -> Tuple[Set[str], Dict[Transition, str], Dict[str, int], Dict[str, int]]:
         """
         Extract core properties from the discovered transitions and event log.
@@ -92,7 +93,7 @@ class ModelDiscoverer:
         silent_transitions = {}
         activities_set = set()
         tau_counter = 1
-        
+
         for transition in transitions:
             if transition.label is None:  # Create a tau action for a silent transition
                 tau_name = f"tau_{tau_counter}"
@@ -102,10 +103,10 @@ class ModelDiscoverer:
             else:  # Regular labeled transition
                 sanitized_name = utils.sanitize_name(transition.label)
                 activities_set.add(sanitized_name)
-        
-        start_activities = {utils.sanitize_name(activity): freq 
-                             for activity, freq in pm4py.get_start_activities(full_log).items()}
-        end_activities = {utils.sanitize_name(activity): freq 
-                           for activity, freq in pm4py.get_end_activities(full_log).items()}
-                           
+
+        start_activities = {utils.sanitize_name(activity): freq
+                            for activity, freq in pm4py.get_start_activities(full_log).items()}
+        end_activities = {utils.sanitize_name(activity): freq
+                          for activity, freq in pm4py.get_end_activities(full_log).items()}
+
         return activities_set, silent_transitions, start_activities, end_activities
