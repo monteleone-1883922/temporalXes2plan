@@ -156,3 +156,35 @@ class TestDiscover:
         all_keyed = set(result.trans_inputs) | set(result.trans_outputs)
         for t in result.petrinet.transitions:
             assert t in all_keyed
+
+    # --- place_inputs ---
+
+    def test_place_inputs_is_present(self, simple_log):
+        result = ModelDiscoverer().discover(simple_log)
+        assert result.place_inputs is not None
+
+    def test_place_inputs_keys_are_places_from_the_net(self, simple_log):
+        result = ModelDiscoverer().discover(simple_log)
+        net_places = set(result.petrinet.places)
+        for place in result.place_inputs:
+            assert place in net_places
+
+    def test_place_inputs_values_are_lists_of_transitions(self, simple_log):
+        result = ModelDiscoverer().discover(simple_log)
+        net_transitions = set(result.petrinet.transitions)
+        for transitions in result.place_inputs.values():
+            assert isinstance(transitions, list)
+            for t in transitions:
+                assert t in net_transitions
+
+    def test_place_inputs_is_inverse_of_trans_outputs(self, simple_log):
+        """For every Trans→Place arc, the place must list that transition in place_inputs."""
+        result = ModelDiscoverer().discover(simple_log)
+        for transition, output_places in result.trans_outputs.items():
+            for place in output_places:
+                assert transition in result.place_inputs.get(place, [])
+
+    def test_and_joins_field_does_not_exist(self, simple_log):
+        """and_joins was removed from PetriNetModel; accessing it must raise AttributeError."""
+        result = ModelDiscoverer().discover(simple_log)
+        assert not hasattr(result, "and_joins")

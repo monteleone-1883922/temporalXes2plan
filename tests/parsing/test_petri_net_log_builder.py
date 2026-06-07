@@ -17,7 +17,7 @@ from pm4py import PetriNet, Marking
 
 from tests.helpers import _transition, _place, _arc, make_event, make_trace, make_log
 from parsing.petri_net_log_builder import PetriNetLogBuilder
-from parsing.structure_analyzer import StructureAnalyzer
+from parsing.model_discoverer import ModelDiscoverer
 from models import AnalysisConfig, FiringStep, PetriNetLog, TraceExecution
 
 
@@ -94,7 +94,7 @@ def _make_builder(
     config: AnalysisConfig = None,
 ) -> PetriNetLogBuilder:
     silent = silent_transitions or {}
-    trans_inputs, trans_outputs = StructureAnalyzer(arcs, set(), silent).build_arc_maps()
+    trans_inputs, trans_outputs = ModelDiscoverer()._build_arc_maps(arcs)
     return PetriNetLogBuilder(
         petrinet=PetriNet("test"),
         initial_marking=initial_marking,

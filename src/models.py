@@ -68,6 +68,23 @@ class XorSplitStats:
 
 
 @dataclass
+class XorSplitGuards:
+    """Decision tree guards for one XOR-split in SOP (sum-of-products) form.
+
+    Produced by DecisionMiner.mine_xor_splits() for each split that passes
+    dt_min_samples and dt_min_accuracy thresholds.
+
+    guards maps each branch activity to a list of AND-clause lists:
+        outer list = OR  (multiple DT paths reaching this branch)
+        inner list = AND (conditions along one DT path)
+    Example: {"approve": [["(amount lte_500)", "(priority gte_3)"], ["(risk elow)"]]}
+    """
+    guards: Dict[str, List[List[str]]]
+    total_samples: int
+    dt_accuracy: float
+
+
+@dataclass
 class AttributeEffect:
     """Attribute change probabilities for a single non-tau transition.
 
@@ -86,9 +103,13 @@ class PetriNetModel:
     Produced by ModelDiscoverer.discover() and used as the authoritative
     structural representation throughout the parsing pipeline.
 
-    trans_inputs and trans_outputs are the arc maps built by
-    ModelDiscoverer.discover() and are ready to be passed directly
+    trans_inputs / trans_outputs are the arc maps ready to be passed directly
     to PetriNetLogBuilder without a separate build_arc_maps() call.
+
+    place_inputs is the inverse of trans_outputs: for each place, the transitions
+    that produce tokens into it (Trans→Place arcs).
+    xor_splits is the inverse of trans_inputs restricted to places with >1 outgoing
+    transition.
     """
     petrinet: PetriNet
     initial_marking: Marking
@@ -97,6 +118,8 @@ class PetriNetModel:
     silent_transitions: Dict[Transition, str]
     trans_inputs: Dict[Transition, Set[PetriNet.Place]]
     trans_outputs: Dict[Transition, Set[PetriNet.Place]]
+    xor_splits: Dict[PetriNet.Place, List[Transition]]
+    place_inputs: Dict[PetriNet.Place, List[Transition]]
 
 
 @dataclass
@@ -116,6 +139,7 @@ class AnalysisConfig:
     # --- Decision tree cascade (shared for XOR splits and conditional effects) ---
     dt_min_samples: int = 30
     dt_min_accuracy: float = 0.75
+    dt_max_depth: int = 3
 
     # --- XOR split statistical fallback (Level 2) ---
     # majority_only | weighted | pruned_weighted
