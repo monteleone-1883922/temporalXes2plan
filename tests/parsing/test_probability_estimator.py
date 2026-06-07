@@ -13,7 +13,8 @@ from pm4py import PetriNet, Marking
 
 from tests.helpers import _transition, _place, _arc
 from parsing.probability_estimator import ProbabilityEstimator
-from models import FiringStep, TraceExecution, PetriNetLog, XorSplitStats
+from models import AttributeEffect, FiringStep, TraceExecution, PetriNetLog, XorSplitStats
+from parsing.discretizer import Discretizer
 
 
 # ---------------------------------------------------------------------------
@@ -234,3 +235,160 @@ class TestGetActivityNameForTransition:
         t = _transition("t1", None)
         name = _make_estimator()._get_activity_name_for_transition(t)
         assert name.startswith("tau_unknown_")
+
+
+# ===========================================================================
+# compute_attribute_effect_probabilities
+# ===========================================================================
+
+def _labeled_step(activity_name: str, attrs: dict) -> FiringStep:
+    """Labeled FiringStep with the given activity name and attributes."""
+    t = _transition(f"t_{activity_name}", activity_name)
+    return FiringStep(
+        transition=t,
+        activity_name=activity_name,
+        is_tau=False,
+        from_places=set(),
+        attributes=attrs,
+    )
+
+
+def _tau_step() -> FiringStep:
+    """Silent FiringStep with empty attributes."""
+    t = _transition("t_tau", None)
+    return FiringStep(
+        transition=t,
+        activity_name="tau_1",
+        is_tau=True,
+        from_places=set(),
+        attributes={},
+    )
+
+
+class TestComputeAttributeEffectProbabilities:
+    def test_attribute_appearing_for_first_time_is_counted_as_effect(self):
+        """First execution of A with crp=2.1 — crp was never in state, counts as effect."""
+        executions = [TraceExecution("c1", [_labeled_step("a", {"crp": 2.1})])]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert result["a"].presence_probabilities["crp"] == 1.0
+
+    def test_attribute_changing_value_is_counted_as_effect(self):
+        """A fires with crp=2.1, then B fires with crp=8.3 — B changes crp."""
+        executions = [TraceExecution("c1", [
+            _labeled_step("a", {"crp": 2.1}),
+            _labeled_step("b", {"crp": 8.3}),
+        ])]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert result["b"].presence_probabilities["crp"] == 1.0
+
+    def test_unchanged_attribute_not_counted_as_effect(self):
+        """A fires with crp=2.1, B fires with crp=2.1 — same value, no effect."""
+        executions = [TraceExecution("c1", [
+            _labeled_step("a", {"crp": 2.1}),
+            _labeled_step("b", {"crp": 2.1}),
+        ])]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert "crp" not in result["b"].presence_probabilities
+
+    def test_attribute_absent_from_step_is_not_considered(self):
+        """A fires with crp=2.1, B fires with empty attributes — crp not mentioned in B."""
+        executions = [TraceExecution("c1", [
+            _labeled_step("a", {"crp": 2.1}),
+            _labeled_step("b", {}),
+        ])]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert "crp" not in result["b"].presence_probabilities
+
+    def test_value_probability_reflects_value_distribution(self):
+        """B fires 3 times: crp→5.0 twice, crp→3.0 once."""
+        executions = [
+            TraceExecution("c1", [_labeled_step("b", {"crp": 5.0})]),
+            TraceExecution("c2", [_labeled_step("b", {"crp": 5.0})]),
+            TraceExecution("c3", [_labeled_step("b", {"crp": 3.0})]),
+        ]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        vp = result["b"].value_probabilities["crp"]
+        assert abs(vp[5.0] - round(2 / 3, 2)) < 0.01
+        assert abs(vp[3.0] - round(1 / 3, 2)) < 0.01
+
+    def test_total_firings_counts_all_labeled_step_occurrences(self):
+        """A fires in 3 independent executions → total_firings = 3."""
+        executions = [
+            TraceExecution("c1", [_labeled_step("a", {})]),
+            TraceExecution("c2", [_labeled_step("a", {})]),
+            TraceExecution("c3", [_labeled_step("a", {})]),
+        ]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert result["a"].total_firings == 3
+
+    def test_tau_steps_are_excluded_from_result(self):
+        """Tau transitions must not appear as keys in the result."""
+        executions = [TraceExecution("c1", [_tau_step()])]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert "tau_1" not in result
+        assert result == {}
+
+    def test_state_resets_between_executions(self):
+        """Each execution starts with empty state — first occurrence counts as effect."""
+        executions = [
+            TraceExecution("c1", [_labeled_step("a", {"crp": 2.1})]),
+            TraceExecution("c2", [_labeled_step("a", {"crp": 2.1})]),
+        ]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert result["a"].presence_probabilities["crp"] == 1.0
+        assert result["a"].total_firings == 2
+
+    def test_empty_log_returns_empty_dict(self):
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log([]))
+        assert result == {}
+
+    def test_returns_attribute_effect_instance(self):
+        executions = [TraceExecution("c1", [_labeled_step("a", {"x": 1})])]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert isinstance(result["a"], AttributeEffect)
+
+    def test_attribute_names_are_sanitized(self):
+        """Attribute key 'CRP Measurement' must appear as 'crp_measurement' in the result."""
+        executions = [TraceExecution("c1", [_labeled_step("a", {"CRP Measurement": 2.1})])]
+        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert "crp_measurement" in result["a"].presence_probabilities
+        assert "CRP Measurement" not in result["a"].presence_probabilities
+
+    def test_numerical_values_discretized_when_discretizer_provided(self):
+        """30.0 and 80.0 with boundary at 50.0 produce different intervals → detected as change."""
+        disc = Discretizer()
+        disc.boundaries = {"crp": [50.0]}
+        executions = [TraceExecution("c1", [
+            _labeled_step("a", {"crp": 30.0}),
+            _labeled_step("b", {"crp": 80.0}),
+        ])]
+        result = _make_estimator().compute_attribute_effect_probabilities(
+            _make_log(executions), discretizer=disc
+        )
+
+        assert result["b"].presence_probabilities["crp"] == 1.0
+        assert "gte_50_0" in result["b"].value_probabilities["crp"]
+
+    def test_values_in_same_interval_treated_as_unchanged(self):
+        """30.0 and 40.0 both map to 'lte_50_0' — no change detected in B."""
+        disc = Discretizer()
+        disc.boundaries = {"crp": [50.0]}
+        executions = [TraceExecution("c1", [
+            _labeled_step("a", {"crp": 30.0}),
+            _labeled_step("b", {"crp": 40.0}),
+        ])]
+        result = _make_estimator().compute_attribute_effect_probabilities(
+            _make_log(executions), discretizer=disc
+        )
+
+        assert "crp" not in result["b"].presence_probabilities

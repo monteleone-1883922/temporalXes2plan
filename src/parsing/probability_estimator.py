@@ -1,11 +1,12 @@
 from collections import defaultdict
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pm4py import PetriNet
 from pm4py.objects.powl.obj import Transition
 
 import core_utils as utils
-from models import PetriNetLog, XorSplitStats
+from models import AttributeEffect, PetriNetLog, XorSplitStats
+from parsing.discretizer import Discretizer
 
 logger = utils.get_logger(__name__)
 
@@ -112,6 +113,129 @@ class ProbabilityEstimator:
                     total_executions=total,
                 )
 
+        return result
+
+    def compute_attribute_effect_probabilities(
+        self,
+        petri_net_log: PetriNetLog,
+        discretizer: Optional[Discretizer] = None,
+    ) -> Dict[str, AttributeEffect]:
+        """
+        Compute attribute effect probabilities for each non-tau transition.
+
+        For each labeled transition T, determines:
+        - P(attribute X changes after T): fraction of T firings where X changed value
+          or appeared for the first time in the execution state.
+        - P(X = v | X changes after T): value distribution conditioned on change.
+
+        An attribute is considered changed if its value in the current step differs
+        from the last seen value in the same execution, or if it appears for the
+        first time. Attributes absent from a step's attributes are not considered.
+        State resets at the start of each execution.
+
+        Attribute names are sanitized via utils.sanitize_name. Numerical attribute
+        values are discretized via the discretizer (if provided) before comparison
+        and storage, so two raw values that fall in the same interval are treated
+        as identical.
+
+        Args:
+            petri_net_log: Pre-built PetriNetLog.
+            discretizer: Optional pre-fitted Discretizer for numerical attributes.
+                When None, raw values are used as-is.
+
+        Returns:
+            Dict mapping activity_name to AttributeEffect. Tau transitions excluded.
+        """
+        effect_counts, value_counts, total_firings = self._count_attribute_effects(
+            petri_net_log, discretizer
+        )
+        return self._normalize_effect_counts(effect_counts, value_counts, total_firings)
+
+    def _count_attribute_effects(
+        self,
+        petri_net_log: PetriNetLog,
+        discretizer: Optional[Discretizer] = None,
+    ) -> Tuple[
+        Dict[str, Dict[str, int]],
+        Dict[str, Dict[str, Dict[Any, int]]],
+        Dict[str, int],
+    ]:
+        """
+        Accumulate raw effect counts across all executions.
+
+        Attribute names are sanitized. Values are discretized when a discretizer
+        is provided; otherwise raw values are used for comparison and storage.
+
+        Args:
+            petri_net_log: Pre-built PetriNetLog.
+            discretizer: Optional pre-fitted Discretizer.
+
+        Returns:
+            Tuple of (effect_counts, value_counts, total_firings):
+            - effect_counts:  activity → sanitized_attr → # firings where attribute changed
+            - value_counts:   activity → sanitized_attr → value → # occurrences
+            - total_firings:  activity → total # labeled firings
+        """
+        effect_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        value_counts: Dict[str, Dict[str, Dict[Any, int]]] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(int))
+        )
+        total_firings: Dict[str, int] = defaultdict(int)
+
+        for execution in petri_net_log.executions:
+            state: Dict[str, Any] = {}
+            for step in execution.steps:
+                if step.is_tau:
+                    continue
+                act = step.activity_name
+                total_firings[act] += 1
+                for attr, val in step.attributes.items():
+                    sanitized_attr = utils.sanitize_name(attr)
+                    transformed_val = (
+                        discretizer.transform_value(sanitized_attr, val)
+                        if discretizer is not None
+                        else val
+                    )
+                    if sanitized_attr not in state or state[sanitized_attr] != transformed_val:
+                        effect_counts[act][sanitized_attr] += 1
+                        value_counts[act][sanitized_attr][transformed_val] += 1
+                    state[sanitized_attr] = transformed_val
+
+        return effect_counts, value_counts, total_firings
+
+    def _normalize_effect_counts(
+        self,
+        effect_counts: Dict[str, Dict[str, int]],
+        value_counts: Dict[str, Dict[str, Dict[Any, int]]],
+        total_firings: Dict[str, int],
+    ) -> Dict[str, AttributeEffect]:
+        """
+        Normalize raw effect counts into probabilities.
+
+        Args:
+            effect_counts: Activity → attribute → # firings where attribute changed.
+            value_counts:  Activity → attribute → value → # occurrences.
+            total_firings: Activity → total labeled firings.
+
+        Returns:
+            Dict mapping activity_name to AttributeEffect.
+        """
+        result: Dict[str, AttributeEffect] = {}
+        for act, total in total_firings.items():
+            presence_probs: Dict[str, float] = {}
+            value_probs: Dict[str, Dict[Any, float]] = {}
+            for attr, count in effect_counts[act].items():
+                presence_probs[attr] = round(count / total, 2) if total > 0 else 0.0
+                attr_total = sum(value_counts[act][attr].values())
+                value_probs[attr] = {
+                    val: round(cnt / attr_total, 2)
+                    for val, cnt in value_counts[act][attr].items()
+                }
+            result[act] = AttributeEffect(
+                presence_probabilities=presence_probs,
+                value_probabilities=value_probs,
+                total_firings=total,
+            )
         return result
 
     def _get_activity_name_for_transition(self, transition: Transition) -> str:
