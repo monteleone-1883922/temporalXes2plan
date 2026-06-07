@@ -8,6 +8,7 @@ algorithm is involved.
 build() is tested with unittest.mock.patch to replace pm4py's conformance
 checking with controlled fake results.
 """
+import logging
 import pytest
 from typing import Dict, Set, TypedDict
 from unittest.mock import patch
@@ -357,3 +358,66 @@ class TestBuild:
                    return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
             result = builder.build(self._log())
         assert result.net is builder.petrinet
+
+
+# ===========================================================================
+# build() — lifecycle warning
+# ===========================================================================
+
+class TestLifecycleWarning:
+    def _builder(self, config=None):
+        net = _seq_net()
+        return _make_builder(net["arcs"], Marking({net["p_in"]: 1}), config=config), net
+
+    def _complete_log(self):
+        return make_log(
+            make_trace(make_event("A", offset=0), make_event("B", offset=60), case_id="c1")
+        )
+
+    def test_lifecycle_start_events_trigger_warning(self, caplog):
+        """build() must log a WARNING when the log contains lifecycle start events."""
+        builder, net = self._builder()
+        log = make_log(
+            make_trace(
+                make_event("A", lifecycle="start", offset=0),
+                make_event("A", lifecycle="complete", offset=60),
+                make_event("B", lifecycle="complete", offset=120),
+                case_id="c1",
+            )
+        )
+        with patch("pm4py.conformance_diagnostics_token_based_replay",
+                   return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
+            with caplog.at_level(logging.WARNING, logger="parsing.petri_net_log_builder"):
+                builder.build(log)
+        assert any("lifecycle" in msg.lower() for msg in caplog.messages)
+
+    def test_complete_only_log_does_not_trigger_warning(self, caplog):
+        """A log with only complete events must not produce the lifecycle warning."""
+        builder, net = self._builder()
+        with patch("pm4py.conformance_diagnostics_token_based_replay",
+                   return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
+            with caplog.at_level(logging.WARNING, logger="parsing.petri_net_log_builder"):
+                builder.build(self._complete_log())
+        lifecycle_warnings = [msg for msg in caplog.messages if "lifecycle" in msg.lower()]
+        assert not lifecycle_warnings
+
+    def test_warning_emitted_only_once_even_with_many_start_events(self, caplog):
+        """A single warning per build() call, regardless of how many start events exist."""
+        builder, net = self._builder()
+        log = make_log(
+            *[
+                make_trace(
+                    make_event("A", lifecycle="start", offset=0),
+                    make_event("A", lifecycle="complete", offset=60),
+                    make_event("B", lifecycle="complete", offset=120),
+                    case_id=f"c{i}",
+                )
+                for i in range(5)
+            ]
+        )
+        with patch("pm4py.conformance_diagnostics_token_based_replay",
+                   return_value=[_fake_replay([net["t_a"], net["t_b"]])] * 5):
+            with caplog.at_level(logging.WARNING, logger="parsing.petri_net_log_builder"):
+                builder.build(log)
+        lifecycle_warnings = [msg for msg in caplog.messages if "lifecycle" in msg.lower()]
+        assert len(lifecycle_warnings) == 1

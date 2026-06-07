@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 import core_utils as utils
+from models import PetriNetLog
 
 logger = utils.get_logger(__name__)
 
@@ -130,19 +131,21 @@ class TemporalExtractor:
 
     Supports three strategies:
     - Lifecycle-based: uses start/complete event pairs for exact durations.
-    - Inter-event-time: estimates durations from the gap between consecutive events.
+    - Inter-event-time: estimates durations from gaps between consecutive labeled
+      steps in a PetriNetLog (estimate_from_inter_event_times_pn).
     - External: accepts user-provided min/max bounds directly.
 
     The main entry point is :meth:`extract`, which combines all three strategies
     with configurable priority and fallback behaviour.
     """
 
-    def __init__(self, log: Any) -> None:
+    def __init__(self, log: Any = None) -> None:
         """
         Args:
-            log: A pm4py EventLog, ideally the full_lifecycle_log (i.e. the log
-                 before filtering to 'complete'-only events, so that start events
-                 are still present).
+            log: A pm4py EventLog, ideally the full_lifecycle_log (i.e. before
+                 filtering to complete-only events) so that start/complete pairs
+                 are available for extract_from_lifecycle. Optional when only
+                 estimate_from_inter_event_times_pn or from_external are used.
         """
         self.log = log
 
@@ -158,10 +161,16 @@ class TemporalExtractor:
         'complete' event that shares the same concept:name.  Activities without
         at least one valid pair are omitted from the result.
 
+        Requires a raw event log containing start events (passed to __init__).
+        Returns an empty dict and logs a warning when no log is available.
+
         Returns:
             Mapping from sanitized activity name to ActionDurationStats,
             with source='lifecycle'.
         """
+        if self.log is None:
+            logger.warning("extract_from_lifecycle: no log provided, returning empty dict")
+            return {}
         raw: Dict[str, List[float]] = defaultdict(list)
         skipped_invalid = 0
         orphan_complete: Dict[str, int] = defaultdict(int)
@@ -232,16 +241,25 @@ class TemporalExtractor:
         return result
 
     # ------------------------------------------------------------------
-    # Case 3 — inter-event time estimation
+    # Case 3 — inter-event time estimation from PetriNetLog
     # ------------------------------------------------------------------
 
-    def estimate_from_inter_event_times(self) -> Dict[str, ActionDurationStats]:
+    def estimate_from_inter_event_times_pn(
+        self, petri_net_log: PetriNetLog
+    ) -> Dict[str, ActionDurationStats]:
         """
-        Estimate durations from the elapsed time between consecutive events.
+        Estimate durations from elapsed time between consecutive labeled steps.
 
-        For each event at position i in a trace, the estimated duration is
-        timestamp[i+1] - timestamp[i].  The last event of every trace is
-        excluded because it has no successor.
+        For each TraceExecution, considers only labeled (non-tau) steps in order.
+        The estimated duration for step i is timestamp[i+1] - timestamp[i].
+        The last labeled step of every execution is excluded (no successor).
+
+        Activity names are taken directly from FiringStep.activity_name (already
+        sanitized). Tau steps are excluded entirely — they do not consume time
+        in the model and carry no timestamps.
+
+        Args:
+            petri_net_log: Pre-built PetriNetLog.
 
         Returns:
             Mapping from sanitized activity name to ActionDurationStats,
@@ -251,21 +269,14 @@ class TemporalExtractor:
         skipped_invalid = 0
         negative_delta: Dict[str, int] = defaultdict(int)
 
-        for trace in self.log:
-            # Exclude 'start' lifecycle events: they are intermediate markers and
-            # including them on a full_lifecycle_log would produce spurious gaps
-            # (e.g. start:X → complete:X already covered by extract_from_lifecycle,
-            # complete:X → start:Y yields near-zero gaps irrelevant as durations).
-            events = [
-                e for e in trace
-                if e.get("lifecycle:transition", "complete").lower() != "start"
-            ]
-            for i in range(len(events) - 1):
-                ts_current = events[i].get("time:timestamp")
-                ts_next = events[i + 1].get("time:timestamp")
-                activity = utils.sanitize_name(events[i].get("concept:name", ""))
+        for execution in petri_net_log.executions:
+            labeled = [s for s in execution.steps if not s.is_tau]
+            for i in range(len(labeled) - 1):
+                ts_current = labeled[i].attributes.get("time:timestamp")
+                ts_next = labeled[i + 1].attributes.get("time:timestamp")
+                activity = labeled[i].activity_name
 
-                if not activity or ts_current is None or ts_next is None:
+                if ts_current is None or ts_next is None:
                     skipped_invalid += 1
                     continue
 
@@ -275,18 +286,18 @@ class TemporalExtractor:
                 else:
                     negative_delta[activity] += 1
                     logger.debug(
-                        "inter_event: negative gap (%.1fs) for '%s', skipped",
+                        "inter_event_pn: negative gap (%.1fs) for '%s', skipped",
                         delta, activity,
                     )
 
         if skipped_invalid:
             logger.warning(
-                "estimate_from_inter_event_times: skipped %d events with missing activity or timestamp",
+                "estimate_from_inter_event_times_pn: skipped %d steps with missing timestamp",
                 skipped_invalid,
             )
         if negative_delta:
             logger.warning(
-                "estimate_from_inter_event_times: %d negative inter-event gaps discarded — %s",
+                "estimate_from_inter_event_times_pn: %d negative inter-event gaps discarded — %s",
                 sum(negative_delta.values()),
                 dict(negative_delta),
             )
@@ -296,7 +307,7 @@ class TemporalExtractor:
             if durations:
                 result[activity] = _stats_to_duration(durations, source="inter_event")
                 logger.debug(
-                    "inter_event: %s — n=%d, mean=%.1fs, eff=[%.1f, %.1f]",
+                    "inter_event_pn: %s — n=%d, mean=%.1fs, eff=[%.1f, %.1f]",
                     activity,
                     result[activity].count,
                     result[activity].mean,
@@ -304,7 +315,7 @@ class TemporalExtractor:
                     result[activity].effective_max,
                 )
 
-        logger.info("estimate_from_inter_event_times: found data for %d activities", len(result))
+        logger.info("estimate_from_inter_event_times_pn: found data for %d activities", len(result))
         return result
 
     # ------------------------------------------------------------------
@@ -360,6 +371,7 @@ class TemporalExtractor:
         self,
         external_durations: Optional[Dict[str, ExternalDuration]] = None,
         fallback_to_inter_event: bool = True,
+        petri_net_log: Optional[PetriNetLog] = None,
     ) -> Dict[str, ActionDurationStats]:
         """
         Build a complete duration map by combining all three strategies.
@@ -369,6 +381,12 @@ class TemporalExtractor:
           2. lifecycle           — if start/complete pairs exist in the log
           3. inter_event         — if fallback_to_inter_event is True
 
+        When petri_net_log is provided, inter-event times are derived from it via
+        estimate_from_inter_event_times_pn (already sanitized activity names, no
+        lifecycle-event filtering needed). If petri_net_log is None and
+        fallback_to_inter_event is True, a warning is logged and inter-event
+        estimation is skipped.
+
         Activities not covered by any strategy are omitted from the result.
 
         Args:
@@ -377,6 +395,8 @@ class TemporalExtractor:
             fallback_to_inter_event: When True, activities not covered by external
                                      or lifecycle data are estimated from inter-event
                                      timestamps.
+            petri_net_log: Optional PetriNetLog; when provided, used for inter-event
+                           estimation instead of the raw log.
 
         Returns:
             Mapping from sanitized activity name to ActionDurationStats.
@@ -385,7 +405,13 @@ class TemporalExtractor:
 
         inter_event_stats: Dict[str, ActionDurationStats] = {}
         if fallback_to_inter_event:
-            inter_event_stats = self.estimate_from_inter_event_times()
+            if petri_net_log is not None:
+                inter_event_stats = self.estimate_from_inter_event_times_pn(petri_net_log)
+            else:
+                logger.warning(
+                    "extract: fallback_to_inter_event=True but no petri_net_log provided; "
+                    "inter-event estimation skipped."
+                )
 
         external_stats: Dict[str, ActionDurationStats] = {}
         if external_durations:

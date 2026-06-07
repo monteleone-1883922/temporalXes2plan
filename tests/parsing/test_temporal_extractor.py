@@ -5,23 +5,27 @@ Covers the three duration extraction strategies and the data model validation.
 All event logs are built in-memory via conftest helpers — no XES files are loaded.
 
 Strategy overview:
-  - extract_from_lifecycle:       pairs start/complete lifecycle events per activity.
-  - estimate_from_inter_event_times: uses the gap between consecutive complete events.
-  - from_external:                accepts user-supplied min/max bounds directly.
-  - extract:                      combines all three with priority external > lifecycle > inter_event.
+  - extract_from_lifecycle:            pairs start/complete lifecycle events per activity.
+  - estimate_from_inter_event_times_pn: gaps between consecutive labeled PetriNetLog steps.
+  - from_external:                     accepts user-supplied min/max bounds directly.
+  - extract:                           combines all three with priority external > lifecycle > inter_event.
 """
 import math
 import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tests.helpers import make_event, make_trace, make_log
+from pm4py import PetriNet, Marking
+
+from tests.helpers import make_event, make_trace, make_log, _transition, ts
 from parsing.temporal_extractor import (
     ActionDurationStats,
     ExternalDuration,
     TemporalExtractor,
     _stats_to_duration,
 )
+from models import FiringStep, TraceExecution, PetriNetLog
 
 
 # ===========================================================================
@@ -253,98 +257,6 @@ class TestExtractFromLifecycle:
 
 
 # ===========================================================================
-# TemporalExtractor.estimate_from_inter_event_times — Case 3
-# ===========================================================================
-
-class TestEstimateFromInterEventTimes:
-    def test_three_event_trace_produces_two_gaps(self):
-        """
-        A trace [A@0, B@60, C@180] produces two inter-event gaps:
-          A → 60 s  (B starts 60 s after A)
-          B → 120 s (C starts 120 s after B)
-        The last event C gets no gap (no successor).
-        """
-        log = make_log(
-            make_trace(
-                make_event("A", offset=0),
-                make_event("B", offset=60),
-                make_event("C", offset=180),
-            )
-        )
-        result = TemporalExtractor(log).estimate_from_inter_event_times()
-        assert result["a"].mean == pytest.approx(60.0)
-        assert result["b"].mean == pytest.approx(120.0)
-        assert "c" not in result   # last event — no successor
-
-    def test_single_event_trace_produces_no_data(self):
-        """A trace with only one event has no successor, so no gaps can be computed."""
-        log = make_log(make_trace(make_event("alone", offset=0)))
-        result = TemporalExtractor(log).estimate_from_inter_event_times()
-        assert "alone" not in result
-
-    def test_start_events_are_filtered_out_on_lifecycle_log(self):
-        """
-        When the log contains start/complete pairs (full_lifecycle_log), 'start'
-        events must be excluded before computing inter-event gaps to avoid
-        spurious near-zero gaps between start:X and complete:X.
-
-        Net: start:A@0, complete:A@300, start:B@300, complete:B@600.
-        After filtering 'start' events: [complete:A@300, complete:B@600].
-        Expected single gap for A: 300 s (B - A complete timestamps).
-        """
-        log = make_log(
-            make_trace(
-                make_event("A", lifecycle="start", offset=0),
-                make_event("A", lifecycle="complete", offset=300),
-                make_event("B", lifecycle="start", offset=300),
-                make_event("B", lifecycle="complete", offset=600),
-            )
-        )
-        result = TemporalExtractor(log).estimate_from_inter_event_times()
-        # After filtering starts: [A@300, B@600] → A contributes 300 s gap
-        assert "a" in result
-        assert result["a"].mean == pytest.approx(300.0)
-
-    def test_negative_gap_is_discarded_with_warning(self, caplog):
-        """
-        Events out of chronological order (t[i+1] < t[i]) produce a negative gap.
-        These must be discarded and a WARNING must be emitted.
-        """
-        log = make_log(
-            make_trace(
-                make_event("X", offset=500),
-                make_event("Y", offset=100),  # before X — negative gap
-            )
-        )
-        with caplog.at_level(logging.WARNING, logger="parsing.temporal_extractor"):
-            result = TemporalExtractor(log).estimate_from_inter_event_times()
-        assert "x" not in result
-        assert any("negative" in msg.lower() for msg in caplog.messages)
-
-    def test_event_missing_timestamp_is_counted_as_skipped(self, caplog):
-        """
-        An event with no time:timestamp must be skipped and the count logged
-        at WARNING level.
-        """
-        bad = make_event("Z", offset=0)
-        del bad["time:timestamp"]           # remove the timestamp key entirely
-        good = make_event("W", offset=60)
-        log = make_log(make_trace(bad, good))
-
-        with caplog.at_level(logging.WARNING, logger="parsing.temporal_extractor"):
-            TemporalExtractor(log).estimate_from_inter_event_times()
-        assert any("skipped" in msg.lower() for msg in caplog.messages)
-
-    def test_source_label_is_inter_event(self):
-        """All entries returned must carry source='inter_event'."""
-        log = make_log(
-            make_trace(make_event("P", offset=0), make_event("Q", offset=90))
-        )
-        result = TemporalExtractor(log).estimate_from_inter_event_times()
-        assert result["p"].source == "inter_event"
-
-
-# ===========================================================================
 # TemporalExtractor.from_external — Case 2
 # ===========================================================================
 
@@ -417,12 +329,6 @@ class TestExtract:
             )
         )
 
-    def _inter_event_log(self) -> object:
-        """Helper: complete-only log for 'triage' → 'blood_test' (90 s gap)."""
-        return make_log(
-            make_trace(make_event("triage", offset=0), make_event("blood_test", offset=90))
-        )
-
     def test_external_overrides_lifecycle_for_same_activity(self):
         """
         If an activity appears both in external_durations and in the lifecycle log,
@@ -441,25 +347,24 @@ class TestExtract:
         An activity with both lifecycle pairs and inter-event data must use
         the lifecycle source (higher confidence).
         """
-        log = make_log(
+        raw_log = make_log(
             make_trace(
                 make_event("exam", lifecycle="start", offset=0),
                 make_event("exam", lifecycle="complete", offset=300),
-                make_event("exam", offset=300),         # also present as complete-only event
-                make_event("followup", offset=400),
             )
         )
-        result = TemporalExtractor(log).extract()
+        # PetriNetLog provides inter-event data for 'exam' (50 s gap)
+        ex = TraceExecution("c1", [_pn_step("exam", 0), _pn_step("discharge", 50)])
+        result = TemporalExtractor(raw_log).extract(petri_net_log=_pn_log(ex))
         assert result["exam"].source == "lifecycle"
 
     def test_inter_event_used_when_no_lifecycle_data_and_fallback_enabled(self):
         """
         An activity with no lifecycle pairs falls back to inter_event estimation
-        when fallback_to_inter_event=True (the default).
+        from petri_net_log when fallback_to_inter_event=True (the default).
         """
-        log = self._inter_event_log()
-        result = TemporalExtractor(log).extract()
-        # 'triage' has a gap (to blood_test) but no lifecycle data
+        ex = TraceExecution("c1", [_pn_step("triage", 0), _pn_step("blood_test", 90)])
+        result = TemporalExtractor().extract(petri_net_log=_pn_log(ex))
         assert "triage" in result
         assert result["triage"].source == "inter_event"
 
@@ -468,9 +373,11 @@ class TestExtract:
         With fallback_to_inter_event=False, activities that only have inter-event
         data must be absent from the result.
         """
-        log = self._inter_event_log()
-        result = TemporalExtractor(log).extract(fallback_to_inter_event=False)
-        # No lifecycle pairs → 'triage' must not appear
+        ex = TraceExecution("c1", [_pn_step("triage", 0), _pn_step("blood_test", 90)])
+        result = TemporalExtractor().extract(
+            fallback_to_inter_event=False,
+            petri_net_log=_pn_log(ex),
+        )
         assert "triage" not in result
 
     def test_external_only_activity_appears_even_without_log_data(self):
@@ -478,9 +385,8 @@ class TestExtract:
         An activity specified in external_durations that does not exist in the log
         must still appear in the result (the user explicitly provided bounds for it).
         """
-        log = make_log()   # empty log — no events
         ext = {"virtual_activity": ExternalDuration(10.0, 20.0)}
-        result = TemporalExtractor(log).extract(external_durations=ext)
+        result = TemporalExtractor().extract(external_durations=ext)
         assert "virtual_activity" in result
         assert result["virtual_activity"].source == "external"
 
@@ -488,19 +394,154 @@ class TestExtract:
         """
         extract() must return data for every activity covered by at least one strategy.
         """
-        # lifecycle data for 'scan', inter-event data for 'triage'
-        log = make_log(
+        # lifecycle data for 'scan'
+        raw_log = make_log(
             make_trace(
                 make_event("scan", lifecycle="start", offset=0),
                 make_event("scan", lifecycle="complete", offset=100),
-                make_event("triage", offset=100),
-                make_event("discharge", offset=200),
             )
         )
+        # inter-event data for 'triage' from petri_net_log
+        ex = TraceExecution("c1", [_pn_step("triage", 0), _pn_step("discharge", 100)])
         ext = {"lab": ExternalDuration(30.0, 60.0)}
-        result = TemporalExtractor(log).extract(external_durations=ext)
+        result = TemporalExtractor(raw_log).extract(
+            external_durations=ext,
+            petri_net_log=_pn_log(ex),
+        )
 
         assert result["scan"].source == "lifecycle"
         assert result["lab"].source == "external"
-        # 'triage' comes from inter_event (gap to discharge)
         assert result["triage"].source == "inter_event"
+
+
+# ===========================================================================
+# Helpers for PetriNetLog-based tests
+# ===========================================================================
+
+def _pn_step(activity: str, offset: int, is_tau: bool = False) -> FiringStep:
+    """FiringStep with a time:timestamp at base + offset seconds."""
+    t = _transition(f"t_{activity}", None if is_tau else activity)
+    attrs = {} if is_tau else {"time:timestamp": ts(offset)}
+    return FiringStep(
+        transition=t,
+        activity_name=activity,
+        is_tau=is_tau,
+        from_places=set(),
+        attributes=attrs,
+    )
+
+
+def _pn_log(*executions: TraceExecution) -> PetriNetLog:
+    return PetriNetLog(
+        executions=list(executions),
+        net=PetriNet("test"),
+        initial_marking=Marking(),
+        final_marking=Marking(),
+    )
+
+
+# ===========================================================================
+# TemporalExtractor.estimate_from_inter_event_times_pn
+# ===========================================================================
+
+class TestEstimateFromInterEventTimesPn:
+    def test_consecutive_labeled_steps_produce_correct_gap(self):
+        """A[@0] → B[@60]: A contributes a 60s gap, B has no successor."""
+        ex = TraceExecution("c1", [_pn_step("a", 0), _pn_step("b", 60)])
+        result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log(ex))
+
+        assert "a" in result
+        assert result["a"].mean == pytest.approx(60.0)
+        assert "b" not in result
+
+    def test_tau_steps_between_labeled_steps_are_skipped(self):
+        """A[@0] → tau → B[@60]: tau is invisible, gap for A must be 60s."""
+        ex = TraceExecution("c1", [
+            _pn_step("a", 0),
+            _pn_step("tau_1", 0, is_tau=True),
+            _pn_step("b", 60),
+        ])
+        result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log(ex))
+
+        assert result["a"].mean == pytest.approx(60.0)
+        assert "tau_1" not in result
+
+    def test_last_labeled_step_excluded(self):
+        """The last labeled step in every execution has no successor and is omitted."""
+        ex = TraceExecution("c1", [_pn_step("a", 0), _pn_step("b", 60)])
+        result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log(ex))
+
+        assert "b" not in result
+
+    def test_multiple_executions_accumulate(self):
+        """Two executions each contributing 60s gap for A → mean stays 60s, count 2."""
+        ex1 = TraceExecution("c1", [_pn_step("a", 0), _pn_step("b", 60)])
+        ex2 = TraceExecution("c2", [_pn_step("a", 0), _pn_step("b", 60)])
+        result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log(ex1, ex2))
+
+        assert result["a"].count == 2
+        assert result["a"].mean == pytest.approx(60.0)
+
+    def test_negative_gap_is_discarded_with_warning(self, caplog):
+        """ts[i+1] < ts[i] → skip with warning."""
+        ex = TraceExecution("c1", [_pn_step("x", 500), _pn_step("y", 100)])
+        with caplog.at_level(logging.WARNING, logger="parsing.temporal_extractor"):
+            result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log(ex))
+
+        assert "x" not in result
+        assert any("negative" in msg.lower() for msg in caplog.messages)
+
+    def test_missing_timestamp_is_skipped_with_warning(self, caplog):
+        """Step with no time:timestamp in attributes → skipped with warning."""
+        t = _transition("t_a", "a")
+        step_no_ts = FiringStep(
+            transition=t, activity_name="a", is_tau=False, from_places=set(), attributes={}
+        )
+        step_b = _pn_step("b", 60)
+        ex = TraceExecution("c1", [step_no_ts, step_b])
+
+        with caplog.at_level(logging.WARNING, logger="parsing.temporal_extractor"):
+            result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log(ex))
+
+        assert "a" not in result
+        assert any("skipped" in msg.lower() for msg in caplog.messages)
+
+    def test_source_label_is_inter_event(self):
+        """All entries must carry source='inter_event'."""
+        ex = TraceExecution("c1", [_pn_step("a", 0), _pn_step("b", 90)])
+        result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log(ex))
+
+        assert result["a"].source == "inter_event"
+
+    def test_empty_pn_log_returns_empty_dict(self):
+        result = TemporalExtractor().estimate_from_inter_event_times_pn(_pn_log())
+        assert result == {}
+
+
+# ===========================================================================
+# TemporalExtractor.extract — petri_net_log parameter
+# ===========================================================================
+
+class TestExtractWithPetriNetLog:
+    def test_pn_log_used_for_inter_event_when_provided(self):
+        """When petri_net_log is provided, inter-event gaps come from it."""
+        ex = TraceExecution("c1", [_pn_step("triage", 0), _pn_step("discharge", 90)])
+        result = TemporalExtractor().extract(petri_net_log=_pn_log(ex))
+
+        assert "triage" in result
+        assert result["triage"].source == "inter_event"
+        assert result["triage"].mean == pytest.approx(90.0)
+
+    def test_lifecycle_still_wins_over_pn_inter_event(self):
+        """Lifecycle data from raw log takes priority over PetriNetLog inter-event."""
+        raw_log = make_log(
+            make_trace(
+                make_event("scan", lifecycle="start", offset=0),
+                make_event("scan", lifecycle="complete", offset=200),
+            )
+        )
+        ex = TraceExecution("c1", [_pn_step("scan", 0), _pn_step("discharge", 50)])
+        result = TemporalExtractor(raw_log).extract(petri_net_log=_pn_log(ex))
+
+        assert result["scan"].source == "lifecycle"
+        assert result["scan"].mean == pytest.approx(200.0)

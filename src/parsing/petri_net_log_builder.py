@@ -64,6 +64,7 @@ class PetriNetLogBuilder:
         Returns:
             PetriNetLog with one TraceExecution per accepted trace.
         """
+        self._warn_if_lifecycle_log(log)
         pairs = self._replay_log(log)
         executions = [self._build_execution(trace, result) for trace, result in pairs]
         return PetriNetLog(
@@ -72,6 +73,32 @@ class PetriNetLogBuilder:
             initial_marking=self.initial_marking,
             final_marking=self.final_marking,
         )
+
+    def _warn_if_lifecycle_log(self, log: Any) -> None:
+        """
+        Emit a single warning if the log contains lifecycle start events.
+
+        The lockstep alignment in _align_trace assumes one event per labeled
+        transition. A full-lifecycle log (start + complete per activity) causes
+        start events to be consumed for labeled transitions, misaligning attributes
+        and timestamps for all subsequent steps.
+
+        Pass a complete-only log, e.g. filtered with:
+            pm4py.filter_event_attribute_values(log, 'lifecycle:transition', ['complete'])
+
+        Args:
+            log: A pm4py EventLog.
+        """
+        for trace in log:
+            for event in trace:
+                if event.get("lifecycle:transition", "").lower() == "start":
+                    logger.warning(
+                        "PetriNetLogBuilder: lifecycle start events detected. "
+                        "Pass the complete-only log to avoid attribute misalignment. "
+                        "Filter with pm4py.filter_event_attribute_values(log, "
+                        "'lifecycle:transition', ['complete'])"
+                    )
+                    return
 
     def _replay_log(self, log: Any) -> List[Tuple[Any, Dict]]:
         """
