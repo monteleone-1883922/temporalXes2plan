@@ -117,3 +117,42 @@ class TestDiscover:
     def test_silent_transitions_field_is_a_dict(self, simple_log):
         result = ModelDiscoverer().discover(simple_log)
         assert isinstance(result.silent_transitions, dict)
+
+    def test_trans_inputs_and_trans_outputs_are_present(self, simple_log):
+        """discover() must populate trans_inputs and trans_outputs via build_arc_maps()."""
+        result = ModelDiscoverer().discover(simple_log)
+        assert result.trans_inputs is not None
+        assert result.trans_outputs is not None
+
+    def test_trans_inputs_keys_are_transitions(self, simple_log):
+        """trans_inputs keys must be PetriNet.Transition objects from the discovered net."""
+        result = ModelDiscoverer().discover(simple_log)
+        net_transitions = set(result.petrinet.transitions)
+        for transition in result.trans_inputs:
+            assert transition in net_transitions
+
+    def test_trans_outputs_keys_are_transitions(self, simple_log):
+        """trans_outputs keys must be PetriNet.Transition objects from the discovered net."""
+        result = ModelDiscoverer().discover(simple_log)
+        net_transitions = set(result.petrinet.transitions)
+        for transition in result.trans_outputs:
+            assert transition in net_transitions
+
+    def test_trans_inputs_values_are_sets_of_places(self, simple_log):
+        """Every value in trans_inputs must be a set containing Place objects."""
+        result = ModelDiscoverer().discover(simple_log)
+        net_places = set(result.petrinet.places)
+        for places in result.trans_inputs.values():
+            assert isinstance(places, set)
+            assert places <= net_places
+
+    def test_trans_maps_cover_all_transitions_with_arcs(self, simple_log):
+        """
+        Every transition that has at least one arc must appear in trans_inputs
+        or trans_outputs (or both). A transition with no arcs would be isolated
+        and is not expected in a well-formed discovered net.
+        """
+        result = ModelDiscoverer().discover(simple_log)
+        all_keyed = set(result.trans_inputs) | set(result.trans_outputs)
+        for t in result.petrinet.transitions:
+            assert t in all_keyed

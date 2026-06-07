@@ -32,8 +32,8 @@ class PetriNetLogBuilder:
 
     Traces whose replay fitness falls below config.replay_min_fitness are excluded.
 
-    trans_inputs and trans_outputs must be pre-built by StructureAnalyzer.build_arc_maps()
-    and passed in — the builder does not derive them from edges itself.
+    trans_inputs and trans_outputs are available directly from PetriNetModel
+    (built by ModelDiscoverer.discover()) and must be passed in at construction.
 
     Extensibility for optimal alignment (Approach B): override _align_trace to use
     pm4py.conformance_diagnostics_alignments instead of the lockstep assumption.

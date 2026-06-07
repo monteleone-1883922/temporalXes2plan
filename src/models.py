@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Set
+from collections import defaultdict
+from typing import Any, DefaultDict, Dict, List, Optional, Set
 
 from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
@@ -12,13 +13,14 @@ class FiringStep:
     Produced by PetriNetLogBuilder for each activated transition during replay.
     from_places contains only input places that actually held a token when the
     transition fired (runtime state). Output places are static structure and can
-    be looked up via StructureAnalyzer.build_arc_maps() trans_outputs.
+    be looked up via PetriNetModel.trans_outputs.
     """
     transition: PetriNet.Transition
     activity_name: str
     is_tau: bool
     from_places: Set[PetriNet.Place]
     attributes: Dict[str, Any]
+    duration_seconds: Optional[float] = None
 
 
 @dataclass
@@ -83,12 +85,18 @@ class PetriNetModel:
 
     Produced by ModelDiscoverer.discover() and used as the authoritative
     structural representation throughout the parsing pipeline.
+
+    trans_inputs and trans_outputs are the arc maps built by
+    ModelDiscoverer.discover() and are ready to be passed directly
+    to PetriNetLogBuilder without a separate build_arc_maps() call.
     """
     petrinet: PetriNet
     initial_marking: Marking
     final_marking: Marking
     activities: Set[str]
     silent_transitions: Dict[Transition, str]
+    trans_inputs: Dict[Transition, Set[PetriNet.Place]]
+    trans_outputs: Dict[Transition, Set[PetriNet.Place]]
 
 
 @dataclass
@@ -125,6 +133,15 @@ class AnalysisConfig:
     # Minimum trace_fitness for a replayed trace to be included in branch counting.
     # Traces below this threshold are skipped and logged.
     replay_min_fitness: float = 0.8
+
+    # --- Attribute filtering ---
+    # Raw attribute names (as they appear in the XES log) to exclude from all
+    # mining steps (CorrelationMiner, ProbabilityEstimator effect analysis).
+    ignored_attributes: Set[str] = field(default_factory=lambda: {
+        'case:concept:name', 'concept:name', 'time:timestamp',
+        'lifecycle:transition', 'org:resource', 'org:group',
+        'variant-index', 'Resource', 'org:role',
+    })
 
     # --- Logging ---
     log_removed_effects: bool = True
