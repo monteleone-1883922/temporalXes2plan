@@ -13,7 +13,7 @@ from pm4py import PetriNet, Marking
 
 from tests.helpers import _transition, _place, _arc
 from parsing.probability_estimator import ProbabilityEstimator
-from models import AttributeEffect, FiringStep, TraceExecution, PetriNetLog, XorSplitStats
+from models import AnalysisConfig, AttributeEffect, FiringStep, TraceExecution, PetriNetLog, XorSplitStats
 from parsing.discretizer import Discretizer
 
 
@@ -392,3 +392,16 @@ class TestComputeAttributeEffectProbabilities:
         )
 
         assert "crp" not in result["b"].presence_probabilities
+
+    def test_ignored_attributes_from_config_are_skipped(self):
+        """Attributes in config.ignored_attributes must not appear in the result."""
+        config = AnalysisConfig(ignored_attributes={"concept:name"})
+        executions = [TraceExecution("c1", [
+            _labeled_step("a", {"concept:name": "triage", "crp": 2.1}),
+        ])]
+        result = ProbabilityEstimator(
+            silent_transitions={}, config=config
+        ).compute_attribute_effect_probabilities(_make_log(executions))
+
+        assert "concept_name" not in result["a"].presence_probabilities
+        assert "crp" in result["a"].presence_probabilities

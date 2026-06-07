@@ -5,7 +5,7 @@ from pm4py import PetriNet
 from pm4py.objects.powl.obj import Transition
 
 import core_utils as utils
-from models import AttributeEffect, PetriNetLog, XorSplitStats
+from models import AnalysisConfig, AttributeEffect, PetriNetLog, XorSplitStats
 from parsing.discretizer import Discretizer
 
 logger = utils.get_logger(__name__)
@@ -23,15 +23,22 @@ class ProbabilityEstimator:
     Replay filtering and marking simulation are entirely handled by PetriNetLogBuilder.
     """
 
-    def __init__(self, silent_transitions: Dict[Transition, str]) -> None:
+    def __init__(
+        self,
+        silent_transitions: Dict[Transition, str],
+        config: Optional[AnalysisConfig] = None,
+    ) -> None:
         """
         Initialize ProbabilityEstimator.
 
         Args:
             silent_transitions: Mapping from Transition objects to their tau names,
                 used to resolve activity names for silent transitions.
+            config: Analysis configuration; ignored_attributes controls which raw
+                attribute names are excluded from effect probability computation.
         """
         self.silent_transitions = silent_transitions
+        self.config = config or AnalysisConfig()
 
     def compute_from_petri_net_log(
         self,
@@ -190,6 +197,8 @@ class ProbabilityEstimator:
                 act = step.activity_name
                 total_firings[act] += 1
                 for attr, val in step.attributes.items():
+                    if attr in self.config.ignored_attributes:
+                        continue
                     sanitized_attr = utils.sanitize_name(attr)
                     transformed_val = (
                         discretizer.transform_value(sanitized_attr, val)
