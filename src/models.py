@@ -66,6 +66,18 @@ class XorSplitStats:
 
 
 @dataclass
+class AttributeEffect:
+    """Attribute change probabilities for a single non-tau transition.
+
+    Produced by ProbabilityEstimator.compute_attribute_effect_probabilities()
+    for each labeled transition in the Petri net.
+    """
+    presence_probabilities: Dict[str, float]
+    value_probabilities: Dict[str, Dict[Any, float]]
+    total_firings: int
+
+
+@dataclass
 class PetriNetModel:
     """Complete structural description of a discovered Petri net.
 
