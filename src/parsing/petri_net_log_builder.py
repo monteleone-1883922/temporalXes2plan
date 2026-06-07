@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Any, DefaultDict, Dict, List, Set, Tuple
+from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
 import pm4py
 from pm4py import PetriNet, Marking
@@ -22,6 +22,13 @@ class PetriNetLogBuilder:
 
     The marking is simulated step by step so each FiringStep records the exact
     input places that held tokens (from_places) at the moment of firing.
+
+    Lifecycle-aware: if the log contains start/complete event pairs, the builder
+    automatically filters to complete-only events for replay and injects the
+    start→complete duration into FiringStep.duration_seconds for each labeled step.
+    The duration is embedded directly on each complete event before replay, so no
+    external mapping structures are needed. Passing a complete-only log is also
+    supported — duration_seconds will be None for all steps.
 
     Traces whose replay fitness falls below config.replay_min_fitness are excluded.
 
@@ -55,17 +62,27 @@ class PetriNetLogBuilder:
         """
         Build a PetriNetLog from a pm4py EventLog.
 
-        Runs token-based replay, filters traces below the fitness threshold, aligns
-        each accepted trace with its replay result, and builds TraceExecution objects.
+        Automatically detects lifecycle logs (start + complete events). When
+        detected, start events are removed and start→complete durations are
+        embedded directly on each complete event before replay. Fitness filtering
+        is applied after this step, so only accepted traces carry durations.
 
         Args:
-            log: A pm4py EventLog.
+            log: A pm4py EventLog. May be full lifecycle (start + complete) or
+                 complete-only. Both forms are handled transparently.
 
         Returns:
             PetriNetLog with one TraceExecution per accepted trace.
         """
-        self._warn_if_lifecycle_log(log)
-        pairs = self._replay_log(log)
+        replay_log = log
+        if self._has_lifecycle_start_events(log):
+            logger.info(
+                "PetriNetLogBuilder: lifecycle log detected — "
+                "filtering to complete events and annotating durations."
+            )
+            replay_log = self._filter_and_annotate_lifecycle(log)
+
+        pairs = self._replay_log(replay_log)
         executions = [self._build_execution(trace, result) for trace, result in pairs]
         return PetriNetLog(
             executions=executions,
@@ -74,31 +91,81 @@ class PetriNetLogBuilder:
             final_marking=self.final_marking,
         )
 
-    def _warn_if_lifecycle_log(self, log: Any) -> None:
-        """
-        Emit a single warning if the log contains lifecycle start events.
-
-        The lockstep alignment in _align_trace assumes one event per labeled
-        transition. A full-lifecycle log (start + complete per activity) causes
-        start events to be consumed for labeled transitions, misaligning attributes
-        and timestamps for all subsequent steps.
-
-        Pass a complete-only log, e.g. filtered with:
-            pm4py.filter_event_attribute_values(log, 'lifecycle:transition', ['complete'])
-
-        Args:
-            log: A pm4py EventLog.
-        """
+    def _has_lifecycle_start_events(self, log: Any) -> bool:
+        """Return True if any event in the log carries lifecycle:transition == 'start'."""
         for trace in log:
             for event in trace:
                 if event.get("lifecycle:transition", "").lower() == "start":
-                    logger.warning(
-                        "PetriNetLogBuilder: lifecycle start events detected. "
-                        "Pass the complete-only log to avoid attribute misalignment. "
-                        "Filter with pm4py.filter_event_attribute_values(log, "
-                        "'lifecycle:transition', ['complete'])"
-                    )
-                    return
+                    return True
+        return False
+
+    def _filter_and_annotate_lifecycle(self, log: Any) -> Any:
+        """
+        Single-pass filter and duration annotation for lifecycle logs.
+
+        For each trace, scans events in order:
+        - start events: the timestamp is recorded in a pending queue per activity
+          and the event is excluded from the output.
+        - complete events (or events without lifecycle:transition): included in
+          the output. If a matching start timestamp exists for the same activity,
+          the start→complete delta is attached directly on the event copy as
+          __duration_seconds__. Negative deltas are discarded.
+        - Events without a lifecycle attribute are treated as complete.
+
+        Each complete event in the returned log carries its own duration as an
+        attribute, so no external mapping structure is needed. The original log
+        is never modified — a shallow copy of each event dict is made.
+
+        Args:
+            log: A pm4py EventLog containing lifecycle start/complete events.
+
+        Returns:
+            A new EventLog with start events removed and __duration_seconds__
+            injected on complete events where a matching start was found.
+        """
+        filtered = type(log)()
+        filtered.attributes.update(log.attributes)
+        negative_count = 0
+
+        for trace in log:
+            new_trace = type(trace)()
+            new_trace.attributes.update(trace.attributes)
+            pending: Dict[str, List[Any]] = defaultdict(list)
+
+            for event in trace:
+                lifecycle = event.get("lifecycle:transition", "complete").lower()
+                activity = utils.sanitize_name(event.get("concept:name", ""))
+                timestamp = event.get("time:timestamp")
+
+                if lifecycle == "start":
+                    if activity and timestamp is not None:
+                        pending[activity].append(timestamp)
+                    continue  # start events are never included in the filtered log
+
+                # Complete event (or event without lifecycle attribute)
+                annotated = dict(event)
+                if activity and timestamp is not None and pending[activity]:
+                    start_ts = pending[activity].pop(0)
+                    delta = self._delta_seconds(start_ts, timestamp)
+                    if delta >= 0:
+                        annotated["__duration_seconds__"] = delta
+                    else:
+                        negative_count += 1
+                        logger.debug(
+                            "lifecycle: negative delta (%.1fs) for '%s', skipped",
+                            delta, activity,
+                        )
+                new_trace.append(annotated)
+
+            filtered.append(new_trace)
+
+        if negative_count:
+            logger.warning(
+                "PetriNetLogBuilder: %d negative start→complete deltas discarded.",
+                negative_count,
+            )
+
+        return filtered
 
     def _replay_log(self, log: Any) -> List[Tuple[Any, Dict]]:
         """
@@ -141,6 +208,9 @@ class PetriNetLogBuilder:
 
         Aligns the trace events with activated_transitions via lockstep, then
         simulates the token marking to determine from_places for each firing.
+        If a complete event carries a __duration_seconds__ attribute (injected by
+        _filter_and_annotate_lifecycle), it is extracted into FiringStep.duration_seconds
+        and removed from the step's attributes dict.
 
         Args:
             trace: A pm4py Trace (iterable of Event dicts).
@@ -179,12 +249,17 @@ class PetriNetLogBuilder:
                 else self.silent_transitions.get(transition, f"tau_unknown_{id(transition)}")
             )
 
+            # Extract the lifecycle duration embedded by _filter_and_annotate_lifecycle.
+            # attributes is already a copy (dict(event) in _align_trace), so pop is safe.
+            duration_seconds: Optional[float] = attributes.pop("__duration_seconds__", None)
+
             steps.append(FiringStep(
                 transition=transition,
                 activity_name=activity_name,
                 is_tau=is_tau,
                 from_places=from_places,
                 attributes=attributes,
+                duration_seconds=duration_seconds,
             ))
 
         return TraceExecution(trace_id=trace_id, steps=steps)
@@ -197,8 +272,8 @@ class PetriNetLogBuilder:
         """
         Lockstep alignment between replay transitions and log events.
 
-        Labeled transitions consume the next log event and carry its attributes.
-        Tau transitions receive empty attributes {}.
+        Labeled transitions consume the next log event and carry its attributes
+        as a fresh copy (dict). Tau transitions receive empty attributes {}.
 
         This method is the single extension point for Approach B: override it to
         use pm4py.conformance_diagnostics_alignments (move_both / move_model /
@@ -223,3 +298,24 @@ class PetriNetLogBuilder:
                 attrs = {}
             result.append((transition, attrs))
         return result
+
+    @staticmethod
+    def _delta_seconds(ts_from: Any, ts_to: Any) -> float:
+        """
+        Compute (ts_to - ts_from).total_seconds(), handling mixed timezone awareness.
+
+        Args:
+            ts_from: Start timestamp.
+            ts_to: End timestamp.
+
+        Returns:
+            Duration in seconds.
+        """
+        try:
+            return (ts_to - ts_from).total_seconds()
+        except TypeError:
+            if hasattr(ts_from, "replace"):
+                ts_from = ts_from.replace(tzinfo=None)
+            if hasattr(ts_to, "replace"):
+                ts_to = ts_to.replace(tzinfo=None)
+            return (ts_to - ts_from).total_seconds()

@@ -127,10 +127,12 @@ def _stats_to_duration(
 
 class TemporalExtractor:
     """
-    Extracts action duration statistics from an XES event log.
+    Extracts action duration statistics from a PetriNetLog.
 
     Supports three strategies:
-    - Lifecycle-based: uses start/complete event pairs for exact durations.
+    - Lifecycle-based: reads exact start→complete durations from
+      FiringStep.duration_seconds (injected by PetriNetLogBuilder when a
+      lifecycle log is provided).
     - Inter-event-time: estimates durations from gaps between consecutive labeled
       steps in a PetriNetLog (estimate_from_inter_event_times_pn).
     - External: accepts user-provided min/max bounds directly.
@@ -139,97 +141,44 @@ class TemporalExtractor:
     with configurable priority and fallback behaviour.
     """
 
-    def __init__(self, log: Any = None) -> None:
+    def __init__(self) -> None:
+        pass
+
+    # ------------------------------------------------------------------
+    # Case 1 — lifecycle durations from PetriNetLog
+    # ------------------------------------------------------------------
+
+    def extract_from_lifecycle_pn(
+        self, petri_net_log: PetriNetLog
+    ) -> Dict[str, ActionDurationStats]:
         """
+        Compute durations from FiringStep.duration_seconds values in a PetriNetLog.
+
+        PetriNetLogBuilder injects duration_seconds when it detects lifecycle
+        start/complete event pairs in the source log. Steps without a duration
+        (duration_seconds is None) and tau steps are ignored.
+
         Args:
-            log: A pm4py EventLog, ideally the full_lifecycle_log (i.e. before
-                 filtering to complete-only events) so that start/complete pairs
-                 are available for extract_from_lifecycle. Optional when only
-                 estimate_from_inter_event_times_pn or from_external are used.
-        """
-        self.log = log
-
-    # ------------------------------------------------------------------
-    # Case 1 — lifecycle start/complete pairs
-    # ------------------------------------------------------------------
-
-    def extract_from_lifecycle(self) -> Dict[str, ActionDurationStats]:
-        """
-        Compute durations from start/complete lifecycle event pairs.
-
-        For each case, pairs every 'start' event with the earliest following
-        'complete' event that shares the same concept:name.  Activities without
-        at least one valid pair are omitted from the result.
-
-        Requires a raw event log containing start events (passed to __init__).
-        Returns an empty dict and logs a warning when no log is available.
+            petri_net_log: Pre-built PetriNetLog, possibly with duration_seconds
+                           set on labeled steps.
 
         Returns:
             Mapping from sanitized activity name to ActionDurationStats,
-            with source='lifecycle'.
+            with source='lifecycle'. Empty if no steps carry duration data.
         """
-        if self.log is None:
-            logger.warning("extract_from_lifecycle: no log provided, returning empty dict")
-            return {}
         raw: Dict[str, List[float]] = defaultdict(list)
-        skipped_invalid = 0
-        orphan_complete: Dict[str, int] = defaultdict(int)
-        negative_delta: Dict[str, int] = defaultdict(int)
 
-        for trace in self.log:
-            # Collect pending start timestamps per activity name within this case
-            pending_starts: Dict[str, List[Any]] = defaultdict(list)
-
-            for event in trace:
-                lifecycle = event.get("lifecycle:transition", "").lower()
-                activity = utils.sanitize_name(event.get("concept:name", ""))
-                timestamp = event.get("time:timestamp")
-
-                if not activity or timestamp is None:
-                    skipped_invalid += 1
-                    continue
-
-                if lifecycle == "start":
-                    pending_starts[activity].append(timestamp)
-                elif lifecycle == "complete":
-                    if pending_starts[activity]:
-                        start_ts = pending_starts[activity].pop(0)
-                        delta = _delta_seconds(start_ts, timestamp)
-                        if delta >= 0:
-                            raw[activity].append(delta)
-                        else:
-                            negative_delta[activity] += 1
-                            logger.debug(
-                                "lifecycle: negative delta (%.1fs) for '%s', skipped",
-                                delta, activity,
-                            )
-                    else:
-                        orphan_complete[activity] += 1
-
-        if skipped_invalid:
-            logger.warning(
-                "extract_from_lifecycle: skipped %d events with missing activity name or timestamp",
-                skipped_invalid,
-            )
-        if orphan_complete:
-            logger.warning(
-                "extract_from_lifecycle: %d complete events had no matching start — %s",
-                sum(orphan_complete.values()),
-                dict(orphan_complete),
-            )
-        if negative_delta:
-            logger.warning(
-                "extract_from_lifecycle: %d negative-duration pairs discarded — %s",
-                sum(negative_delta.values()),
-                dict(negative_delta),
-            )
+        for execution in petri_net_log.executions:
+            for step in execution.steps:
+                if not step.is_tau and step.duration_seconds is not None:
+                    raw[step.activity_name].append(step.duration_seconds)
 
         result: Dict[str, ActionDurationStats] = {}
         for activity, durations in raw.items():
             if durations:
                 result[activity] = _stats_to_duration(durations, source="lifecycle")
                 logger.debug(
-                    "lifecycle: %s — n=%d, mean=%.1fs, eff=[%.1f, %.1f]",
+                    "lifecycle_pn: %s — n=%d, mean=%.1fs, eff=[%.1f, %.1f]",
                     activity,
                     result[activity].count,
                     result[activity].mean,
@@ -237,7 +186,7 @@ class TemporalExtractor:
                     result[activity].effective_max,
                 )
 
-        logger.info("extract_from_lifecycle: found data for %d activities", len(result))
+        logger.info("extract_from_lifecycle_pn: found data for %d activities", len(result))
         return result
 
     # ------------------------------------------------------------------
@@ -378,30 +327,30 @@ class TemporalExtractor:
 
         Priority per activity (highest to lowest):
           1. external_durations — if the activity is explicitly specified
-          2. lifecycle           — if start/complete pairs exist in the log
-          3. inter_event         — if fallback_to_inter_event is True
+          2. lifecycle           — FiringStep.duration_seconds from petri_net_log
+          3. inter_event         — consecutive labeled step gaps from petri_net_log
 
-        When petri_net_log is provided, inter-event times are derived from it via
-        estimate_from_inter_event_times_pn (already sanitized activity names, no
-        lifecycle-event filtering needed). If petri_net_log is None and
-        fallback_to_inter_event is True, a warning is logged and inter-event
-        estimation is skipped.
+        Both lifecycle and inter-event data require petri_net_log. When
+        petri_net_log is None and fallback_to_inter_event is True, a warning is
+        logged and inter-event estimation is skipped.
 
         Activities not covered by any strategy are omitted from the result.
 
         Args:
             external_durations: Optional mapping of activity names to user-supplied
-                                 bounds.  May cover any subset of activities.
+                                 bounds. May cover any subset of activities.
             fallback_to_inter_event: When True, activities not covered by external
                                      or lifecycle data are estimated from inter-event
                                      timestamps.
-            petri_net_log: Optional PetriNetLog; when provided, used for inter-event
-                           estimation instead of the raw log.
+            petri_net_log: PetriNetLog produced by PetriNetLogBuilder. Used for
+                           both lifecycle and inter-event estimation.
 
         Returns:
             Mapping from sanitized activity name to ActionDurationStats.
         """
-        lifecycle_stats = self.extract_from_lifecycle()
+        lifecycle_stats: Dict[str, ActionDurationStats] = {}
+        if petri_net_log is not None:
+            lifecycle_stats = self.extract_from_lifecycle_pn(petri_net_log)
 
         inter_event_stats: Dict[str, ActionDurationStats] = {}
         if fallback_to_inter_event:

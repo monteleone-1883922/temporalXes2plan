@@ -361,63 +361,124 @@ class TestBuild:
 
 
 # ===========================================================================
-# build() — lifecycle warning
+# build() — lifecycle duration injection
 # ===========================================================================
 
-class TestLifecycleWarning:
+class TestLifecycleDurations:
     def _builder(self, config=None):
         net = _seq_net()
         return _make_builder(net["arcs"], Marking({net["p_in"]: 1}), config=config), net
 
-    def _complete_log(self):
-        return make_log(
-            make_trace(make_event("A", offset=0), make_event("B", offset=60), case_id="c1")
-        )
-
-    def test_lifecycle_start_events_trigger_warning(self, caplog):
-        """build() must log a WARNING when the log contains lifecycle start events."""
+    def test_single_pair_injects_duration_into_firing_step(self):
+        """start(A)@0 + complete(A)@300 → FiringStep for A has duration_seconds=300."""
         builder, net = self._builder()
         log = make_log(
             make_trace(
                 make_event("A", lifecycle="start", offset=0),
-                make_event("A", lifecycle="complete", offset=60),
-                make_event("B", lifecycle="complete", offset=120),
+                make_event("A", lifecycle="complete", offset=300),
+                make_event("B", lifecycle="complete", offset=400),
                 case_id="c1",
             )
         )
         with patch("pm4py.conformance_diagnostics_token_based_replay",
                    return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
-            with caplog.at_level(logging.WARNING, logger="parsing.petri_net_log_builder"):
-                builder.build(log)
-        assert any("lifecycle" in msg.lower() for msg in caplog.messages)
+            result = builder.build(log)
 
-    def test_complete_only_log_does_not_trigger_warning(self, caplog):
-        """A log with only complete events must not produce the lifecycle warning."""
-        builder, net = self._builder()
-        with patch("pm4py.conformance_diagnostics_token_based_replay",
-                   return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
-            with caplog.at_level(logging.WARNING, logger="parsing.petri_net_log_builder"):
-                builder.build(self._complete_log())
-        lifecycle_warnings = [msg for msg in caplog.messages if "lifecycle" in msg.lower()]
-        assert not lifecycle_warnings
+        step_a = result.executions[0].steps[0]
+        assert step_a.activity_name == "a"
+        assert step_a.duration_seconds == pytest.approx(300.0)
 
-    def test_warning_emitted_only_once_even_with_many_start_events(self, caplog):
-        """A single warning per build() call, regardless of how many start events exist."""
+    def test_activity_without_start_event_has_none_duration(self):
+        """B has no start event → FiringStep for B has duration_seconds=None."""
         builder, net = self._builder()
         log = make_log(
-            *[
-                make_trace(
-                    make_event("A", lifecycle="start", offset=0),
-                    make_event("A", lifecycle="complete", offset=60),
-                    make_event("B", lifecycle="complete", offset=120),
-                    case_id=f"c{i}",
-                )
-                for i in range(5)
-            ]
+            make_trace(
+                make_event("A", lifecycle="start", offset=0),
+                make_event("A", lifecycle="complete", offset=100),
+                make_event("B", lifecycle="complete", offset=200),
+                case_id="c1",
+            )
         )
         with patch("pm4py.conformance_diagnostics_token_based_replay",
-                   return_value=[_fake_replay([net["t_a"], net["t_b"]])] * 5):
-            with caplog.at_level(logging.WARNING, logger="parsing.petri_net_log_builder"):
-                builder.build(log)
-        lifecycle_warnings = [msg for msg in caplog.messages if "lifecycle" in msg.lower()]
-        assert len(lifecycle_warnings) == 1
+                   return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
+            result = builder.build(log)
+
+        step_b = result.executions[0].steps[1]
+        assert step_b.activity_name == "b"
+        assert step_b.duration_seconds is None
+
+    def test_complete_only_log_has_no_duration_seconds(self):
+        """Log without start events → all duration_seconds are None."""
+        builder, net = self._builder()
+        log = make_log(
+            make_trace(make_event("A", offset=0), make_event("B", offset=60), case_id="c1")
+        )
+        with patch("pm4py.conformance_diagnostics_token_based_replay",
+                   return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
+            result = builder.build(log)
+
+        for step in result.executions[0].steps:
+            assert step.duration_seconds is None
+
+    def test_negative_delta_is_discarded(self):
+        """complete(A) before start(A) → negative delta skipped, duration_seconds=None."""
+        builder, net = self._builder()
+        log = make_log(
+            make_trace(
+                make_event("A", lifecycle="start", offset=500),
+                make_event("A", lifecycle="complete", offset=100),
+                make_event("B", lifecycle="complete", offset=600),
+                case_id="c1",
+            )
+        )
+        with patch("pm4py.conformance_diagnostics_token_based_replay",
+                   return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
+            result = builder.build(log)
+
+        step_a = result.executions[0].steps[0]
+        assert step_a.duration_seconds is None
+
+    def test_complete_event_attributes_are_used_not_start(self):
+        """
+        With a lifecycle log, the complete event (not the start event) must supply
+        the FiringStep attributes via lockstep alignment on the filtered log.
+        """
+        builder, net = self._builder()
+        log = make_log(
+            make_trace(
+                make_event("A", lifecycle="start", offset=0, score=1),
+                make_event("A", lifecycle="complete", offset=100, score=99),
+                make_event("B", lifecycle="complete", offset=200),
+                case_id="c1",
+            )
+        )
+        with patch("pm4py.conformance_diagnostics_token_based_replay",
+                   return_value=[_fake_replay([net["t_a"], net["t_b"]])]):
+            result = builder.build(log)
+
+        step_a = result.executions[0].steps[0]
+        assert step_a.attributes["score"] == 99
+
+    def test_multiple_traces_each_get_own_durations(self):
+        """Two traces with different durations for A are independently injected."""
+        builder, net = self._builder()
+        log = make_log(
+            make_trace(
+                make_event("A", lifecycle="start", offset=0),
+                make_event("A", lifecycle="complete", offset=60),
+                make_event("B", lifecycle="complete", offset=90),
+                case_id="c1",
+            ),
+            make_trace(
+                make_event("A", lifecycle="start", offset=0),
+                make_event("A", lifecycle="complete", offset=120),
+                make_event("B", lifecycle="complete", offset=180),
+                case_id="c2",
+            ),
+        )
+        fake = [_fake_replay([net["t_a"], net["t_b"]])] * 2
+        with patch("pm4py.conformance_diagnostics_token_based_replay", return_value=fake):
+            result = builder.build(log)
+
+        assert result.executions[0].steps[0].duration_seconds == pytest.approx(60.0)
+        assert result.executions[1].steps[0].duration_seconds == pytest.approx(120.0)
