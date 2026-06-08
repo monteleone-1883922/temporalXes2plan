@@ -307,7 +307,8 @@ class DecisionMiner:
         bool_cols: Set[str],
     ) -> Dict[str, List[List[Guard]]]:
         """
-        Walk all root-to-leaf paths in the DT and build SOP guards.
+        Walk all root-to-leaf paths in the DT, prune low-quality leaves, and
+        build SOP guards.
 
         Each root-to-leaf path yields one inner list (AND of Guard conditions along
         that path). Multiple paths predicting the same class are OR'd together
@@ -315,6 +316,12 @@ class DecisionMiner:
 
         Splits that produce no Guard (raw numeric, unrepresentable) are omitted.
         Paths that yield no conditions after filtering are excluded.
+
+        Leaf quality thresholds (config.dt_prune_min_leaf_samples and
+        config.dt_prune_min_purity) remove unreliable leaves after collection.
+        When pruning would orphan an activity (remove ALL its leaves):
+          - "keep_best": restore the highest-purity leaf for that activity.
+          - "drop": omit the activity from guards entirely (WARNING logged).
 
         Args:
             clf: Fitted DecisionTreeClassifier.
@@ -330,7 +337,8 @@ class DecisionMiner:
             feature_names[i] if i != _tree.TREE_UNDEFINED else ""
             for i in tree_.feature
         ]
-        paths: List[Tuple[str, List[Guard]]] = []
+        # Each entry: (activity, conditions, n_leaf_samples, leaf_purity)
+        paths: List[Tuple[str, List[Guard], int, float]] = []
 
         def recurse(node: int, conditions: List[Guard]) -> None:
             if tree_.feature[node] != _tree.TREE_UNDEFINED:
@@ -343,14 +351,46 @@ class DecisionMiner:
                 recurse(tree_.children_right[node],
                         conditions + ([right] if right else []))
             else:
-                activity = clf.classes_[int(np.argmax(tree_.value[node]))]
+                n_leaf = int(tree_.n_node_samples[node])
+                values = tree_.value[node][0]
+                purity = float(np.max(values) / n_leaf) if n_leaf > 0 else 0.0
+                activity = str(clf.classes_[int(np.argmax(values))])
                 if conditions:
-                    paths.append((str(activity), list(conditions)))
+                    paths.append((activity, list(conditions), n_leaf, purity))
 
         recurse(0, [])
 
+        # --- Pruning ---
+        min_n = self.config.dt_prune_min_leaf_samples
+        min_p = self.config.dt_prune_min_purity
+
+        activities_before: Set[str] = {act for act, _, _, _ in paths}
+        surviving: List[Tuple[str, List[Guard], int, float]] = [
+            (act, conds, n, p)
+            for act, conds, n, p in paths
+            if n >= min_n and p >= min_p
+        ]
+        activities_after: Set[str] = {act for act, _, _, _ in surviving}
+
+        for orphaned in activities_before - activities_after:
+            candidates = [(conds, n, p) for act, conds, n, p in paths if act == orphaned]
+            if self.config.dt_prune_orphan_mode == "keep_best":
+                best_conds, best_n, best_p = max(candidates, key=lambda x: (x[2], x[1]))
+                surviving.append((orphaned, best_conds, best_n, best_p))
+                logger.info(
+                    "Pruning '%s': all leaves below threshold; kept best leaf "
+                    "(purity=%.2f, n=%d).",
+                    orphaned, best_p, best_n,
+                )
+            else:
+                logger.warning(
+                    "Pruning '%s': dropped entirely — all leaves below threshold "
+                    "(min_purity=%.2f, min_samples=%d).",
+                    orphaned, min_p, min_n,
+                )
+
         sop: Dict[str, List[List[Guard]]] = defaultdict(list)
-        for activity, cond_list in paths:
+        for activity, cond_list, _, _ in surviving:
             sop[activity].append(cond_list)
         return dict(sop)
 

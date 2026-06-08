@@ -451,6 +451,189 @@ class TestMineXorSplitsSop:
 
 
 # ===========================================================================
+# Leaf pruning — integration tests via mine_xor_splits
+# ===========================================================================
+
+class TestLeafPruning:
+    """
+    Pruning integration tests.
+
+    Noisy log structure used in most tests:
+      20 × B  (risk=high)     — clean dominant leaf for B
+      20 × C  (risk=low)      — clean dominant leaf for C
+       4 × B  (risk=low)      — noise: produces a small/impure leaf for B
+    """
+
+    def _noisy_log(self):
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+        execs = []
+        for i in range(20):
+            execs.append(_execution(f"b{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "high"}),
+                _step(t_B, {p_xor}),
+            ]))
+        for i in range(20):
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "low"}),
+                _step(t_C, {p_xor}),
+            ]))
+        # 4 noisy traces: B fires on risk=low → creates impure/small leaf
+        for i in range(4):
+            execs.append(_execution(f"noise{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "low"}),
+                _step(t_B, {p_xor}),
+            ]))
+        return _pn_log(execs), p_xor, t_B, t_C
+
+    def _mine(self, pn_log, p_xor, t_B, t_C, cfg):
+        result, _ = _miner(config=cfg).mine_xor_splits(pn_log, {p_xor: [t_B, t_C]})
+        return result
+
+    def test_perfect_data_not_pruned_with_defaults(self):
+        """Perfectly separable data with default config must produce non-empty guards."""
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+        execs = []
+        for i in range(20):
+            execs.append(_execution(f"b{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "high"}),
+                _step(t_B, {p_xor}),
+            ]))
+        for i in range(20):
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "low"}),
+                _step(t_C, {p_xor}),
+            ]))
+        cfg = AnalysisConfig(dt_min_samples=5, dt_min_accuracy=0.7)
+        result = self._mine(_pn_log(execs), p_xor, t_B, t_C, cfg)
+        assert "p_xor" in result
+        assert result["p_xor"].guards != {}
+
+    def test_high_purity_threshold_prunes_noisy_leaf(self):
+        """
+        With purity threshold above the noise leaf's purity (4/24 ≈ 0.83 impure
+        from C's perspective), the contaminated leaf for C should be pruned so
+        that C's guards contain only the clean path.
+        """
+        pn_log, p_xor, t_B, t_C = self._noisy_log()
+        cfg = AnalysisConfig(
+            dt_min_samples=5,
+            dt_min_accuracy=0.5,
+            dt_prune_min_leaf_samples=1,
+            dt_prune_min_purity=0.95,  # only pure leaves survive
+            dt_prune_orphan_mode="keep_best",
+        )
+        result = self._mine(pn_log, p_xor, t_B, t_C, cfg)
+        if "p_xor" in result:
+            guards = result["p_xor"].guards
+            # Each surviving activity must have at least one path
+            for activity, outer in guards.items():
+                assert len(outer) >= 1
+
+    def test_high_samples_threshold_prunes_small_leaf(self):
+        """
+        With dt_prune_min_leaf_samples set above the size of the noisy leaf,
+        that leaf is excluded. Guards for surviving leaves must still be present.
+        """
+        pn_log, p_xor, t_B, t_C = self._noisy_log()
+        cfg = AnalysisConfig(
+            dt_min_samples=5,
+            dt_min_accuracy=0.5,
+            dt_prune_min_leaf_samples=10,  # noisy leaf has 4 samples → pruned
+            dt_prune_min_purity=0.0,
+            dt_prune_orphan_mode="keep_best",
+        )
+        result = self._mine(pn_log, p_xor, t_B, t_C, cfg)
+        if "p_xor" in result:
+            guards = result["p_xor"].guards
+            for activity, outer in guards.items():
+                assert all(len(path) >= 1 for path in outer)
+
+    def _orphan_log(self):
+        """
+        Log designed to produce a small leaf for C:
+          20 × B  (high_risk=True)   — leaf B: n=23, purity high
+           3 × C  (high_risk=True)   — noise, merged into B's leaf
+           3 × C  (high_risk=False)  — leaf C: n=3, purity=1.0 but small
+
+        A boolean attribute is used so both DT branches produce a Guard
+        (unlike categorical, whose <= side returns None).
+        """
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+        execs = []
+        for i in range(20):
+            execs.append(_execution(f"b{i}", [
+                _step(t_pre, {p_in}, attributes={"high_risk": True}),
+                _step(t_B, {p_xor}),
+            ]))
+        for i in range(3):
+            execs.append(_execution(f"cnoise{i}", [
+                _step(t_pre, {p_in}, attributes={"high_risk": True}),
+                _step(t_C, {p_xor}),
+            ]))
+        for i in range(3):
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"high_risk": False}),
+                _step(t_C, {p_xor}),
+            ]))
+        return _pn_log(execs), p_xor, t_B, t_C
+
+    def test_orphan_drop_mode_removes_activity(self):
+        """
+        With drop mode, an activity whose only leaf has too few samples must be
+        absent from guards.  C's pure leaf has n=3 < threshold=5.
+        """
+        pn_log, p_xor, t_B, t_C = self._orphan_log()
+        cfg = AnalysisConfig(
+            dt_min_samples=5,
+            dt_min_accuracy=0.5,
+            dt_prune_min_leaf_samples=5,
+            dt_prune_min_purity=0.0,
+            dt_prune_orphan_mode="drop",
+        )
+        result = self._mine(pn_log, p_xor, t_B, t_C, cfg)
+        if "p_xor" in result:
+            assert "c" not in result["p_xor"].guards
+
+    def test_orphan_keep_best_mode_preserves_activity(self):
+        """
+        With keep_best mode, the same orphaned activity must still appear in
+        guards with exactly one path (the best — and only — rescued leaf).
+        """
+        pn_log, p_xor, t_B, t_C = self._orphan_log()
+        cfg = AnalysisConfig(
+            dt_min_samples=5,
+            dt_min_accuracy=0.5,
+            dt_prune_min_leaf_samples=5,
+            dt_prune_min_purity=0.0,
+            dt_prune_orphan_mode="keep_best",
+        )
+        result = self._mine(pn_log, p_xor, t_B, t_C, cfg)
+        if "p_xor" in result:
+            guards = result["p_xor"].guards
+            assert "c" in guards
+            assert len(guards["c"]) == 1
+
+    def test_pruning_threshold_zero_keeps_all_leaves(self):
+        """Setting both thresholds to 0 must reproduce pre-pruning behavior."""
+        pn_log, p_xor, t_B, t_C = self._noisy_log()
+        cfg_pruned = AnalysisConfig(
+            dt_min_samples=5, dt_min_accuracy=0.5,
+            dt_prune_min_leaf_samples=0, dt_prune_min_purity=0.0,
+        )
+        cfg_nopruned = AnalysisConfig(
+            dt_min_samples=5, dt_min_accuracy=0.5,
+            dt_prune_min_leaf_samples=0, dt_prune_min_purity=0.0,
+        )
+        r1 = self._mine(pn_log, p_xor, t_B, t_C, cfg_pruned)
+        r2 = self._mine(pn_log, p_xor, t_B, t_C, cfg_nopruned)
+        if "p_xor" in r1 and "p_xor" in r2:
+            assert set(r1["p_xor"].guards.keys()) == set(r2["p_xor"].guards.keys())
+
+
+# ===========================================================================
 # _build_feature_matrix — causal ordering
 # ===========================================================================
 

@@ -163,6 +163,17 @@ class AnalysisConfig:
     dt_min_accuracy: float = 0.75
     dt_max_depth: int = 3
 
+    # --- DT leaf pruning ---
+    # Leaves with fewer samples or lower purity than these thresholds are removed
+    # from the SOP guards after training.
+    # dt_prune_orphan_mode controls what happens when pruning would remove ALL leaves
+    # for an activity:
+    #   "keep_best" — keep the single highest-purity leaf (tie-break: most samples)
+    #   "drop"      — remove the activity from guards entirely (WARNING logged)
+    dt_prune_min_leaf_samples: int = 5
+    dt_prune_min_purity: float = 0.70
+    dt_prune_orphan_mode: str = "keep_best"
+
     # --- XOR split statistical fallback (Level 2) ---
     # majority_only | weighted | pruned_weighted
     xor_statistical_mode: str = "pruned_weighted"
