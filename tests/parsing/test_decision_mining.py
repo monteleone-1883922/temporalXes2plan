@@ -1,216 +1,708 @@
 """
-Tests for parsing.decision_mining — pure-function tests only.
+Tests for parsing.decision_mining.DecisionMiner.
 
-Only load_and_prepare_log and find_decision_points are tested here: both are
-pure data-transformation functions that operate on a pm4py EventLog / DataFrame
-and do not require running the full decision-tree mining pipeline.
-
-Tests that require discover_all_decision_rules (which runs the full Parser
-pipeline and needs a real XES file) are marked @pytest.mark.integration and
-are skipped by default.  Run them explicitly with:
-    conda run -n temporalXes2plan python -m pytest -m integration
+All tests use synthetic PetriNetLog objects with manually constructed
+FiringStep/TraceExecution instances — no real event logs or discovery
+algorithms are needed.
 """
 import pytest
+from typing import Dict, List, Optional, Set
 
-from tests.helpers import make_event, make_trace, make_log
-from parsing.decision_mining import (
-    META_COLUMNS_IGNORED,
-    load_and_prepare_log,
-    find_decision_points,
-)
+from pm4py import PetriNet, Marking
+
+from tests.helpers import _transition, _place
+from parsing.decision_mining import DecisionMiner
+from models import AnalysisConfig, FiringStep, Guard, PetriNetLog, TraceExecution, XorSplitGuards
 
 
 # ---------------------------------------------------------------------------
-# Helper — build a minimal pm4py log with known column types
+# PetriNetLog factory helpers
 # ---------------------------------------------------------------------------
 
-def _make_typed_log():
-    """
-    Build a two-case EventLog that contains:
-      - a numeric column  'crp'   (float)
-      - a boolean column  'admitted' (bool, converted to 0/1 by load_and_prepare_log)
-      - a categorical col 'diagnosis' (string)
-    Each case has two events so that 'next_activity' can be computed.
-    """
-    return make_log(
-        make_trace(
-            make_event("triage",    offset=0,  crp=4.5, admitted=True,  diagnosis="A"),
-            make_event("treatment", offset=60, crp=2.1, admitted=True,  diagnosis="A"),
-            case_id="c1",
-        ),
-        make_trace(
-            make_event("triage",    offset=0,  crp=8.0, admitted=False, diagnosis="B"),
-            make_event("discharge", offset=60, crp=7.5, admitted=False, diagnosis="B"),
-            case_id="c2",
-        ),
+def _step(
+    transition: PetriNet.Transition,
+    from_places: Set[PetriNet.Place],
+    is_tau: bool = False,
+    attributes: Optional[Dict] = None,
+    activity_name: Optional[str] = None,
+) -> FiringStep:
+    return FiringStep(
+        transition=transition,
+        activity_name=activity_name or (transition.label or "tau"),
+        is_tau=is_tau,
+        from_places=from_places,
+        attributes=attributes or {},
     )
 
 
-# ===========================================================================
-# load_and_prepare_log
-# ===========================================================================
+def _execution(trace_id: str, steps: List[FiringStep]) -> TraceExecution:
+    return TraceExecution(trace_id=trace_id, steps=steps)
 
-class TestLoadAndPrepareLog:
-    def test_returns_five_element_tuple(self):
-        """
-        load_and_prepare_log must return a tuple of exactly 5 elements:
-        (DataFrame, all_feature_cols, numeric_cols, bool_cols, categorical_cols).
-        """
-        result = load_and_prepare_log(
-            log_path="unused_because_log_is_provided",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        assert len(result) == 5
 
-    def test_next_activity_column_added(self):
-        """
-        load_and_prepare_log must add a 'next_activity' column to the DataFrame,
-        containing the concept:name of the following event within each case.
-        """
-        df, *_ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        assert "next_activity" in df.columns
+def _pn_log(executions: List[TraceExecution]) -> PetriNetLog:
+    return PetriNetLog(
+        executions=executions,
+        net=PetriNet("test"),
+        initial_marking=Marking(),
+        final_marking=Marking(),
+    )
 
-    def test_meta_columns_excluded_from_features(self):
-        """
-        Standard meta columns (concept:name, time:timestamp, etc.) must not appear
-        in the all_feature_cols list, since they carry no predictive information
-        for decision mining.
-        """
-        _, all_feature_cols, *_ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        excluded = {"concept:name", "time:timestamp", "lifecycle:transition",
-                    "org:resource", "org:group"}
-        for col in all_feature_cols:
-            assert col not in excluded, f"Meta column '{col}' leaked into features"
 
-    def test_numeric_column_classified_correctly(self):
-        """
-        The 'crp' column, which contains float values, must appear in numeric_cols.
-        """
-        _, _, numeric_cols, _, _ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        assert "crp" in numeric_cols
+def _miner(
+    silent: Optional[Dict] = None,
+    config: Optional[AnalysisConfig] = None,
+    discretizer=None,
+) -> DecisionMiner:
+    return DecisionMiner(
+        silent_transitions=silent or {},
+        config=config or AnalysisConfig(),
+        discretizer=discretizer,
+    )
 
-    def test_boolean_column_converted_to_integer(self):
-        """
-        Boolean columns are converted to 0/1 integers by load_and_prepare_log.
-        The 'admitted' column must appear in bool_cols and the DataFrame must
-        contain only 0 and 1 values for it.
-        """
-        df, _, _, bool_cols, _ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        assert "admitted" in bool_cols
-        assert set(df["admitted"].dropna().unique()).issubset({0, 1})
 
-    def test_categorical_column_classified_correctly(self):
-        """
-        The 'diagnosis' column, which contains string values ('A', 'B'),
-        must appear in categorical_cols.
-        """
-        _, _, _, _, categorical_cols = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        assert "diagnosis" in categorical_cols
+# ---------------------------------------------------------------------------
+# Shared XOR-net structure
+#
+#   p_in -> t_src -> p_xor -> t_B
+#                          -> t_C
+# ---------------------------------------------------------------------------
 
-    def test_no_exception_when_log_has_no_feature_columns(self):
-        """
-        A log with only meta columns and no domain attributes must not raise.
-        A WARNING is expected (no features detected) but the function completes.
-        """
-        log = make_log(
-            make_trace(
-                make_event("A", offset=0),
-                make_event("B", offset=30),
-            )
-        )
-        # Should complete without exception even if all_feature_cols is empty
-        df, all_feature_cols, *_ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=log,
-        )
-        assert df is not None
+def _xor_net():
+    t_src = _transition("t_src", "Src")
+    t_B   = _transition("t_B",   "B")
+    t_C   = _transition("t_C",   "C")
+    p_in  = _place("p_in")
+    p_xor = _place("p_xor")
+    return t_src, t_B, t_C, p_in, p_xor
 
 
 # ===========================================================================
-# find_decision_points
+# __init__
 # ===========================================================================
 
-class TestFindDecisionPoints:
-    def test_activity_with_multiple_successors_is_a_decision_point(self):
-        """
-        An activity that leads to more than one distinct next activity in the log
-        qualifies as a decision point, provided it meets the min_instances threshold.
-        'triage' leads to both 'treatment' and 'discharge' across cases.
-        """
-        df, *_ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        # min_instances=1 so both activities qualify regardless of frequency
-        decision_pts = find_decision_points(df, min_instances=1)
-        assert "triage" in decision_pts
+class TestDecisionMinerInit:
+    def test_default_config_is_analysis_config(self):
+        m = _miner()
+        assert isinstance(m.config, AnalysisConfig)
 
-    def test_activity_with_single_successor_is_not_a_decision_point(self):
-        """
-        'treatment' only leads to the end of its trace — it has no branching.
-        It must not appear in the decision points list.
-        """
-        df, *_ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        decision_pts = find_decision_points(df, min_instances=1)
-        assert "treatment" not in decision_pts
+    def test_custom_config_stored(self):
+        cfg = AnalysisConfig(dt_min_samples=5)
+        m = _miner(config=cfg)
+        assert m.config.dt_min_samples == 5
 
-    def test_min_instances_threshold_filters_rare_activities(self):
-        """
-        An activity that appears fewer times than min_instances must not be
-        classified as a decision point, even if it has multiple successors.
-        'triage' appears exactly 2 times; requiring 3 must exclude it.
-        """
-        df, *_ = load_and_prepare_log(
-            log_path="unused",
-            meta_cols=META_COLUMNS_IGNORED,
-            log=_make_typed_log(),
-        )
-        decision_pts = find_decision_points(df, min_instances=100)
-        assert "triage" not in decision_pts
+    def test_default_discretizer_is_none(self):
+        m = _miner()
+        assert m._discretizer is None
 
-    def test_empty_dataframe_returns_empty_list(self):
-        """find_decision_points on an empty DataFrame must return an empty list."""
+    def test_silent_transitions_stored(self):
+        t = _transition("t1", None)
+        m = _miner(silent={t: "tau_1"})
+        assert m.silent_transitions[t] == "tau_1"
+
+
+# ===========================================================================
+# _activity_name
+# ===========================================================================
+
+class TestActivityName:
+    def test_labeled_transition_returns_sanitized_label(self):
+        t = _transition("t1", "ER Registration")
+        m = _miner()
+        assert m._activity_name(t) == "er_registration"
+
+    def test_silent_transition_returns_tau_name(self):
+        t = _transition("t1", None)
+        m = _miner(silent={t: "tau_3"})
+        assert m._activity_name(t) == "tau_3"
+
+    def test_silent_transition_not_in_map_returns_tau_unknown(self):
+        t = _transition("t1", None)
+        m = _miner()
+        result = m._activity_name(t)
+        assert result.startswith("tau_unknown_")
+
+
+# ===========================================================================
+# _get_base_feature
+# ===========================================================================
+
+class TestGetBaseFeature:
+    def setup_method(self):
+        self.m = _miner()
+
+    def test_known_single_word_categorical(self):
+        result = self.m._get_base_feature("risk_high", {"risk"})
+        assert result == "risk"
+
+    def test_known_two_word_categorical(self):
+        result = self.m._get_base_feature("case_type_urgent", {"case_type"})
+        assert result == "case_type"
+
+    def test_no_match_returns_col_name(self):
+        result = self.m._get_base_feature("some_col", {"other"})
+        assert result == "some_col"
+
+    def test_exact_match_no_suffix_returns_self(self):
+        result = self.m._get_base_feature("risk", {"risk"})
+        assert result == "risk"
+
+
+# ===========================================================================
+# _format_condition
+# ===========================================================================
+
+class TestFormatCondition:
+    def setup_method(self):
+        self.m = _miner()
+
+    def test_true_suffix_op_gt_returns_positive_guard(self):
+        result = self.m._format_condition("admitted_true", ">", 0.5, set(), set())
+        assert result == Guard("admitted", None, False)
+
+    def test_true_suffix_op_lte_returns_negated_guard(self):
+        result = self.m._format_condition("admitted_true", "<=", 0.5, set(), set())
+        assert result == Guard("admitted", None, True)
+
+    def test_false_suffix_op_gt_returns_negated_guard(self):
+        result = self.m._format_condition("admitted_false", ">", 0.5, set(), set())
+        assert result == Guard("admitted", None, True)
+
+    def test_false_suffix_op_lte_returns_positive_guard(self):
+        result = self.m._format_condition("admitted_false", "<=", 0.5, set(), set())
+        assert result == Guard("admitted", None, False)
+
+    def test_bool_col_op_gt_returns_positive_guard(self):
+        result = self.m._format_condition("fever", ">", 0.5, set(), {"fever"})
+        assert result == Guard("fever", None, False)
+
+    def test_bool_col_op_lte_returns_negated_guard(self):
+        result = self.m._format_condition("fever", "<=", 0.5, set(), {"fever"})
+        assert result == Guard("fever", None, True)
+
+    def test_categorical_op_gt_returns_value_guard(self):
+        result = self.m._format_condition("risk_high", ">", 0.5, {"risk"}, set())
+        assert result == Guard("risk", "high", False)
+
+    def test_categorical_op_lte_returns_none(self):
+        result = self.m._format_condition("risk_high", "<=", 0.5, {"risk"}, set())
+        assert result is None
+
+    def test_raw_numeric_returns_none(self):
+        result = self.m._format_condition("age", ">", 45.0, set(), set())
+        assert result is None
+
+    def test_raw_numeric_lte_returns_none(self):
+        result = self.m._format_condition("crp", "<=", 6.5, set(), set())
+        assert result is None
+
+
+# ===========================================================================
+# count_xor_samples
+# ===========================================================================
+
+class TestCountXorSamples:
+    def test_basic_count(self):
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        xor_splits = {p_xor: [t_B, t_C]}
+
+        execs = [
+            _execution("c1", [
+                _step(t_src, {p_in}),
+                _step(t_B, {p_xor}),
+            ]),
+            _execution("c2", [
+                _step(t_src, {p_in}),
+                _step(t_C, {p_xor}),
+            ]),
+        ]
+        pn_log = _pn_log(execs)
+        m = _miner()
+        counts = m.count_xor_samples(pn_log, xor_splits)
+
+        assert counts["p_xor"] == 2
+
+    def test_empty_log_returns_zero(self):
+        _, t_B, t_C, _, p_xor = _xor_net()
+        counts = _miner().count_xor_samples(_pn_log([]), {p_xor: [t_B, t_C]})
+        assert counts["p_xor"] == 0
+
+    def test_non_branch_transitions_not_counted(self):
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        xor_splits = {p_xor: [t_B, t_C]}
+        t_other = _transition("t_other", "Other")
+        execs = [_execution("c1", [_step(t_other, {p_xor})])]
+        counts = _miner().count_xor_samples(_pn_log(execs), xor_splits)
+        assert counts["p_xor"] == 0
+
+    def test_multiple_executions_accumulate(self):
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        xor_splits = {p_xor: [t_B, t_C]}
+        execs = [
+            _execution(f"c{i}", [_step(t_B, {p_xor})])
+            for i in range(7)
+        ]
+        counts = _miner().count_xor_samples(_pn_log(execs), xor_splits)
+        assert counts["p_xor"] == 7
+
+    def test_multiple_xor_places_counted_independently(self):
+        _, t_B, t_C, _, p_xor = _xor_net()
+        p2 = _place("p_xor2")
+        t_D = _transition("t_D", "D")
+        t_E = _transition("t_E", "E")
+        xor_splits = {p_xor: [t_B, t_C], p2: [t_D, t_E]}
+
+        execs = [
+            _execution("c1", [_step(t_B, {p_xor}), _step(t_D, {p2})]),
+            _execution("c2", [_step(t_C, {p_xor})]),
+        ]
+        counts = _miner().count_xor_samples(_pn_log(execs), xor_splits)
+        assert counts["p_xor"] == 2
+        assert counts["p_xor2"] == 1
+
+
+# ===========================================================================
+# mine_xor_splits — filtering behavior
+# ===========================================================================
+
+class TestMineXorSplitsFiltering:
+    def _config(self, min_samples: int = 5) -> AnalysisConfig:
+        return AnalysisConfig(dt_min_samples=min_samples, dt_min_accuracy=0.75)
+
+    def test_insufficient_samples_place_absent_from_result(self):
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        execs = [_execution("c1", [_step(t_B, {p_xor})])]
+        pn_log = _pn_log(execs)
+        result, _ = _miner(config=self._config(min_samples=10)).mine_xor_splits(
+            pn_log, {p_xor: [t_B, t_C]}
+        )
+        assert "p_xor" not in result
+
+    def test_single_class_place_skipped(self):
+        """All executions take the same branch → y.nunique() < 2 → skip."""
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        # 10 executions all going to t_B, no attributes → single class
+        execs = [
+            _execution(f"c{i}", [_step(t_B, {p_xor})])
+            for i in range(10)
+        ]
+        result, _ = _miner(config=self._config(min_samples=5)).mine_xor_splits(
+            _pn_log(execs), {p_xor: [t_B, t_C]}
+        )
+        assert "p_xor" not in result
+
+    def test_result_contains_xor_split_guards(self):
+        """Sufficient perfectly-separable data → XorSplitGuards returned."""
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+
+        execs = []
+        for i in range(15):
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "high"}),
+                _step(t_B, {p_xor}),
+            ]))
+        for i in range(15):
+            execs.append(_execution(f"d{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "low"}),
+                _step(t_C, {p_xor}),
+            ]))
+
+        result, _ = _miner(config=self._config(min_samples=5)).mine_xor_splits(
+            _pn_log(execs), {p_xor: [t_B, t_C]}
+        )
+        assert "p_xor" in result
+        assert isinstance(result["p_xor"], XorSplitGuards)
+
+    def test_total_samples_matches_count(self):
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+
+        execs = []
+        for i in range(10):
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "high"}),
+                _step(t_B, {p_xor}),
+            ]))
+        for i in range(10):
+            execs.append(_execution(f"d{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "low"}),
+                _step(t_C, {p_xor}),
+            ]))
+
+        result, _ = _miner(config=self._config(min_samples=5)).mine_xor_splits(
+            _pn_log(execs), {p_xor: [t_B, t_C]}
+        )
+        assert result["p_xor"].total_samples == 20
+
+    def test_low_accuracy_returns_empty_guards_dict(self):
+        """When DT accuracy < threshold, guards dict must be empty."""
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+        import random
+        rng = random.Random(0)
+
+        execs = []
+        for i in range(30):
+            # Labels are random — unpredictable regardless of attribute
+            branch = t_B if rng.random() < 0.5 else t_C
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"x": i % 3}),
+                _step(branch, {p_xor}),
+            ]))
+
+        cfg = AnalysisConfig(dt_min_samples=5, dt_min_accuracy=0.99)
+        result, _ = _miner(config=cfg).mine_xor_splits(
+            _pn_log(execs), {p_xor: [t_B, t_C]}
+        )
+        if "p_xor" in result:
+            assert result["p_xor"].guards == {}
+
+    def test_dt_accuracy_field_is_set(self):
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+        execs = []
+        for i in range(15):
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "high"}),
+                _step(t_B, {p_xor}),
+            ]))
+        for i in range(15):
+            execs.append(_execution(f"d{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "low"}),
+                _step(t_C, {p_xor}),
+            ]))
+        result, _ = _miner(config=self._config(min_samples=5)).mine_xor_splits(
+            _pn_log(execs), {p_xor: [t_B, t_C]}
+        )
+        assert 0.0 <= result["p_xor"].dt_accuracy <= 1.0
+
+
+# ===========================================================================
+# mine_xor_splits — SOP structure
+# ===========================================================================
+
+class TestMineXorSplitsSop:
+    def _perfectly_separable_log(self):
+        """20 B executions (risk=high) + 20 C executions (risk=low)."""
+        t_src, t_B, t_C, p_in, p_xor = _xor_net()
+        t_pre = _transition("t_pre", "Pre")
+        execs = []
+        for i in range(20):
+            execs.append(_execution(f"b{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "high"}),
+                _step(t_B, {p_xor}),
+            ]))
+        for i in range(20):
+            execs.append(_execution(f"c{i}", [
+                _step(t_pre, {p_in}, attributes={"risk": "low"}),
+                _step(t_C, {p_xor}),
+            ]))
+        return _pn_log(execs), p_xor, t_B, t_C
+
+    def _mine(self, pn_log, p_xor, t_B, t_C):
+        cfg = AnalysisConfig(dt_min_samples=5, dt_min_accuracy=0.7, dt_max_depth=3)
+        result, _ = _miner(config=cfg).mine_xor_splits(pn_log, {p_xor: [t_B, t_C]})
+        return result
+
+    def test_guards_is_dict_keyed_by_activity_name(self):
+        pn_log, p_xor, t_B, t_C = self._perfectly_separable_log()
+        result = self._mine(pn_log, p_xor, t_B, t_C)
+        guards = result["p_xor"].guards
+        assert isinstance(guards, dict)
+        for key in guards:
+            assert isinstance(key, str)
+
+    def test_outer_list_is_or_of_paths(self):
+        """Guards outer list is a list (OR of DT paths)."""
+        pn_log, p_xor, t_B, t_C = self._perfectly_separable_log()
+        result = self._mine(pn_log, p_xor, t_B, t_C)
+        for activity, outer in result["p_xor"].guards.items():
+            assert isinstance(outer, list)
+
+    def test_inner_list_is_and_of_guard_objects(self):
+        """Each path's condition list must contain Guard instances."""
+        pn_log, p_xor, t_B, t_C = self._perfectly_separable_log()
+        result = self._mine(pn_log, p_xor, t_B, t_C)
+        for activity, outer in result["p_xor"].guards.items():
+            for path_conditions in outer:
+                assert isinstance(path_conditions, list)
+                for cond in path_conditions:
+                    assert isinstance(cond, Guard)
+
+    def test_guard_objects_have_non_empty_attribute(self):
+        """Every Guard must carry a non-empty attribute name."""
+        pn_log, p_xor, t_B, t_C = self._perfectly_separable_log()
+        result = self._mine(pn_log, p_xor, t_B, t_C)
+        for activity, outer in result["p_xor"].guards.items():
+            for path_conditions in outer:
+                for cond in path_conditions:
+                    assert cond.attribute, f"Guard has empty attribute: {cond!r}"
+
+    def test_categorical_guards_carry_value(self):
+        """Guards produced from a categorical attribute must have value set."""
+        pn_log, p_xor, t_B, t_C = self._perfectly_separable_log()
+        result = self._mine(pn_log, p_xor, t_B, t_C)
+        for activity, outer in result["p_xor"].guards.items():
+            for path_conditions in outer:
+                for cond in path_conditions:
+                    # risk is categorical — value must be 'high' or 'low'
+                    assert cond.attribute == "risk"
+                    assert cond.value in ("high", "low")
+
+
+# ===========================================================================
+# _build_feature_matrix — causal ordering
+# ===========================================================================
+
+class TestBuildFeatureMatrix:
+    def setup_method(self):
+        self.t_src, self.t_B, self.t_C, self.p_in, self.p_xor = _xor_net()
+        self.t_pre = _transition("t_pre", "Pre")
+        self.m = _miner()
+
+    def test_state_emitted_before_split_steps_own_attrs(self):
+        """Attributes on the split step itself must NOT appear as features."""
+        execs = [
+            _execution("c1", [
+                _step(self.t_pre, {self.p_in}, attributes={"before": "yes"}),
+                _step(self.t_B, {self.p_xor}, attributes={"at_split": "x"}),
+            ]),
+        ]
+        X, y = self.m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert "before" in X.columns
+        assert "at_split" not in X.columns
+
+    def test_empty_log_returns_empty_dataframe(self):
+        X, y = self.m._build_feature_matrix(
+            _pn_log([]), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert X.empty
+        assert len(y) == 0
+
+    def test_no_xor_traversals_returns_empty(self):
+        t_other = _transition("t_other", "Other")
+        execs = [_execution("c1", [_step(t_other, {self.p_xor})])]
+        X, y = self.m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert X.empty
+
+    def test_none_attribute_values_omitted_from_state(self):
+        execs = [
+            _execution("c1", [
+                _step(self.t_pre, {self.p_in}, attributes={"crp": None, "age": 45}),
+                _step(self.t_B, {self.p_xor}),
+            ]),
+        ]
+        X, _ = self.m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert "crp" not in X.columns
+        assert "age" in X.columns
+
+    def test_ignored_attributes_excluded(self):
+        cfg = AnalysisConfig(ignored_attributes={"case:concept:name", "crp"})
+        m = _miner(config=cfg)
+        execs = [
+            _execution("c1", [
+                _step(self.t_pre, {self.p_in}, attributes={"crp": 5.0, "age": 30}),
+                _step(self.t_B, {self.p_xor}),
+            ]),
+        ]
+        X, _ = m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert "crp" not in X.columns
+        assert "age" in X.columns
+
+    def test_tau_steps_do_not_update_state(self):
+        """Tau steps must be skipped when updating the accumulated state."""
+        t_tau = _transition("t_tau", None)
+        silent = {t_tau: "tau_1"}
+        m = _miner(silent=silent)
+        execs = [
+            _execution("c1", [
+                _step(t_tau, {self.p_in}, is_tau=True, attributes={"should_skip": "yes"}),
+                _step(self.t_B, {self.p_xor}),
+            ]),
+        ]
+        X, _ = m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert "should_skip" not in X.columns
+
+    def test_row_count_matches_traversals(self):
+        execs = [
+            _execution(f"c{i}", [_step(self.t_B, {self.p_xor})])
+            for i in range(6)
+        ]
+        X, y = self.m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert len(X) == 6
+        assert len(y) == 6
+
+    def test_labels_match_branch_activity_names(self):
+        execs = [
+            _execution("c1", [_step(self.t_B, {self.p_xor})]),
+            _execution("c2", [_step(self.t_C, {self.p_xor})]),
+        ]
+        _, y = self.m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert set(y.tolist()) == {"b", "c"}
+
+    def test_numeric_with_discretizer_boundaries_stored_as_interval_label(self):
+        """
+        When the Discretizer has boundaries for a numeric attribute, values must
+        be converted to interval labels (strings) in the state, so they appear
+        as object-dtype column in X (ready for one-hot encoding).
+        """
+        from parsing.discretizer import Discretizer
+        disc = Discretizer()
+        disc.boundaries = {"crp": [6.0]}
+        m = _miner(discretizer=disc)
+
+        execs = [
+            _execution("c1", [
+                _step(self.t_pre, {self.p_in}, attributes={"crp": 4.5}),
+                _step(self.t_B, {self.p_xor}),
+            ]),
+        ]
+        X, _ = m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert "crp" in X.columns
+        assert X["crp"].iloc[0] == "lte_6_0"
+
+    def test_numeric_without_discretizer_boundaries_stored_as_raw_float(self):
+        """
+        When the Discretizer has NO boundaries for a numeric attribute (e.g. the
+        attribute was constant or failed silhouette), the raw float is kept in
+        state unchanged. _train_and_extract is responsible for dropping it.
+        """
+        from parsing.discretizer import Discretizer
+        disc = Discretizer()
+        disc.boundaries = {}  # no boundaries for any attribute
+        m = _miner(discretizer=disc)
+
+        execs = [
+            _execution("c1", [
+                _step(self.t_pre, {self.p_in}, attributes={"crp": 4.5}),
+                _step(self.t_B, {self.p_xor}),
+            ]),
+        ]
+        X, _ = m._build_feature_matrix(
+            _pn_log(execs), self.p_xor, [self.t_B, self.t_C]
+        )
+        assert "crp" in X.columns
         import pandas as pd
-        empty_df = pd.DataFrame(columns=["concept:name", "next_activity"])
-        assert find_decision_points(empty_df, min_instances=1) == []
+        assert pd.api.types.is_numeric_dtype(X["crp"])
 
 
 # ===========================================================================
-# Integration-only tests (skipped by default)
+# _train_and_extract — encoding and output structure
 # ===========================================================================
 
-@pytest.mark.integration
-def test_discover_all_decision_rules_runs_on_real_log():
-    """
-    Full end-to-end test for discover_all_decision_rules.
-    Requires a real XES log at the path specified — run with:
-        pytest -m integration --log-path /path/to/log.xes
-    """
-    pytest.skip("Integration test: provide a real XES log path to run this.")
+class TestTrainAndExtract:
+    def setup_method(self):
+        self.m = _miner(config=AnalysisConfig(dt_min_samples=1, dt_max_depth=3))
+
+    def _make_df(self, rows, labels):
+        import pandas as pd
+        return pd.DataFrame(rows), pd.Series(labels, dtype=str)
+
+    def test_returns_dict_and_float(self):
+        X, y = self._make_df(
+            [{"risk": "high"}, {"risk": "low"}],
+            ["b", "c"],
+        )
+        guards, accuracy = self.m._train_and_extract(X, y)
+        assert isinstance(guards, dict)
+        assert isinstance(accuracy, float)
+
+    def test_accuracy_between_0_and_1(self):
+        X, y = self._make_df(
+            [{"risk": "high"}, {"risk": "low"}] * 5,
+            ["b", "c"] * 5,
+        )
+        _, accuracy = self.m._train_and_extract(X, y)
+        assert 0.0 <= accuracy <= 1.0
+
+    def test_perfect_separation_gives_high_accuracy(self):
+        X, y = self._make_df(
+            [{"risk": "high"}] * 10 + [{"risk": "low"}] * 10,
+            ["b"] * 10 + ["c"] * 10,
+        )
+        _, accuracy = self.m._train_and_extract(X, y)
+        assert accuracy >= 0.9
+
+    def test_empty_df_returns_empty_guards_and_zero_accuracy(self):
+        import pandas as pd
+        guards, accuracy = self.m._train_and_extract(pd.DataFrame(), pd.Series(dtype=str))
+        assert guards == {}
+        assert accuracy == 0.0
+
+    def test_all_null_columns_dropped(self):
+        import pandas as pd
+        X = pd.DataFrame({"all_null": [None, None], "risk": ["high", "low"]})
+        y = pd.Series(["b", "c"], dtype=str)
+        guards, accuracy = self.m._train_and_extract(X, y)
+        assert isinstance(guards, dict)
+
+    def test_boolean_column_treated_as_bool_not_categorical(self):
+        """Bool columns must not produce one-hot dummies; they stay as 0/1."""
+        import pandas as pd
+        X = pd.DataFrame({"admitted": [True, False, True, False] * 5})
+        y = pd.Series(["b", "c", "b", "c"] * 5, dtype=str)
+        guards, accuracy = self.m._train_and_extract(X, y)
+        for activity, outer in guards.items():
+            for path in outer:
+                for cond in path:
+                    assert isinstance(cond, Guard)
+                    assert cond.attribute == "admitted"
+                    assert cond.value is None
+
+    def test_sop_guards_keyed_by_branch_activity(self):
+        X, y = self._make_df(
+            [{"risk": "high"}] * 10 + [{"risk": "low"}] * 10,
+            ["b"] * 10 + ["c"] * 10,
+        )
+        guards, _ = self.m._train_and_extract(X, y)
+        assert set(guards.keys()).issubset({"b", "c"})
+
+    def test_raw_numeric_column_is_dropped_before_training(self):
+        """
+        A raw numeric column (not bool/binary, no Discretizer) must be dropped
+        so it does not inflate accuracy with splits that produce no PDDL guards.
+        When the only column is a raw numeric, X_enc ends up empty → ({}, 0.0).
+        """
+        import pandas as pd
+        X = pd.DataFrame({"crp": [4.5, 6.2, 11.0, 3.1, 9.8, 2.0] * 3})
+        y = pd.Series(["b", "c"] * 9, dtype=str)
+        guards, accuracy = self.m._train_and_extract(X, y)
+        assert guards == {}
+        assert accuracy == 0.0
+
+    def test_discretized_numeric_column_treated_as_categorical(self):
+        """
+        When a numeric column has already been converted to interval labels by the
+        Discretizer (e.g. 'lte_6_0', 'gte_6_0'), _train_and_extract must treat it
+        as categorical and produce PDDL guards like '(crp lte_6_0)'.
+        """
+        import pandas as pd
+        X = pd.DataFrame({"crp": ["lte_6_0"] * 10 + ["gte_6_0"] * 10})
+        y = pd.Series(["b"] * 10 + ["c"] * 10, dtype=str)
+        guards, accuracy = self.m._train_and_extract(X, y)
+        assert accuracy >= 0.9
+        all_conditions = [
+            cond
+            for outer in guards.values()
+            for path in outer
+            for cond in path
+        ]
+        assert any(c.attribute == "crp" for c in all_conditions), (
+            "Expected a Guard with attribute 'crp', got: " + str(all_conditions)
+        )

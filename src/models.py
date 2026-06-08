@@ -68,6 +68,26 @@ class XorSplitStats:
 
 
 @dataclass
+class Guard:
+    """An atomic condition extracted from a decision tree split.
+
+    Produced by DecisionMiner._format_condition() and collected into SOP form
+    by _build_sop_guards(). Intentionally format-agnostic: conversion to PDDL
+    or any other target language is the responsibility of downstream encoders.
+
+    Attributes:
+        attribute: Sanitized attribute name, e.g. "risk", "admitted".
+        value: Category value for one-hot conditions, e.g. "high".
+            None for boolean conditions where only presence/absence matters.
+        negated: True when the condition is asserted as false,
+            e.g. admitted=False or risk != high.
+    """
+    attribute: str
+    value: Optional[str]
+    negated: bool = False
+
+
+@dataclass
 class XorSplitGuards:
     """Decision tree guards for one XOR-split in SOP (sum-of-products) form.
 
@@ -76,10 +96,12 @@ class XorSplitGuards:
 
     guards maps each branch activity to a list of AND-clause lists:
         outer list = OR  (multiple DT paths reaching this branch)
-        inner list = AND (conditions along one DT path)
-    Example: {"approve": [["(amount lte_500)", "(priority gte_3)"], ["(risk elow)"]]}
+        inner list = AND (Guard conditions along one DT path)
+    Example:
+        {"approve": [[Guard("amount", "lte_500"), Guard("priority", "gte_3")],
+                     [Guard("risk", "low")]]}
     """
-    guards: Dict[str, List[List[str]]]
+    guards: Dict[str, List[List["Guard"]]]
     total_samples: int
     dt_accuracy: float
 
