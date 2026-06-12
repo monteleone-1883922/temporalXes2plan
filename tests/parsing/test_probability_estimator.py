@@ -1,20 +1,24 @@
 """
 Tests for parsing.probability_estimator.ProbabilityEstimator.
 
-All tests use synthetic Petri net components and manually constructed
-FiringStep / TraceExecution / PetriNetLog objects — no real event log,
-pm4py discovery algorithm, or token-based replay is involved.
+All tests use synthetic PreprocessedLog / TransitionFiringData objects —
+no real event log, pm4py discovery, or token-based replay is involved.
 """
 import pytest
 from collections import defaultdict
-from typing import Set, TypedDict
+from typing import Dict, List, Set, TypedDict
 
 from pm4py import PetriNet, Marking
 
 from tests.helpers import _transition, _place, _arc
 from parsing.probability_estimator import ProbabilityEstimator
-from models import AnalysisConfig, AttributeEffect, FiringStep, TraceExecution, PetriNetLog, XorSplitStats
-from parsing.discretizer import Discretizer
+from models import (
+    AnalysisConfig,
+    AttributeEffect,
+    PreprocessedLog,
+    TransitionFiringData,
+    XorSplitStats,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,46 +67,44 @@ def _make_estimator(silent_transitions=None) -> ProbabilityEstimator:
     return ProbabilityEstimator(silent_transitions=silent_transitions or {})
 
 
-def _make_step(transition: PetriNet.Transition, from_places) -> FiringStep:
-    return FiringStep(
-        transition=transition,
-        activity_name=transition.label.lower() if transition.label else "tau",
-        is_tau=transition.label is None,
-        from_places=set(from_places),
-        attributes={},
+def _fd(activity_name: str, from_places=None, pre_state=None, changed_attrs=None) -> TransitionFiringData:
+    """Build a TransitionFiringData with sensible defaults."""
+    return TransitionFiringData(
+        activity_name=activity_name,
+        pre_state=pre_state or {},
+        changed_attrs=changed_attrs or {},
+        from_places=frozenset(from_places or []),
     )
 
 
-def _make_log(executions) -> PetriNetLog:
-    return PetriNetLog(
-        executions=executions,
-        net=PetriNet("test"),
-        initial_marking=Marking(),
-        final_marking=Marking(),
+def _preprocessed(
+    transition_firings: Dict[str, List[TransitionFiringData]] = None,
+    xor_firings: Dict[str, List[TransitionFiringData]] = None,
+) -> PreprocessedLog:
+    return PreprocessedLog(
+        transition_firings=transition_firings or {},
+        xor_firings=xor_firings or {},
     )
 
 
 # ===========================================================================
-# compute_from_petri_net_log
+# compute_xor_probabilities
 # ===========================================================================
 
-class TestComputeFromPetriNetLog:
-    def test_branch_counts_reflect_from_places(self):
-        """B chosen 2×, C chosen 1× — probabilities must reflect 2:1 ratio."""
+class TestComputeXorProbabilities:
+    def test_branch_counts_reflect_xor_firings(self):
+        """B chosen 2x, C chosen 1x — probabilities must reflect 2:1 ratio."""
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        executions = [
-            TraceExecution("c1", [_make_step(net["t_src"], {net["p_in"]}),
-                                   _make_step(net["t_b"],  {net["p_xor"]})]),
-            TraceExecution("c2", [_make_step(net["t_src"], {net["p_in"]}),
-                                   _make_step(net["t_b"],  {net["p_xor"]})]),
-            TraceExecution("c3", [_make_step(net["t_src"], {net["p_in"]}),
-                                   _make_step(net["t_c"],  {net["p_xor"]})]),
-        ]
-        result = _make_estimator().compute_from_petri_net_log(
-            _make_log(executions), decision_points
-        )
+        fd_b1 = _fd("b", from_places={net["p_xor"]})
+        fd_b2 = _fd("b", from_places={net["p_xor"]})
+        fd_c1 = _fd("c", from_places={net["p_xor"]})
+
+        plog = _preprocessed(xor_firings={
+            net["p_xor"].name: [fd_b1, fd_b2, fd_c1],
+        })
+        result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         stats = result[net["p_xor"].name]
         assert abs(stats.probabilities["b"] - round(2 / 3, 2)) < 0.01
@@ -112,38 +114,29 @@ class TestComputeFromPetriNetLog:
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        executions = [
-            TraceExecution("c1", [_make_step(net["t_b"], {net["p_xor"]})]),
-            TraceExecution("c2", [_make_step(net["t_b"], {net["p_xor"]})]),
-            TraceExecution("c3", [_make_step(net["t_c"], {net["p_xor"]})]),
-        ]
-        result = _make_estimator().compute_from_petri_net_log(
-            _make_log(executions), decision_points
-        )
+        plog = _preprocessed(xor_firings={
+            net["p_xor"].name: [_fd("b"), _fd("b"), _fd("c")],
+        })
+        result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         assert result[net["p_xor"].name].total_executions == 3
 
-    def test_step_not_counted_when_xor_place_absent_from_from_places(self):
-        """t_b fires but p_xor is not in from_places — no count for p_xor."""
+    def test_place_not_in_xor_firings_yields_zero_total(self):
+        """XOR place exists in decision_points but has no firings in preprocessed log."""
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        executions = [
-            TraceExecution("c1", [_make_step(net["t_b"], {net["p_in"]})]),
-        ]
-        result = _make_estimator().compute_from_petri_net_log(
-            _make_log(executions), decision_points
-        )
+        plog = _preprocessed(xor_firings={})
+        result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         assert result[net["p_xor"].name].total_executions == 0
 
-    def test_empty_log_yields_equal_probability_fallback(self):
+    def test_empty_xor_firings_yields_equal_probability_fallback(self):
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        result = _make_estimator().compute_from_petri_net_log(
-            _make_log([]), decision_points
-        )
+        plog = _preprocessed(xor_firings={})
+        result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         stats = result[net["p_xor"].name]
         assert stats.probabilities["b"] == 0.5
@@ -153,13 +146,27 @@ class TestComputeFromPetriNetLog:
     def test_returns_xor_split_stats_instance(self):
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
-        executions = [TraceExecution("c1", [_make_step(net["t_b"], {net["p_xor"]})])]
 
-        result = _make_estimator().compute_from_petri_net_log(
-            _make_log(executions), decision_points
-        )
+        plog = _preprocessed(xor_firings={
+            net["p_xor"].name: [_fd("b")],
+        })
+        result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         assert isinstance(result[net["p_xor"].name], XorSplitStats)
+
+    def test_branch_with_zero_firings_gets_zero_probability(self):
+        """Only B fires — C must still appear in result with probability 0."""
+        net = _xor_net()
+        decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
+
+        plog = _preprocessed(xor_firings={
+            net["p_xor"].name: [_fd("b"), _fd("b")],
+        })
+        result = _make_estimator().compute_xor_probabilities(plog, decision_points)
+
+        stats = result[net["p_xor"].name]
+        assert stats.probabilities["b"] == 1.0
+        assert stats.probabilities["c"] == 0.0
 
 
 # ===========================================================================
@@ -167,17 +174,11 @@ class TestComputeFromPetriNetLog:
 # ===========================================================================
 
 class TestNormalizeBranchCounts:
-    def _counts(self, place, t_b, t_c, n_b, n_c):
-        d = defaultdict(int)
-        d[t_b] = n_b
-        d[t_c] = n_c
-        return {place: d}
-
     def test_probabilities_reflect_branch_counts(self):
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 3, 1)
+        branch_counts = {net["p_xor"].name: {"b": 3, "c": 1}}
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         stats = result[net["p_xor"].name]
@@ -189,7 +190,7 @@ class TestNormalizeBranchCounts:
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 3, 1)
+        branch_counts = {net["p_xor"].name: {"b": 3, "c": 1}}
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         assert result[net["p_xor"].name].total_executions == 4
@@ -198,7 +199,7 @@ class TestNormalizeBranchCounts:
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 7, 3)
+        branch_counts = {net["p_xor"].name: {"b": 7, "c": 3}}
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         total = sum(result[net["p_xor"].name].probabilities.values())
@@ -208,7 +209,7 @@ class TestNormalizeBranchCounts:
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        branch_counts = self._counts(net["p_xor"], net["t_b"], net["t_c"], 0, 0)
+        branch_counts = {net["p_xor"].name: {}}
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         stats = result[net["p_xor"].name]
@@ -241,167 +242,118 @@ class TestGetActivityNameForTransition:
 # compute_attribute_effect_probabilities
 # ===========================================================================
 
-def _labeled_step(activity_name: str, attrs: dict) -> FiringStep:
-    """Labeled FiringStep with the given activity name and attributes."""
-    t = _transition(f"t_{activity_name}", activity_name)
-    return FiringStep(
-        transition=t,
-        activity_name=activity_name,
-        is_tau=False,
-        from_places=set(),
-        attributes=attrs,
-    )
-
-
-def _tau_step() -> FiringStep:
-    """Silent FiringStep with empty attributes."""
-    t = _transition("t_tau", None)
-    return FiringStep(
-        transition=t,
-        activity_name="tau_1",
-        is_tau=True,
-        from_places=set(),
-        attributes={},
-    )
-
-
 class TestComputeAttributeEffectProbabilities:
-    def test_attribute_appearing_for_first_time_is_counted_as_effect(self):
-        """First execution of A with crp=2.1 — crp was never in state, counts as effect."""
-        executions = [TraceExecution("c1", [_labeled_step("a", {"crp": 2.1})])]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+    def test_changed_attr_counted_as_effect(self):
+        """changed_attrs contains crp — must appear in presence_probabilities."""
+        plog = _preprocessed(transition_firings={
+            "a": [_fd("a", changed_attrs={"crp": 2.1})],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
         assert result["a"].presence_probabilities["crp"] == 1.0
 
-    def test_attribute_changing_value_is_counted_as_effect(self):
-        """A fires with crp=2.1, then B fires with crp=8.3 — B changes crp."""
-        executions = [TraceExecution("c1", [
-            _labeled_step("a", {"crp": 2.1}),
-            _labeled_step("b", {"crp": 8.3}),
-        ])]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
-
-        assert result["b"].presence_probabilities["crp"] == 1.0
-
-    def test_unchanged_attribute_not_counted_as_effect(self):
-        """A fires with crp=2.1, B fires with crp=2.1 — same value, no effect."""
-        executions = [TraceExecution("c1", [
-            _labeled_step("a", {"crp": 2.1}),
-            _labeled_step("b", {"crp": 2.1}),
-        ])]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
-
-        assert "crp" not in result["b"].presence_probabilities
-
-    def test_attribute_absent_from_step_is_not_considered(self):
-        """A fires with crp=2.1, B fires with empty attributes — crp not mentioned in B."""
-        executions = [TraceExecution("c1", [
-            _labeled_step("a", {"crp": 2.1}),
-            _labeled_step("b", {}),
-        ])]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+    def test_unchanged_attr_not_counted(self):
+        """Attr present in pre_state but NOT in changed_attrs → no effect."""
+        plog = _preprocessed(transition_firings={
+            "b": [_fd("b", pre_state={"crp": 2.1}, changed_attrs={})],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
         assert "crp" not in result["b"].presence_probabilities
 
     def test_value_probability_reflects_value_distribution(self):
         """B fires 3 times: crp→5.0 twice, crp→3.0 once."""
-        executions = [
-            TraceExecution("c1", [_labeled_step("b", {"crp": 5.0})]),
-            TraceExecution("c2", [_labeled_step("b", {"crp": 5.0})]),
-            TraceExecution("c3", [_labeled_step("b", {"crp": 3.0})]),
-        ]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+        plog = _preprocessed(transition_firings={
+            "b": [
+                _fd("b", changed_attrs={"crp": 5.0}),
+                _fd("b", changed_attrs={"crp": 5.0}),
+                _fd("b", changed_attrs={"crp": 3.0}),
+            ],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
         vp = result["b"].value_probabilities["crp"]
         assert abs(vp[5.0] - round(2 / 3, 2)) < 0.01
         assert abs(vp[3.0] - round(1 / 3, 2)) < 0.01
 
-    def test_total_firings_counts_all_labeled_step_occurrences(self):
-        """A fires in 3 independent executions → total_firings = 3."""
-        executions = [
-            TraceExecution("c1", [_labeled_step("a", {})]),
-            TraceExecution("c2", [_labeled_step("a", {})]),
-            TraceExecution("c3", [_labeled_step("a", {})]),
-        ]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+    def test_total_firings_counts_all_firing_data_objects(self):
+        """A appears 3 times in transition_firings → total_firings = 3."""
+        plog = _preprocessed(transition_firings={
+            "a": [_fd("a"), _fd("a"), _fd("a")],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
         assert result["a"].total_firings == 3
 
-    def test_tau_steps_are_excluded_from_result(self):
-        """Tau transitions must not appear as keys in the result."""
-        executions = [TraceExecution("c1", [_tau_step()])]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
-
-        assert "tau_1" not in result
-        assert result == {}
-
-    def test_state_resets_between_executions(self):
-        """Each execution starts with empty state — first occurrence counts as effect."""
-        executions = [
-            TraceExecution("c1", [_labeled_step("a", {"crp": 2.1})]),
-            TraceExecution("c2", [_labeled_step("a", {"crp": 2.1})]),
-        ]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
-
-        assert result["a"].presence_probabilities["crp"] == 1.0
-        assert result["a"].total_firings == 2
-
     def test_empty_log_returns_empty_dict(self):
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log([]))
+        plog = _preprocessed()
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
         assert result == {}
 
     def test_returns_attribute_effect_instance(self):
-        executions = [TraceExecution("c1", [_labeled_step("a", {"x": 1})])]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+        plog = _preprocessed(transition_firings={
+            "a": [_fd("a", changed_attrs={"x": 1})],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
         assert isinstance(result["a"], AttributeEffect)
 
-    def test_attribute_names_are_sanitized(self):
-        """Attribute key 'CRP Measurement' must appear as 'crp_measurement' in the result."""
-        executions = [TraceExecution("c1", [_labeled_step("a", {"CRP Measurement": 2.1})])]
-        result = _make_estimator().compute_attribute_effect_probabilities(_make_log(executions))
+    def test_presence_probability_partial(self):
+        """crp changes in 1 of 2 firings → presence = 0.5."""
+        plog = _preprocessed(transition_firings={
+            "a": [
+                _fd("a", changed_attrs={"crp": 2.1}),
+                _fd("a", changed_attrs={}),
+            ],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
-        assert "crp_measurement" in result["a"].presence_probabilities
-        assert "CRP Measurement" not in result["a"].presence_probabilities
+        assert result["a"].presence_probabilities["crp"] == 0.5
 
-    def test_numerical_values_discretized_when_discretizer_provided(self):
-        """30.0 and 80.0 with boundary at 50.0 produce different intervals → detected as change."""
-        disc = Discretizer()
-        disc.boundaries = {"crp": [50.0]}
-        executions = [TraceExecution("c1", [
-            _labeled_step("a", {"crp": 30.0}),
-            _labeled_step("b", {"crp": 80.0}),
-        ])]
-        result = _make_estimator().compute_attribute_effect_probabilities(
-            _make_log(executions), discretizer=disc
-        )
+    def test_multiple_attrs_in_same_firing(self):
+        """Two attributes change in the same firing — both counted."""
+        plog = _preprocessed(transition_firings={
+            "a": [_fd("a", changed_attrs={"crp": 2.1, "age": 65})],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
-        assert result["b"].presence_probabilities["crp"] == 1.0
-        assert "gte_50_0" in result["b"].value_probabilities["crp"]
+        assert result["a"].presence_probabilities["crp"] == 1.0
+        assert result["a"].presence_probabilities["age"] == 1.0
 
-    def test_values_in_same_interval_treated_as_unchanged(self):
-        """30.0 and 40.0 both map to 'lte_50_0' — no change detected in B."""
-        disc = Discretizer()
-        disc.boundaries = {"crp": [50.0]}
-        executions = [TraceExecution("c1", [
-            _labeled_step("a", {"crp": 30.0}),
-            _labeled_step("b", {"crp": 40.0}),
-        ])]
-        result = _make_estimator().compute_attribute_effect_probabilities(
-            _make_log(executions), discretizer=disc
-        )
+    def test_discretized_values_used_as_is(self):
+        """PreprocessedLog already contains discretized values — estimator stores them directly."""
+        plog = _preprocessed(transition_firings={
+            "a": [
+                _fd("a", changed_attrs={"crp": "lte_50_0"}),
+                _fd("a", changed_attrs={"crp": "gte_50_0"}),
+            ],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
-        assert "crp" not in result["b"].presence_probabilities
+        vp = result["a"].value_probabilities["crp"]
+        assert "lte_50_0" in vp
+        assert "gte_50_0" in vp
 
-    def test_ignored_attributes_from_config_are_skipped(self):
-        """Attributes in config.ignored_attributes must not appear in the result."""
-        config = AnalysisConfig(ignored_attributes={"concept:name"})
-        executions = [TraceExecution("c1", [
-            _labeled_step("a", {"concept:name": "triage", "crp": 2.1}),
-        ])]
-        result = ProbabilityEstimator(
-            silent_transitions={}, config=config
-        ).compute_attribute_effect_probabilities(_make_log(executions))
+    def test_multiple_transitions(self):
+        """Two different transitions each get their own AttributeEffect."""
+        plog = _preprocessed(transition_firings={
+            "a": [_fd("a", changed_attrs={"x": 1})],
+            "b": [_fd("b", changed_attrs={"y": 2}), _fd("b", changed_attrs={})],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
-        assert "concept_name" not in result["a"].presence_probabilities
-        assert "crp" in result["a"].presence_probabilities
+        assert "a" in result and "b" in result
+        assert result["a"].total_firings == 1
+        assert result["b"].total_firings == 2
+        assert result["a"].presence_probabilities["x"] == 1.0
+        assert result["b"].presence_probabilities["y"] == 0.5
+
+    def test_no_changed_attrs_still_counted_in_total(self):
+        """Firings with no changed attrs still contribute to total_firings."""
+        plog = _preprocessed(transition_firings={
+            "a": [_fd("a", changed_attrs={}), _fd("a", changed_attrs={})],
+        })
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
+
+        assert result["a"].total_firings == 2
+        assert result["a"].presence_probabilities == {}
