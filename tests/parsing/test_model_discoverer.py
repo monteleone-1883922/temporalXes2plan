@@ -7,8 +7,9 @@ synthetic log built with the make_log/make_trace/make_event helpers.
 """
 import pytest
 from pm4py import PetriNet
+from pm4py.objects.petri_net.obj import Marking
 
-from tests.helpers import _transition, make_event, make_trace, make_log
+from tests.helpers import _transition, _place, _arc, make_event, make_trace, make_log
 from parsing.model_discoverer import ModelDiscoverer
 from models import PetriNetModel
 
@@ -188,3 +189,115 @@ class TestDiscover:
         """and_joins was removed from PetriNetModel; accessing it must raise AttributeError."""
         result = ModelDiscoverer().discover(simple_log)
         assert not hasattr(result, "and_joins")
+
+
+# ===========================================================================
+# prune_transitions
+# ===========================================================================
+
+def _xor_model() -> PetriNetModel:
+    """Build a PetriNetModel for a XOR split with two branches.
+
+        p_in -> t_src -> p_xor -> t_b -> p_out_b
+                              -> t_c -> p_out_c
+
+    Returns a model whose indexes are consistent with the net structure.
+    """
+    net = PetriNet("xor")
+    p_in, p_xor, p_out_b, p_out_c = (
+        _place("p_in"), _place("p_xor"), _place("p_out_b"), _place("p_out_c")
+    )
+    t_src, t_b, t_c = (
+        _transition("t_src", "src"),
+        _transition("t_b", "b"),
+        _transition("t_c", "c"),
+    )
+    for p in (p_in, p_xor, p_out_b, p_out_c):
+        net.places.add(p)
+    for t in (t_src, t_b, t_c):
+        net.transitions.add(t)
+    for a in (
+        _arc(p_in, t_src), _arc(t_src, p_xor),
+        _arc(p_xor, t_b), _arc(t_b, p_out_b),
+        _arc(p_xor, t_c), _arc(t_c, p_out_c),
+    ):
+        net.arcs.add(a)
+
+    return PetriNetModel(
+        petrinet=net,
+        initial_marking=Marking({p_in: 1}),
+        final_marking=Marking({p_out_b: 1}),
+        activities={"src", "b", "c"},
+        silent_transitions={},
+        trans_inputs={t_src: {p_in}, t_b: {p_xor}, t_c: {p_xor}},
+        trans_outputs={t_src: {p_xor}, t_b: {p_out_b}, t_c: {p_out_c}},
+        xor_splits={p_xor: [t_b, t_c]},
+        place_inputs={p_xor: [t_src], p_out_b: [t_b], p_out_c: [t_c]},
+    )
+
+
+def _t_named(model: PetriNetModel, label: str) -> PetriNet.Transition:
+    """Return the transition with the given label from the model's net."""
+    return next(t for t in model.petrinet.transitions if t.label == label)
+
+
+class TestPruneTransitions:
+    def test_empty_to_remove_returns_self(self):
+        model = _xor_model()
+        assert model.prune_transitions(set()) is model
+
+    def test_pruned_transition_removed_from_net(self):
+        model = _xor_model()
+        t_c = _t_named(model, "c")
+        pruned = model.prune_transitions({t_c})
+        assert t_c not in pruned.petrinet.transitions
+
+    def test_arcs_of_pruned_transition_removed(self):
+        model = _xor_model()
+        t_c = _t_named(model, "c")
+        pruned = model.prune_transitions({t_c})
+        for a in pruned.petrinet.arcs:
+            assert a.source is not t_c and a.target is not t_c
+
+    def test_orphaned_place_removed(self):
+        model = _xor_model()
+        t_c = _t_named(model, "c")
+        pruned = model.prune_transitions({t_c})
+        names = {p.name for p in pruned.petrinet.places}
+        assert "p_out_c" not in names
+
+    def test_marking_place_not_pruned_even_if_orphaned(self):
+        model = _xor_model()
+        # Removing t_b orphans p_out_b, but it is in the final marking.
+        t_b = _t_named(model, "b")
+        pruned = model.prune_transitions({t_b})
+        names = {p.name for p in pruned.petrinet.places}
+        assert "p_out_b" in names
+
+    def test_xor_split_collapses_to_single_branch(self):
+        model = _xor_model()
+        t_c = _t_named(model, "c")
+        pruned = model.prune_transitions({t_c})
+        # Only one branch remains, so p_xor is no longer a XOR split.
+        assert not pruned.xor_splits
+
+    def test_activities_updated(self):
+        model = _xor_model()
+        t_c = _t_named(model, "c")
+        pruned = model.prune_transitions({t_c})
+        assert pruned.activities == {"src", "b"}
+
+    def test_trans_inputs_and_outputs_drop_pruned(self):
+        model = _xor_model()
+        t_c = _t_named(model, "c")
+        pruned = model.prune_transitions({t_c})
+        assert t_c not in pruned.trans_inputs
+        assert t_c not in pruned.trans_outputs
+
+    def test_place_inputs_drop_pruned_transition(self):
+        model = _xor_model()
+        t_c = _t_named(model, "c")
+        pruned = model.prune_transitions({t_c})
+        # p_out_c is orphaned and gone; remaining place_inputs lists exclude t_c.
+        for transitions in pruned.place_inputs.values():
+            assert t_c not in transitions
