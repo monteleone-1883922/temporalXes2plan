@@ -1,21 +1,48 @@
+"""XES parsing pipeline — facade coordinating all analysis modules.
+
+Orchestrates the full pipeline from raw XES log to encoder-ready ParseResult:
+  1. Log loading and filtering        (LogProcessor)
+  2. Petri net discovery              (ModelDiscoverer)
+  3. Numeric attribute discretization (Discretizer)
+  4. Token replay                     (PetriNetLogBuilder)
+  5. Single-pass log preprocessing    (LogPreprocessor)
+  6. Probability estimation           (ProbabilityEstimator)
+  7. XOR split screening              (DecisionMiner.screen_xor_splits)
+  8. Effect screening                 (DecisionMiner.screen_effects)
+  9. XOR split DT mining              (DecisionMiner.mine_xor_splits)
+  10. Effect DT mining                (DecisionMiner.mine_effects)
+
+Steps 4–10 store intermediate results as instance attributes so that
+downstream steps (pruning, filtering, ParseResult assembly) can access them.
+"""
+
+import json
 import os
-import logging
 import random
-from typing import List, Dict, Optional, Any, Tuple, Set, Union
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pm4py
-from pm4py import PetriNet, Marking
-from pm4py.objects.log.obj import EventLog
-from pm4py.objects.powl.obj import Transition
 
-from .decision_mining import discover_all_decision_rules, get_attribute_domains
+import core_utils as utils
+from models import (
+    AnalysisConfig,
+    AttributeEffect,
+    PetriNetModel,
+    PreprocessedLog,
+    TransitionEffects,
+    TransitionScreening,
+    XorSplitGuards,
+    XorSplitScreening,
+    XorSplitStats,
+)
+from .discretizer import Discretizer
+from .log_preprocessor import LogPreprocessor
 from .log_processor import LogProcessor
 from .model_discoverer import ModelDiscoverer
-from .structure_analyzer import StructureAnalyzer
+from .petri_net_log_builder import PetriNetLogBuilder
 from .probability_estimator import ProbabilityEstimator
-from .correlation_miner import CorrelationMiner, RelationshipMetrics
-import core_utils as utils
+from .decision_mining import DecisionMiner
 
 SEED = 42
 random.seed(SEED)
@@ -24,167 +51,178 @@ np.random.seed(SEED)
 
 logger = utils.get_logger(__name__)
 
+
 class Parser:
-    """
-    XES Parser for discovering Petri nets and extracting process properties.
-    Acts as a Facade/Controller coordinating specialized modules.
-    """
+    """Facade orchestrating the XES → encoder-ready analysis pipeline.
 
-    log_path: str  # Path to the XES event log file. E.g. "../sepsisLog/Sepsis Cases - Event Log.xes"
-    coverage_percentage: float  # Minimum cumulative coverage for variant filtering. E.g. 0.001
-    discovery_algorithm: str  # Name of the Petri net discovery algorithm to use. E.g. "inductive"
-    intervals: Dict[str, List[float]]  # Discretization split points for numerical attributes. E.g. {"crp": [10.5, 45.2]}
-    use_activity_classifier: bool  # Whether to combine concept:name and lifecycle:transition as activity names
-    log: Any  # The loaded and filtered event log used for discovery (training set)
-    full_log: Any  # The full event log after applying classifiers but before variant filtering
-    full_lifecycle_log: Any  # Copy of the log before filtering for 'complete' events
-    train_df: Any  # Training set split (80% of log)
-    test_df: Any  # Testing set split (20% of log)
-    petrinet: PetriNet  # The discovered Petri net model
-    initial_marking: Marking  # The initial token marking of the Petri net
-    final_marking: Marking  # The final token marking of the Petri net
-    transitions: Set[Transition]  # Set of transitions present in the Petri net
-    places: Set[PetriNet.Place]  # Set of places present in the Petri net
-    edges: Set[PetriNet.Arc]  # Set of arcs (edges) connecting places and transitions
-    activities: Set[str]  # Set of all unique sanitized activity names in the process
-    silent_transitions: Dict[Transition, str]  # Mapping from Petri net Transitions to their assigned tau names
-    start_activities: Dict[str, int]  # Frequency map of activities that start a process trace. E.g. {"ER_Registration": 1000}
-    end_activities: Dict[str, int]  # Frequency map of activities that end a process trace. E.g. {"Release_A": 850}
-    attributes: Set[str]  # Set of all non-ignored event attributes in the log. E.g. {"crp", "age"}
-    attribute_categories: Dict[str, str]  # Mapping from attribute names to types. E.g. {"crp": "numerical", "age": "categorical"}
-    
-    # Map of activities to their direct preceding activities in the Petri net.
-    # E.g. {"LacticAcid_Measurement": ["ER_Triage"], "Admission_ICU": ["ER_Triage", "tau_1"]}
-    predecessors: Dict[str, List[str]]
-    
-    # Execution probabilities for branches at XOR-splits.
-    # E.g. {"place_XOR_1": {"ER_Triage": 0.40, "ER_Sepsis_Triage": 0.60}}
-    decision_points_probabilities: Dict[str, Dict[str, float]]
-    
-    # Mapping of AND-splits to the set of parallel activities they enable.
-    # E.g. {"LacticAcid_Measurement": ["CRP_Measurement", "Leucocytes_Measurement"]}
-    parallels: Dict[str, List[str]]
-    
-    # Graph representation of direct succession between activities (removed places from petrinet).
-    # E.g. {"ER_Registration": ["ER_Triage", "tau_1"], "ER_Triage": ["CRP_Measurement"]}
-    direct_transition_graph: Dict[str, List[str]]
-    
-    # Set of possible values or discretized intervals for each attribute.
-    # E.g. {"diagnosticlacticacid": {"0.0-1.5", "1.5-3.0", "3.0-5.0"}, "diagnose": {"A", "B", "C"}}
-    attribute_domains: Dict[str, Set[Union[str, bool]]]
-    
-    # Extracted data samples used for decision mining (maps events to executed activities and their preconditions).
-    # E.g. [{"activity": "exec_ER_Triage", "preconditions": {"(completed exec_ER_Registration)"}, "case:Age": "young"}]
-    decision_samples: List[Dict[str, Any]]
-
-    DISCOVERY_ALGORITHMS = {
-        'alpha': pm4py.discovery.discover_petri_net_alpha,
-        'inductive': pm4py.discovery.discover_petri_net_inductive,
-        'heuristics': pm4py.discovery.discover_petri_net_heuristics,
-        'ilp': pm4py.discovery.discover_petri_net_ilp
-    }
+    After construction all intermediate results are available as instance
+    attributes.  Steps 5–10 (filter, assemble ParseResult) are implemented
+    separately so that the pipeline can be paused for inspection between
+    stages.
+    """
 
     def __init__(
-        self, 
-        log_path: str, 
-        coverage_percentage: float, 
-        discovery_algorithm: str = 'inductive', 
-        intervals: Optional[Dict[str, List[float]]] = None,
-        use_activity_classifier: bool = False
+        self,
+        log_path: str,
+        coverage_percentage: float,
+        discovery_algorithm: str = 'inductive',
+        use_activity_classifier: bool = False,
+        config: Optional[AnalysisConfig] = None,
     ) -> None:
-        """
-        Initialize the Parser and orchestrate the full parsing pipeline by delegating to specialized classes.
-        """
-        if discovery_algorithm not in self.DISCOVERY_ALGORITHMS:
-            raise ValueError(f"Unsupported discovery algorithm: {discovery_algorithm}. "
-                             f"Supported algorithms: {list(self.DISCOVERY_ALGORITHMS.keys())}")
-        
-        self.intervals = intervals or {}
-        self.discovery_algorithm = discovery_algorithm
-        self.use_activity_classifier = use_activity_classifier
-        self.log_path = log_path
+        """Run the full analysis pipeline up to and including DT mining.
 
-        # 1. Log Processor: loading, filtering, and splitting
-        processor = LogProcessor(self.log_path, self.use_activity_classifier)
-        self.log, self.full_log, self.full_lifecycle_log = processor.load_and_filter_log(coverage_percentage)
-        
-        self.train_df, self.test_df = processor.split_train_test(self.log)
-        self.log = self.train_df
+        Args:
+            log_path: Path to the XES event log file.
+            coverage_percentage: Minimum cumulative variant coverage for
+                log filtering (e.g. 0.8 keeps traces covering 80% of cases).
+            discovery_algorithm: Petri net discovery algorithm name.
+                One of 'alpha', 'inductive', 'heuristics', 'ilp'.
+            use_activity_classifier: Combine concept:name + lifecycle:transition
+                as activity label when True.
+            config: Analysis configuration; defaults to AnalysisConfig() if None.
+        """
+        self.config = config or AnalysisConfig()
 
-        # 2. Model Discoverer: Petri net discovery & basic properties
-        discoverer = ModelDiscoverer(self.discovery_algorithm)
-        self.petrinet, self.initial_marking, self.final_marking, self.transitions, self.places, self.edges = \
-            discoverer.discover(self.log)
-            
-        self.activities, self.silent_transitions, self.start_activities, self.end_activities = \
-            discoverer.extract_basic_properties(self.transitions, self.full_log)
+        # --- Step 1: log loading and filtering ---
+        logger.info("Loading and filtering log: %s", log_path)
+        processor = LogProcessor(log_path, use_activity_classifier)
+        self.log, self.full_log, _ = processor.load_and_filter_log(coverage_percentage)
+        train_log, _ = processor.split_train_test(self.log)
+        self.log = train_log
+        self.attributes, self.attribute_categories = processor.initialize_attributes(
+            self.full_log
+        )
+        logger.info("Log loaded: %d training traces, %d attributes",
+                    len(self.log), len(self.attributes))
 
-        # 3. Attributes initialization & categorization
-        self.attributes, self.attribute_categories = processor.initialize_attributes(self.full_log)
+        # --- Step 2: Petri net discovery ---
+        logger.info("Starting Petri net discovery [%s]", discovery_algorithm)
+        self.petri_net_model: PetriNetModel = ModelDiscoverer(
+            discovery_algorithm
+        ).discover(self.log)
+        pnm = self.petri_net_model
+        logger.info("Petri net discovered: %d places, %d transitions, %d XOR splits",
+                    len(pnm.petrinet.places), len(pnm.petrinet.transitions),
+                    len(pnm.xor_splits))
 
-        # 4. Structure & Probabilities computation
-        self._compute_structure_and_probabilities()
+        # --- Step 3: numeric attribute discretization ---
+        numeric_attrs = [
+            a for a, t in self.attribute_categories.items() if t == 'numerical'
+        ]
+        logger.info("Starting discretization for %d numerical attributes", len(numeric_attrs))
+        discretizer = Discretizer(self.config)
+        discretizer.fit(self.full_log, numeric_attrs)
+        self.discretizer = discretizer
+        logger.info("Discretization complete: %d attributes discretized",
+                    len(discretizer.boundaries))
 
-    def _compute_structure_and_probabilities(self) -> None:
-        """
-        Compute high-level structural properties and data-driven probabilities.
-        """
-        self.predecessors = self.extract_predecessors()
-        self.decision_points_probabilities = self.compute_decision_points_probabilities()
-        self.parallels = self.identify_parallels()
-        self.direct_transition_graph = self._build_direct_transition_graph()
-        
-        # Run decision mining to get attribute domains
-        rules, intervals, samples = discover_all_decision_rules(self.log_path, log=self.full_log)
-        self.attribute_domains = get_attribute_domains(samples, intervals)
-        self.decision_samples = samples
-        
-        # Update intervals with the ones discovered from decision mining
-        if intervals:
-            self.intervals = dict(intervals)
+        # --- Step 4: token replay → PetriNetLog ---
+        logger.info("Starting token replay")
+        builder = PetriNetLogBuilder(
+            petrinet=pnm.petrinet,
+            initial_marking=pnm.initial_marking,
+            final_marking=pnm.final_marking,
+            trans_inputs=pnm.trans_inputs,
+            trans_outputs=pnm.trans_outputs,
+            silent_transitions=pnm.silent_transitions,
+            config=self.config,
+        )
+        self.pn_log = builder.build(self.log)
+        logger.info("Token replay complete: %d traces accepted", len(self.pn_log.executions))
 
-    # --- Delegated Structural and Statistical Methods ---
+        # --- Step 5: single-pass log preprocessing ---
+        logger.info("Starting log preprocessing")
+        self.preprocessed_log: PreprocessedLog = LogPreprocessor(
+            config=self.config,
+            discretizer=discretizer,
+        ).preprocess(self.pn_log, pnm.xor_splits)
+        logger.info("Log preprocessing complete")
 
-    def extract_predecessors(self) -> Dict[str, List[str]]:
-        """
-        Extract a mapping of activities to their direct predecessors in the Petri net structure.
-        """
-        analyzer = StructureAnalyzer(self.edges, self.places, self.silent_transitions)
-        return analyzer.extract_predecessors()
+        # --- Step 6: probability estimation ---
+        logger.info("Starting probability estimation")
+        estimator = ProbabilityEstimator(
+            silent_transitions=pnm.silent_transitions,
+            config=self.config,
+        )
+        self.xor_stats: Dict[str, XorSplitStats] = estimator.compute_xor_probabilities(
+            self.preprocessed_log, pnm.xor_splits
+        )
+        self.attribute_effects: Dict[str, AttributeEffect] = (
+            estimator.compute_attribute_effect_probabilities(self.preprocessed_log)
+        )
+        logger.info("Probability estimation complete")
 
-    def compute_decision_points_probabilities(self) -> Dict[str, Dict[str, float]]:
-        """
-        Identify decision points (XOR-splits) and compute their branch probabilities.
-        """
-        estimator = ProbabilityEstimator(self.edges, self.predecessors, self.silent_transitions)
-        return estimator.compute_decision_points_probabilities(self.full_log)
+        # --- Steps 7–10: screening and DT mining ---
+        miner = DecisionMiner(
+            silent_transitions=pnm.silent_transitions,
+            config=self.config,
+        )
 
-    def identify_parallels(self) -> Dict[str, List[str]]:
-        """
-        Identify transitions that split into parallel paths (AND-splits).
-        """
-        analyzer = StructureAnalyzer(self.edges, self.places, self.silent_transitions)
-        return analyzer.identify_parallels()
+        logger.info("Starting XOR split screening")
+        self.xor_screening: Dict[str, XorSplitScreening] = miner.screen_xor_splits(
+            pnm.xor_splits, self.xor_stats
+        )
+        logger.info("XOR split screening complete")
 
-    def _build_direct_transition_graph(self) -> Dict[str, List[str]]:
-        """
-        Build a direct transition graph by removing Petri net places and connecting transitions directly.
-        """
-        analyzer = StructureAnalyzer(self.edges, self.places, self.silent_transitions)
-        return analyzer.build_direct_transition_graph()
+        logger.info("Starting effect screening")
+        self.effect_screening: Dict[str, TransitionScreening] = miner.screen_effects(
+            self.attribute_effects
+        )
+        logger.info("Effect screening complete")
 
-    # --- Delegated Correlation Mining Methods ---
+        logger.info("Starting XOR split DT mining")
+        self.xor_guards: Dict[str, XorSplitGuards] = miner.mine_xor_splits(
+            self.preprocessed_log, self.xor_screening
+        )
+        logger.info("XOR split DT mining complete: %d guards trained", len(self.xor_guards))
 
-    def discover_attribute_activity_relationships(self) -> Dict[str, Dict[str, Dict[str, RelationshipMetrics]]]:
-        """
-        Discover how specific attribute values influence subsequent activities.
-        """
-        miner = CorrelationMiner(self.full_log, self.predecessors, self.intervals)
-        return miner.discover_attribute_activity_relationships()
+        logger.info("Starting effect DT mining")
+        self.transition_effects: Dict[str, TransitionEffects] = miner.mine_effects(
+            self.preprocessed_log, self.effect_screening
+        )
+        logger.info("Effect DT mining complete")
 
-    def discover_activity_attribute_effects(self) -> Dict[str, Dict[str, Dict[str, Dict[str, RelationshipMetrics]]]]:
+        # --- Snapshot: persist pre-pruning state to disk ---
+        logger.info("Saving pre-pruning snapshot")
+        self._save_snapshot()
+        logger.info("Snapshot saved to %s", self.config.snapshot_dir)
+
+        logger.info("Pipeline complete")
+
+    def _save_snapshot(self) -> None:
+        """Persist the pre-pruning state (PetriNet + screening) to disk.
+
+        Writes three files to config.snapshot_dir:
+          - petri_net.pnml     : original discovered Petri net (PNML format)
+          - xor_screening.json : XOR split screening decisions
+          - effect_screening.json : effect screening decisions
+
+        The directory is created if it does not exist.  Existing files are
+        overwritten silently so that re-runs always reflect the latest log.
         """
-        Discover how activities affect attribute values.
-        """
-        miner = CorrelationMiner(self.full_log, self.predecessors, self.intervals)
-        return miner.discover_activity_attribute_effects()
+        out = self.config.snapshot_dir
+        os.makedirs(out, exist_ok=True)
+
+        pnm = self.petri_net_model
+        pm4py.write_pnml(
+            pnm.petrinet,
+            pnm.initial_marking,
+            pnm.final_marking,
+            os.path.join(out, "petri_net.pnml"),
+        )
+
+        xor_data = {place: scr.to_dict() for place, scr in self.xor_screening.items()}
+        _write_json(xor_data, os.path.join(out, "xor_screening.json"))
+
+        effect_data = {act: scr.to_dict() for act, scr in self.effect_screening.items()}
+        _write_json(effect_data, os.path.join(out, "effect_screening.json"))
+
+
+# ---------------------------------------------------------------------------
+# Snapshot helpers
+# ---------------------------------------------------------------------------
+
+def _write_json(data: Any, path: str) -> None:
+    """Write data as indented JSON to path."""
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
