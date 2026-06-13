@@ -45,8 +45,8 @@ class PetriNetLogBuilder:
         petrinet: PetriNet,
         initial_marking: Marking,
         final_marking: Marking,
-        trans_inputs: DefaultDict[Transition, Set[PetriNet.Place]],
-        trans_outputs: DefaultDict[Transition, Set[PetriNet.Place]],
+        trans_inputs: Dict[Transition, Set[PetriNet.Place]],
+        trans_outputs: Dict[Transition, Set[PetriNet.Place]],
         silent_transitions: Dict[Transition, str],
         config: AnalysisConfig,
     ) -> None:
