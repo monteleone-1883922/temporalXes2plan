@@ -19,19 +19,24 @@ downstream steps (pruning, filtering, ParseResult assembly) can access them.
 import json
 import os
 import random
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set, List
 
 import numpy as np
 import pm4py
+from pm4py import PetriNet
 
 import core_utils as utils
 from models import (
     AnalysisConfig,
     AttributeEffect,
+    EffectInfo,
+    ParseResult,
     PetriNetModel,
     PreprocessedLog,
     TransitionEffects,
+    TransitionInfo,
     TransitionScreening,
+    XorBranchInfo,
     XorSplitGuards,
     XorSplitScreening,
     XorSplitStats,
@@ -187,6 +192,19 @@ class Parser:
         self._save_snapshot()
         logger.info("Snapshot saved to %s", self.config.snapshot_dir)
 
+        # --- XOR split filtering → PetriNet pruning ---
+        logger.info("Starting XOR split filtering")
+        self._filter_xor_splits()
+        logger.info("XOR split filtering complete")
+
+        # --- Effect filtering → EffectInfo ---
+        logger.info("Starting effect filtering")
+        self._filter_effects()
+        logger.info("Effect filtering complete")
+
+        # --- Assemble ParseResult ---
+        logger.info("Assembling ParseResult")
+        self.parse_result: ParseResult = self._build_parse_result()
         logger.info("Pipeline complete")
 
     def _save_snapshot(self) -> None:
@@ -216,6 +234,315 @@ class Parser:
 
         effect_data = {act: scr.to_dict() for act, scr in self.effect_screening.items()}
         _write_json(effect_data, os.path.join(out, "effect_screening.json"))
+
+    def _filter_xor_splits(self) -> None:
+        """Apply XOR split decisions: prune branches and record cascade info.
+
+        Iterates xor_screening to determine which branch transitions to remove
+        from the Petri net and what cascade level each remaining branch carries.
+        All removals are accumulated and applied in a single prune_transitions()
+        call to keep the net consistent.
+
+        Populates self._xor_branch_info: Dict[str, XorBranchInfo] mapping each
+        remaining branch's activity name to its encoder-ready routing info.
+        """
+        to_remove: Set[PetriNet.Transition] = set()
+        self._xor_branch_info: Dict[str, XorBranchInfo] = {}
+
+        for place, transitions in list(self.petri_net_model.xor_splits.items()):
+            place_name = place.name
+            screening = self.xor_screening.get(place_name)
+            if screening is None:
+                continue
+
+            act_to_trans = {
+                utils.sanitize_name(t.label): t
+                for t in transitions if t.label
+            }
+
+            if screening.action == "dt" and place_name in self.xor_guards:
+                self._apply_dt_level(act_to_trans, screening, place_name, to_remove)
+
+            elif screening.action == "deterministic":
+                self._apply_deterministic(act_to_trans, screening, to_remove)
+
+            elif screening.action == "fallback":
+                self._apply_fallback(act_to_trans, screening, to_remove)
+
+        if to_remove:
+            logger.info("Pruning %d branch transitions from Petri net", len(to_remove))
+            self.petri_net_model = self.petri_net_model.prune_transitions(to_remove)
+
+    def _apply_dt_level(
+        self,
+        act_to_trans: Dict[str, PetriNet.Transition],
+        screening: XorSplitScreening,
+        place_name: str,
+        to_remove: Set[PetriNet.Transition],
+    ) -> None:
+        """Level 1 — DT succeeded: prune only 'pruned' branches."""
+        guards_obj = self.xor_guards[place_name]
+        for act, t in act_to_trans.items():
+            branch = screening.branches.get(act)
+            if branch is None or branch.status == "pruned":
+                to_remove.add(t)
+            else:
+                self._xor_branch_info[act] = XorBranchInfo(
+                    probability=branch.probability,
+                    total_samples=screening.total_samples,
+                    cascade_level=1,
+                    guards=guards_obj.guards.get(act),
+                )
+
+    def _apply_deterministic(
+        self,
+        act_to_trans: Dict[str, PetriNet.Transition],
+        screening: XorSplitScreening,
+        to_remove: Set[PetriNet.Transition],
+    ) -> None:
+        """Level 1 — Single certain branch: prune everything else."""
+        for act, t in act_to_trans.items():
+            branch = screening.branches.get(act)
+            if branch is None or branch.status != "certain":
+                to_remove.add(t)
+
+
+    def _apply_fallback(
+        self,
+        act_to_trans: Dict[str, PetriNet.Transition],
+        screening: XorSplitScreening,
+        to_remove: Set[PetriNet.Transition],
+    ) -> None:
+        """Level 2/3 — Statistical fallback: apply xor_statistical_mode.
+
+        Level 3 (equal weights, no pruning) is used when total_samples is below
+        config.probability_min_samples — probabilities are not reliable enough
+        to make any routing decision.  Level 2 applies the configured
+        xor_statistical_mode on the active (non-pruned) branches.
+        """
+        if screening.total_samples < self.config.probability_min_samples:
+            # Level 3: too few samples to trust any probability — keep all
+            # branches with equal weight and do not remove anything.
+            for act, t in act_to_trans.items():
+                branch = screening.branches.get(act)
+                self._xor_branch_info[act] = XorBranchInfo(
+                    probability=branch.probability if branch else 0.0,
+                    total_samples=screening.total_samples,
+                    cascade_level=3,
+                    guards=None,
+                )
+            return
+
+        active = {
+            act: b for act, b in screening.branches.items()
+            if b.status != "pruned"
+        }
+
+        if not active:
+            # Edge case: samples are sufficient but all branches are below
+            # xor_prune_threshold.  Keep everything to avoid an empty net.
+            logger.warning(
+                "XOR split: all branches pruned despite sufficient samples "
+                "(%d) — keeping all branches to avoid empty split.",
+                screening.total_samples,
+            )
+            for act, t in act_to_trans.items():
+                branch = screening.branches.get(act)
+                self._xor_branch_info[act] = XorBranchInfo(
+                    probability=branch.probability if branch else 0.0,
+                    total_samples=screening.total_samples,
+                    cascade_level=2,
+                    guards=None,
+                )
+            return
+
+        mode = self.config.xor_statistical_mode
+
+        if mode == "majority_only":
+            majority = max(active, key=lambda a: active[a].probability)
+            for act, t in act_to_trans.items():
+                if act != majority:
+                    to_remove.add(t)
+                else:
+                    self._xor_branch_info[act] = XorBranchInfo(
+                        probability=active[act].probability,
+                        total_samples=screening.total_samples,
+                        cascade_level=2,
+                        guards=None,
+                    )
+
+        elif mode == "weighted":
+            # Keep all branches; encoder will assign costs via -log(p).
+            for act, t in act_to_trans.items():
+                branch = screening.branches.get(act)
+                self._xor_branch_info[act] = XorBranchInfo(
+                    probability=branch.probability if branch else 0.0,
+                    total_samples=screening.total_samples,
+                    cascade_level=2,
+                    guards=None,
+                )
+
+        else:
+            # pruned_weighted (default): remove 'pruned', keep active with costs.
+            for act, t in act_to_trans.items():
+                branch = screening.branches.get(act)
+                if branch is None or branch.status == "pruned":
+                    to_remove.add(t)
+                else:
+                    self._xor_branch_info[act] = XorBranchInfo(
+                        probability=branch.probability,
+                        total_samples=screening.total_samples,
+                        cascade_level=2,
+                        guards=None,
+                    )
+
+
+    def _filter_effects(self) -> None:
+        """Build encoder-ready EffectInfo for each (transition, attribute) pair.
+
+        Reads effect_screening and transition_effects; applies cascade levels:
+          1 = DT guards available
+          2 = statistical fallback (probabilities only)
+          3 = effect removed
+
+        Two independent level-3 triggers:
+          - total_firings < min_samples: the transition has too few data points to
+            trust any effect probability → all attributes excluded for this transition.
+          - appearance_samples < min_samples: this specific attribute changed too
+            rarely → only that attribute's effect is excluded.
+
+        Value level 3 → value_probabilities is empty, value_guards is None.
+
+        Populates self._transition_effect_info:
+            Dict[str, Dict[str, EffectInfo]]  (activity_name → attr → EffectInfo)
+        """
+        self._transition_effect_info: Dict[str, Dict[str, EffectInfo]] = {}
+        min_samples = self.config.probability_min_samples
+
+        for act, t_scr in self.effect_screening.items():
+            #fallback 3 on appearance
+            # Transition-level gate: too few firings → no reliable effect data at all.
+            if t_scr.total_firings < min_samples:
+                continue
+
+            attr_infos: Dict[str, EffectInfo] = {}
+            t_effects = self.transition_effects.get(act)
+            attr_effects = self.attribute_effects.get(act)
+
+            for attr, attr_scr in t_scr.attributes.items():
+                if attr_scr.appearance_action == "never":
+                    continue
+
+                # --- Appearance level ---
+                if attr_scr.appearance_action == "dt":
+                    appearance_level = 1
+                    appearance_guards = (
+                        t_effects.effects[attr].appearance
+                        if t_effects and attr in t_effects.effects
+                        else None
+                    )
+                elif attr_scr.appearance_action == "deterministic":
+                    appearance_level = 1
+                    appearance_guards = None
+                else:  # "fallback"
+                    if attr_scr.appearance_samples < min_samples:
+                        # fallback 3 for value effect
+                        continue  # this attr changed too rarely → remove effect
+                    appearance_level = 2
+                    appearance_guards = None
+
+                # --- Value level ---
+                if attr_scr.value_action == "dt":
+                    value_level = 1
+                    value_guards = (
+                        t_effects.effects[attr].value
+                        if t_effects and attr in t_effects.effects
+                        else None
+                    )
+                elif attr_scr.value_action == "deterministic":
+                    value_level = 1
+                    value_guards = None
+                else:  # "fallback"
+                    value_level = 2
+                    value_guards = None
+
+                # --- Active value probabilities (pruned values excluded) ---
+                active_value_probs: Dict[Any, float] = {}
+                if attr_effects and attr in attr_effects.value_probabilities:
+                    all_probs = attr_effects.value_probabilities[attr]
+                    for v, v_scr in attr_scr.values.items():
+                        if v_scr.status != "pruned" and v in all_probs:
+                            active_value_probs[v] = all_probs[v]
+
+                attr_infos[attr] = EffectInfo(
+                    attribute=attr,
+                    presence_probability=attr_scr.presence_probability,
+                    appearance_level=appearance_level,
+                    appearance_guards=appearance_guards,
+                    value_probabilities=active_value_probs,
+                    value_level=value_level,
+                    value_guards=value_guards,
+                )
+
+            if attr_infos:
+                self._transition_effect_info[act] = attr_infos
+
+    def _build_parse_result(self) -> ParseResult:
+        """Assemble the final encoder-ready ParseResult from all pipeline outputs.
+
+        Builds place/transition predecessor maps from the pruned PetriNetModel
+        indexes, then constructs a TransitionInfo for every labeled transition,
+        wiring in XOR branch info and conditional effects.
+
+        Returns:
+            ParseResult with consistent pruned-net indexes and encoder-ready info.
+        """
+        pnm = self.petri_net_model
+
+        # Place predecessors: place.name → [sanitized labels of transitions
+        # whose output arcs lead into that place]
+        place_predecessors: Dict[str, List[str]] = {
+            p.name: [
+                utils.sanitize_name(t.label)
+                for t in trans_list if t.label
+            ]
+            for p, trans_list in pnm.place_inputs.items()
+        }
+
+        # Transition predecessors: sanitized label → [input place names]
+        transition_predecessors: Dict[str, List[str]] = {
+            utils.sanitize_name(t.label): [p.name for p in places]
+            for t, places in pnm.trans_inputs.items()
+            if t.label
+        }
+
+        # TransitionInfo per labeled transition
+        transitions: Dict[str, TransitionInfo] = {}
+        for t, input_places in pnm.trans_inputs.items():
+            if not t.label:
+                continue
+            act = utils.sanitize_name(t.label)
+            attr_effects = self.attribute_effects.get(act)
+            transitions[act] = TransitionInfo(
+                activity_name=act,
+                input_places=[p.name for p in input_places],
+                total_firings=attr_effects.total_firings if attr_effects else 0,
+                xor_branch=self._xor_branch_info.get(act),
+                effects=self._transition_effect_info.get(act, {}),
+            )
+
+        # Start / end place names from markings (single-place markings assumed)
+        start_place = next(iter(pnm.initial_marking)).name
+        end_place = next(iter(pnm.final_marking)).name
+
+        return ParseResult(
+            petri_net_model=pnm,
+            place_predecessors=place_predecessors,
+            transition_predecessors=transition_predecessors,
+            transitions=transitions,
+            start_place=start_place,
+            end_place=end_place,
+        )
 
 
 # ---------------------------------------------------------------------------

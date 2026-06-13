@@ -480,6 +480,12 @@ class AnalysisConfig:
     dt_min_accuracy: float = 0.75
     dt_max_depth: int = 3
 
+    # --- Statistical fallback level threshold (shared for XOR splits and effects) ---
+    # Minimum number of samples required to trust observed probabilities (level 2).
+    # Below this threshold the system falls back to level 3: equal weights for XOR
+    # branches, or effect removal for conditional effects.
+    probability_min_samples: int = 10
+
     # --- DT leaf pruning ---
     # Leaves with fewer samples or lower purity than these thresholds are removed
     # from the SOP guards after training.
