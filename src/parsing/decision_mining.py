@@ -1,4 +1,9 @@
-"""Decision tree mining for XOR-split guards from a PetriNetLog."""
+"""Decision tree mining for XOR-split guards and conditional effects.
+
+Operates on a PreprocessedLog (produced by LogPreprocessor) instead of
+scanning the raw PetriNetLog.  All sanitization, discretization, and
+ignored-attribute filtering has already been performed during preprocessing.
+"""
 
 import numpy as np
 import pandas as pd
@@ -10,130 +15,162 @@ from pm4py import PetriNet
 from pm4py.objects.powl.obj import Transition
 
 import core_utils as utils
-from models import AnalysisConfig, Guard, PetriNetLog, XorSplitGuards
-from parsing.discretizer import Discretizer
+from models import (
+    AnalysisConfig,
+    AttributeEffect,
+    ConditionalEffect,
+    EffectAttrScreening,
+    EffectGuards,
+    EffectValueScreening,
+    Guard,
+    PreprocessedLog,
+    TransitionEffects,
+    TransitionScreening,
+    XorBranchScreening,
+    XorSplitGuards,
+    XorSplitScreening,
+    XorSplitStats,
+)
 
 logger = utils.get_logger(__name__)
 
 
 class DecisionMiner:
-    """
-    Mines decision logic for XOR splits from a PetriNetLog using decision trees.
+    """Mines decision logic for XOR splits and conditional effects using DTs.
 
-    For each XOR-split place, walks every execution to build a feature matrix:
-    the accumulated attribute state at the moment each branch fires becomes one
-    training row. A DT is then fit to predict the chosen branch from that state.
-    Extracted paths are returned in SOP form (outer list = OR, inner = AND).
+    Operates on a PreprocessedLog whose TransitionFiringData objects already
+    contain sanitized/discretized pre_state and changed_attrs.  This class
+    is a pure feature-matrix builder + DT trainer — no log scanning.
 
-    Two-stage filtering avoids wasted computation:
-    1. count_xor_samples() — O(executions) pre-check; skips splits below
-       config.dt_min_samples before any DT work.
-    2. After training, splits whose accuracy falls below config.dt_min_accuracy
-       are returned with empty guards so the caller can fall back to
-       ProbabilityEstimator statistics.
+    Three-stage pipeline:
+    1. screen_xor_splits() / screen_effects() — classify each analysis target
+       (dt / deterministic / fallback / never) and tag branches/values
+       as active / pruned / certain.
+    2. mine_xor_splits() / mine_effects() — train DTs only for targets marked
+       "dt" by the screening, filtering pruned branches/values from training.
+    3. After training, accuracy below config.dt_min_accuracy triggers a
+       probability-based fallback ("fallback" status).
     """
 
     def __init__(
         self,
         silent_transitions: Dict[Transition, str],
         config: Optional[AnalysisConfig] = None,
-        discretizer: Optional[Discretizer] = None,
     ) -> None:
-        """
-        Initialize DecisionMiner.
-
-        Args:
-            silent_transitions: Transition -> tau name mapping, used to label
-                branch transitions in the training matrix.
-            config: Analysis configuration. Controls dt_min_samples,
-                dt_min_accuracy, dt_max_depth, and ignored_attributes.
-            discretizer: Optional pre-fitted Discretizer. Numeric attribute
-                values are converted to interval labels before building the
-                feature matrix, making them usable as categorical DT features.
-        """
         self.silent_transitions = silent_transitions
         self.config = config or AnalysisConfig()
-        self._discretizer = discretizer
 
     # -------------------------------------------------------------------------
-    # Public API
+    # Public API — XOR screening
     # -------------------------------------------------------------------------
 
-    def count_xor_samples(
+    def screen_xor_splits(
         self,
-        pn_log: PetriNetLog,
         xor_splits: Dict[PetriNet.Place, List[Transition]],
-    ) -> Dict[PetriNet.Place, int]:
-        """
-        Count traversals through each XOR-split place in the log.
+        xor_stats: Dict[str, XorSplitStats],
+    ) -> Dict[str, XorSplitScreening]:
+        """Screen each XOR-split place and classify its branches.
 
-        A traversal is counted when a step fires from one of the place's outgoing
-        transitions (i.e. the place appears in step.from_places and the transition
-        is one of the XOR branches).
+        For each XOR place, branches with probability below
+        config.xor_prune_threshold are marked "pruned". If only one active
+        branch remains it is marked "certain" and the action is "deterministic".
 
         Args:
-            pn_log: Pre-built PetriNetLog.
             xor_splits: XOR-split places mapped to their outgoing transitions.
+            xor_stats: Per-place branch probabilities from ProbabilityEstimator.
 
         Returns:
-            Dict mapping place name to traversal count.
+            Dict mapping place name to XorSplitScreening.
         """
-        valid_branches: Dict[PetriNet.Place, Set[Transition]] = {
-            place: set(transitions) for place, transitions in xor_splits.items()
-        }
-        counts: Dict[PetriNet.Place, int] = {place.name: 0 for place in xor_splits}
+        result: Dict[str, XorSplitScreening] = {}
 
-        for execution in pn_log.executions:
-            for step in execution.steps:
-                for place in step.from_places:
-                    if place in valid_branches and step.transition in valid_branches[place]:
-                        counts[place.name] += 1
+        for place, transitions in xor_splits.items():
+            stats = xor_stats.get(place.name)
+            total_samples = stats.total_executions if stats else 0
 
-        return counts
+            raw: Dict[str, Tuple[str, float]] = {}
+            for t in transitions:
+                act = self._activity_name(t)
+                prob = stats.probabilities.get(act, 0.0) if stats else 0.0
+                status = "pruned" if prob < self.config.xor_prune_threshold else "active"
+                raw[act] = (status, prob)
+
+            active_acts = [a for a, (s, _) in raw.items() if s == "active"]
+
+            if len(active_acts) == 1:
+                sole = active_acts[0]
+                raw[sole] = ("certain", raw[sole][1])
+
+            branches = {
+                act: XorBranchScreening(activity_name=act, probability=prob, status=status)
+                for act, (status, prob) in raw.items()
+            }
+
+            if len(active_acts) == 0:
+                action = "fallback"
+            elif len(active_acts) == 1:
+                action = "deterministic"
+            elif total_samples < self.config.dt_min_samples:
+                action = "fallback"
+            else:
+                action = "dt"
+
+            logger.debug(
+                "XOR screen '%s': action=%s, branches=%s",
+                place.name, action,
+                {a: b.status for a, b in branches.items()},
+            )
+            result[place.name] = XorSplitScreening(
+                total_samples=total_samples,
+                action=action,
+                branches=branches,
+            )
+
+        return result
+
+    # -------------------------------------------------------------------------
+    # Public API — XOR mining
+    # -------------------------------------------------------------------------
 
     def mine_xor_splits(
         self,
-        pn_log: PetriNetLog,
-        xor_splits: Dict[PetriNet.Place, List[Transition]],
-    ) -> Tuple[
-        Dict[str, XorSplitGuards],
-        Dict[PetriNet.Place, List[Transition]]
-    ] :
-        """
-        Train a decision tree for each qualifying XOR split and extract SOP guards.
+        preprocessed_log: PreprocessedLog,
+        xor_screening: Dict[str, XorSplitScreening],
+    ) -> Dict[str, XorSplitGuards]:
+        """Train a decision tree for each XOR split screened as "dt".
 
-        Splits with fewer than config.dt_min_samples traversals are skipped and
-        absent from the result. Splits whose DT accuracy falls below
-        config.dt_min_accuracy are included with empty guards so the caller can
-        detect them and apply a probability-based fallback.
+        Pruned branches are excluded from the DT training data. Splits whose
+        DT accuracy falls below config.dt_min_accuracy are omitted from the
+        result (use probability-based fallback).
 
         Args:
-            pn_log: Pre-built PetriNetLog.
-            xor_splits: XOR-split places mapped to their outgoing transitions.
+            preprocessed_log: Single-pass preprocessed log.
+            xor_screening: Screening results from screen_xor_splits().
 
         Returns:
-            Dict mapping place name to XorSplitGuards.
+            Dict mapping place name to XorSplitGuards (only "dt" successes).
         """
-        sample_counts = self.count_xor_samples(pn_log, xor_splits)
         result: Dict[str, XorSplitGuards] = {}
-        skipped_xor_splits: Dict[PetriNet.Place, List[Transition]] = {}
 
-        for place, transitions in xor_splits.items():
-            n_samples = sample_counts.get(place.name, 0)
-            if n_samples < self.config.dt_min_samples:
-                logger.debug(
-                    "XOR split '%s': skipped (%d samples < min %d)",
-                    place.name, n_samples, self.config.dt_min_samples,
-                )
-                skipped_xor_splits[place] = transitions
+        for place_name, screening in xor_screening.items():
+            if screening.action != "dt":
                 continue
 
-            X, y = self._build_feature_matrix(pn_log, place, transitions)
+            active_branches = {
+                name for name, branch in screening.branches.items()
+                if branch.status == "active"
+            }
+
+            X, y = self._build_feature_matrix(
+                preprocessed_log, place_name, active_branches
+            )
             if X.empty or y.nunique() < 2:
                 logger.warning(
-                    "XOR split '%s': skipped — feature matrix empty or single class.",
-                    place.name,
+                    "XOR split '%s': skipped — feature matrix empty or "
+                    "single class after pruning.",
+                    place_name,
                 )
+                screening.action = "fallback"
                 continue
 
             guards, accuracy = self._train_and_extract(X, y)
@@ -141,79 +178,56 @@ class DecisionMiner:
             if accuracy < self.config.dt_min_accuracy:
                 logger.info(
                     "XOR split '%s': DT accuracy %.2f < threshold %.2f — "
-                    "empty guards returned (use probability fallback).",
-                    place.name, accuracy, self.config.dt_min_accuracy,
+                    "use probability fallback.",
+                    place_name, accuracy, self.config.dt_min_accuracy,
                 )
-                guards = {}
+                screening.action = "fallback"
+                continue
 
-            result[place.name] = XorSplitGuards(
+            result[place_name] = XorSplitGuards(
                 guards=guards,
-                total_samples=n_samples,
+                total_samples=screening.total_samples,
                 dt_accuracy=round(accuracy, 4),
             )
 
-        return result, skipped_xor_splits
+        return result
 
     # -------------------------------------------------------------------------
-    # Private: feature matrix
+    # Private: XOR feature matrix
     # -------------------------------------------------------------------------
 
     def _build_feature_matrix(
         self,
-        pn_log: PetriNetLog,
-        xor_place: PetriNet.Place,
-        transitions: List[Transition],
+        preprocessed_log: PreprocessedLog,
+        place_name: str,
+        active_branches: Optional[Set[str]] = None,
     ) -> Tuple[pd.DataFrame, pd.Series]:
-        """
-        Build the training feature matrix for one XOR-split place.
+        """Build the training feature matrix for one XOR-split place.
 
-        For each execution, maintains a running attribute state dict that is
-        updated after each labeled step. When a step fires from xor_place, the
-        state snapshot BEFORE that step's own attributes are applied is emitted
-        as one training row, labelled with the chosen branch activity.
-
-        This causal ordering ensures features reflect the decision context
-        (what was known before the choice) rather than its effects.
-
-        Missing/None attribute values are omitted from the state. Attributes in
-        config.ignored_attributes are skipped. Values are discretized when a
-        discretizer is available.
+        Each TransitionFiringData in xor_firings provides one training row:
+        pre_state becomes the feature vector, activity_name becomes the label.
 
         Args:
-            pn_log: Pre-built PetriNetLog.
-            xor_place: The XOR-split place to sample.
-            transitions: Outgoing branch transitions of xor_place.
+            preprocessed_log: Single-pass preprocessed log with xor_firings.
+            place_name: Name of the XOR-split place to sample.
+            active_branches: If provided, only include firings whose
+                activity_name is in this set (pruned branches excluded).
 
         Returns:
-            Tuple (X, y): feature DataFrame and label Series, both empty if no
-            traversals were found.
+            Tuple (X, y): feature DataFrame and label Series.
         """
-        valid_branches: Set[Transition] = set(transitions)
-        rows: List[Dict[str, Any]] = []
-        labels: List[str] = []
-
-        for execution in pn_log.executions:
-            state: Dict[str, Any] = {}
-            for step in execution.steps:
-                # Emit sample BEFORE updating state with this step's attributes.
-                if xor_place in step.from_places and step.transition in valid_branches:
-                    rows.append(dict(state))
-                    labels.append(self._activity_name(step.transition))
-
-                # Update accumulated state from labeled steps.
-                if not step.is_tau:
-                    for attr, val in step.attributes.items():
-                        if attr in self.config.ignored_attributes or val is None:
-                            continue
-                        sanitized = utils.sanitize_name(attr)
-                        if (self._discretizer is not None
-                                and sanitized in self._discretizer.boundaries):
-                            val = self._discretizer.transform_value(sanitized, val)
-                        if val is not None:
-                            state[sanitized] = val
-
-        if not rows:
+        firings = preprocessed_log.xor_firings.get(place_name, [])
+        if not firings:
             return pd.DataFrame(), pd.Series(dtype=str)
+
+        if active_branches is not None:
+            firings = [fd for fd in firings if fd.activity_name in active_branches]
+
+        if not firings:
+            return pd.DataFrame(), pd.Series(dtype=str)
+
+        rows = [fd.pre_state for fd in firings]
+        labels = [fd.activity_name for fd in firings]
 
         return pd.DataFrame(rows), pd.Series(labels, dtype=str)
 
@@ -226,8 +240,7 @@ class DecisionMiner:
         X: pd.DataFrame,
         y: pd.Series,
     ) -> Tuple[Dict[str, List[List[Guard]]], float]:
-        """
-        Encode features, train a DT, compute accuracy, and extract SOP guards.
+        """Encode features, train a DT, compute accuracy, and extract SOP guards.
 
         Detection rules for column types (applied to each column of X):
         - dtype bool, or binary values in {0, 1} → boolean (cast to int, no dummies)
@@ -241,7 +254,7 @@ class DecisionMiner:
 
         Returns:
             Tuple (guards, accuracy):
-            - guards: Dict[activity, List[List[str]]] in SOP form.
+            - guards: Dict[activity, List[List[Guard]]] in SOP form.
             - accuracy: DT training accuracy (0.0 if training fails).
         """
         X = X.copy()
@@ -306,22 +319,11 @@ class DecisionMiner:
         categorical_cols: Set[str],
         bool_cols: Set[str],
     ) -> Dict[str, List[List[Guard]]]:
-        """
-        Walk all root-to-leaf paths in the DT, prune low-quality leaves, and
+        """Walk all root-to-leaf paths in the DT, prune low-quality leaves, and
         build SOP guards.
 
-        Each root-to-leaf path yields one inner list (AND of Guard conditions along
-        that path). Multiple paths predicting the same class are OR'd together
-        (outer list).
-
-        Splits that produce no Guard (raw numeric, unrepresentable) are omitted.
-        Paths that yield no conditions after filtering are excluded.
-
-        Leaf quality thresholds (config.dt_prune_min_leaf_samples and
-        config.dt_prune_min_purity) remove unreliable leaves after collection.
-        When pruning would orphan an activity (remove ALL its leaves):
-          - "keep_best": restore the highest-purity leaf for that activity.
-          - "drop": omit the activity from guards entirely (WARNING logged).
+        Each root-to-leaf path yields one inner list (AND of Guard conditions).
+        Multiple paths predicting the same class are OR'd together (outer list).
 
         Args:
             clf: Fitted DecisionTreeClassifier.
@@ -337,7 +339,6 @@ class DecisionMiner:
             feature_names[i] if i != _tree.TREE_UNDEFINED else ""
             for i in tree_.feature
         ]
-        # Each entry: (activity, conditions, n_leaf_samples, leaf_purity)
         paths: List[Tuple[str, List[Guard], int, float]] = []
 
         def recurse(node: int, conditions: List[Guard]) -> None:
@@ -360,7 +361,6 @@ class DecisionMiner:
 
         recurse(0, [])
 
-        # --- Pruning ---
         min_n = self.config.dt_prune_min_leaf_samples
         min_p = self.config.dt_prune_min_purity
 
@@ -402,22 +402,16 @@ class DecisionMiner:
         categorical_cols: Set[str],
         bool_cols: Set[str],
     ) -> Optional[Guard]:
-        """
-        Convert a DT split (feature op threshold) to a Guard object.
-
-        The Guard is format-agnostic: it captures the attribute, optional value,
-        and negation flag without committing to any target language. Downstream
-        encoders (e.g. PDDL) are responsible for rendering it as a string.
+        """Convert a DT split (feature op threshold) to a Guard object.
 
         Encoding conventions:
         - One-hot bool (_true/_false suffix): > 0.5 → Guard(attr, None, False),
           <= 0.5 → Guard(attr, None, True). _false columns invert the polarity.
         - Boolean int column: > 0.5 → Guard(attr, None, False),
           <= 0.5 → Guard(attr, None, True).
-        - One-hot categorical (base in categorical_cols): > 0.5 →
-          Guard(base, value, False); the <= 0.5 side returns None (omitted to
-          keep guards positive — "not (risk high)" is rarely useful as a guard).
-        - Raw numeric columns: return None (no discrete condition exists).
+        - One-hot categorical: > 0.5 → Guard(base, value, False);
+          the <= 0.5 side returns None.
+        - Raw numeric columns: return None.
 
         Args:
             feature_name: Sanitized encoded column name.
@@ -431,7 +425,6 @@ class DecisionMiner:
         """
         lower = feature_name.lower()
 
-        # One-hot encoded boolean strings (e.g., admitted_true / admitted_false)
         if lower.endswith("_true"):
             base = feature_name[:-5]
             return Guard(attribute=base, value=None, negated=(op == "<="))
@@ -445,20 +438,15 @@ class DecisionMiner:
             if op == ">":
                 value = feature_name[len(base) + 1:]
                 return Guard(attribute=base, value=value, negated=False)
-            return None  # <= side omitted: negative categorical guards not emitted
+            return None
 
         if base in bool_cols:
             return Guard(attribute=base, value=None, negated=(op == "<="))
 
-        # Raw numeric — no discrete condition
         return None
 
     def _get_base_feature(self, col_name: str, categorical_cols: Set[str]) -> str:
-        """
-        Resolve the base attribute name from a potentially one-hot encoded column.
-
-        Uses progressively shorter prefix candidates until one matches a known
-        categorical base, handling multi-word attribute names with underscores.
+        """Resolve the base attribute name from a potentially one-hot encoded column.
 
         Args:
             col_name: Sanitized (encoded) column name.
@@ -475,15 +463,351 @@ class DecisionMiner:
         return col_name
 
     def _activity_name(self, transition: Transition) -> str:
-        """
-        Resolve the sanitized activity name for a transition.
-
-        Args:
-            transition: A PetriNet transition.
-
-        Returns:
-            Sanitized label for labeled transitions, or tau name.
-        """
+        """Resolve the sanitized activity name for a transition."""
         if transition.label is not None:
             return utils.sanitize_name(transition.label)
         return self.silent_transitions.get(transition, f"tau_unknown_{id(transition)}")
+
+    # =========================================================================
+    # Public API — effect mining
+    # =========================================================================
+
+    def screen_effects(
+        self,
+        attribute_effects: Dict[str, AttributeEffect],
+    ) -> Dict[str, TransitionScreening]:
+        """Screen each transition's effect attributes and classify values.
+
+        For each (transition, attribute) pair, determines whether to train
+        a DT (appearance and/or value) or skip.  Individual values are tagged
+        as active/pruned/certain based on their probability.
+
+        Args:
+            attribute_effects: Activity name → AttributeEffect from
+                ProbabilityEstimator.
+
+        Returns:
+            Dict mapping activity name to TransitionScreening.
+            Attributes below effect_never_threshold are excluded.
+        """
+        result: Dict[str, TransitionScreening] = {}
+        never_thr = self.config.effect_never_threshold
+        always_thr = self.config.effect_always_threshold
+        v_prune = self.config.effect_value_prune_threshold
+        v_certain = self.config.effect_value_certain_threshold
+
+        for act, ae in attribute_effects.items():
+            attr_screenings: Dict[str, EffectAttrScreening] = {}
+
+            for attr, p in ae.presence_probabilities.items():
+                if p < never_thr:
+                    attr_screenings[attr] = EffectAttrScreening(
+                        presence_probability=p,
+                        appearance_action="never",
+                        appearance_samples=0,
+                        value_action="never",
+                        value_samples=0,
+                        values={},
+                    )
+                    continue
+
+                if p > always_thr:
+                    app_action = "deterministic"
+                    app_samples = 0
+                elif ae.total_firings < self.config.dt_min_samples:
+                    app_action = "fallback"
+                    app_samples = ae.total_firings
+                else:
+                    app_action = "dt"
+                    app_samples = ae.total_firings
+
+                value_probs = ae.value_probabilities.get(attr, {})
+                n_val_samples = round(p * ae.total_firings)
+
+                values: Dict[Any, EffectValueScreening] = {}
+                for val, vp in value_probs.items():
+                    if vp < v_prune:
+                        vs = "pruned"
+                    elif vp > v_certain:
+                        vs = "certain"
+                    else:
+                        vs = "active"
+                    values[val] = EffectValueScreening(probability=vp, status=vs)
+
+                n_active = sum(1 for v in values.values() if v.status == "active")
+                if len(value_probs) <= 1:
+                    val_action = "deterministic"
+                elif n_active < 2:
+                    val_action = "deterministic"
+                elif n_val_samples < self.config.dt_min_samples:
+                    val_action = "fallback"
+                else:
+                    val_action = "dt"
+
+                attr_screenings[attr] = EffectAttrScreening(
+                    presence_probability=p,
+                    appearance_action=app_action,
+                    appearance_samples=app_samples,
+                    value_action=val_action,
+                    value_samples=n_val_samples,
+                    values=values,
+                )
+
+            if attr_screenings:
+                result[act] = TransitionScreening(
+                    transition_name=act,
+                    total_firings=ae.total_firings,
+                    attributes=attr_screenings,
+                )
+
+        return result
+
+    def mine_effects(
+        self,
+        preprocessed_log: PreprocessedLog,
+        effect_screening: Dict[str, TransitionScreening],
+    ) -> Dict[str, TransitionEffects]:
+        """Train decision trees for conditional effects using screening results.
+
+        Only processes attributes whose screening action is "dt". Pruned values
+        are excluded from the 2B DT training data.
+
+        Args:
+            preprocessed_log: Single-pass preprocessed log.
+            effect_screening: Screening results from screen_effects().
+
+        Returns:
+            Dict mapping transition name to TransitionEffects.
+        """
+        result: Dict[str, TransitionEffects] = {}
+
+        for act, t_scr in effect_screening.items():
+            matrix_built = False
+            X: pd.DataFrame = pd.DataFrame()
+            y_presence: Dict[str, pd.Series] = {}
+            y_value: Dict[str, pd.Series] = {}
+
+            effects: Dict[str, ConditionalEffect] = {}
+
+            for attr, attr_scr in t_scr.attributes.items():
+                p = attr_scr.presence_probability
+                possible_values = list(attr_scr.values.keys())
+
+                # --- 2A — appearance ---
+                app_guards: Optional[EffectGuards] = None
+                if attr_scr.appearance_action == "dt":
+                    if not matrix_built:
+                        X, y_presence, y_value = self._build_effect_matrix(
+                            preprocessed_log, act
+                        )
+                        matrix_built = True
+                    if attr not in y_presence or X.empty:
+                        app_status = "fallback"
+                        attr_scr.appearance_action = "fallback"
+                    else:
+                        app_guards, app_status = self._mine_appearance(
+                            X, y_presence[attr]
+                        )
+                        if app_status != "dt":
+                            attr_scr.appearance_action = app_status
+                else:
+                    app_status = attr_scr.appearance_action
+
+                # --- 2B — value ---
+                val_guards: Optional[EffectGuards] = None
+                if attr_scr.value_action == "dt":
+                    if not matrix_built:
+                        X, y_presence, y_value = self._build_effect_matrix(
+                            preprocessed_log, act
+                        )
+                        matrix_built = True
+                    if attr not in y_value or X.empty:
+                        val_status = "fallback"
+                        attr_scr.value_action = "fallback"
+                    else:
+                        active_vals = {
+                            str(v) for v, vs in attr_scr.values.items()
+                            if vs.status == "active"
+                        }
+                        val_guards, val_status = self._mine_value(
+                            X, y_value[attr],
+                            active_vals if active_vals else None,
+                        )
+                        if val_status != "dt":
+                            attr_scr.value_action = val_status
+                else:
+                    val_status = attr_scr.value_action
+
+                effects[attr] = ConditionalEffect(
+                    attribute=attr,
+                    presence_probability=round(p, 4),
+                    possible_values=possible_values,
+                    appearance=app_guards,
+                    appearance_status=app_status,
+                    value=val_guards,
+                    value_status=val_status,
+                )
+
+            if effects:
+                result[act] = TransitionEffects(
+                    transition_name=act,
+                    total_firings=t_scr.total_firings,
+                    effects=effects,
+                )
+
+        return result
+
+    # -------------------------------------------------------------------------
+    # Private: effect feature matrix
+    # -------------------------------------------------------------------------
+
+    def _build_effect_matrix(
+        self,
+        preprocessed_log: PreprocessedLog,
+        activity_name: str,
+    ) -> Tuple[pd.DataFrame, Dict[str, pd.Series], Dict[str, pd.Series]]:
+        """Build training data for all attribute effect analyses of one transition.
+
+        Each TransitionFiringData in transition_firings provides one row:
+        pre_state becomes the feature vector, changed_attrs determines
+        y_presence and y_value.
+
+        Args:
+            preprocessed_log: Single-pass preprocessed log.
+            activity_name: Sanitized activity name to look up.
+
+        Returns:
+            Tuple (X, y_presence, y_value):
+            - X: feature DataFrame (empty if no firings found).
+            - y_presence: dict attr → boolean Series.
+            - y_value: dict attr → value Series (pd.NA where not changed).
+        """
+        firings = preprocessed_log.transition_firings.get(activity_name, [])
+        if not firings:
+            return pd.DataFrame(), {}, {}
+
+        rows = [fd.pre_state for fd in firings]
+
+        all_attrs: Set[str] = set()
+        for fd in firings:
+            all_attrs.update(fd.changed_attrs.keys())
+
+        y_presence: Dict[str, pd.Series] = {}
+        y_value: Dict[str, pd.Series] = {}
+
+        for attr in all_attrs:
+            pres_list: List[bool] = []
+            val_list: List[Any] = []
+            for fd in firings:
+                if attr in fd.changed_attrs:
+                    pres_list.append(True)
+                    val_list.append(fd.changed_attrs[attr])
+                else:
+                    pres_list.append(False)
+                    val_list.append(pd.NA)
+            y_presence[attr] = pd.Series(pres_list, dtype=bool)
+            y_value[attr] = pd.Series(val_list)
+
+        return pd.DataFrame(rows), y_presence, y_value
+
+    # -------------------------------------------------------------------------
+    # Private: effect DT training
+    # -------------------------------------------------------------------------
+
+    def _mine_appearance(
+        self,
+        X: pd.DataFrame,
+        y_presence: pd.Series,
+    ) -> Tuple[Optional[EffectGuards], str]:
+        """Train a 2A (appearance) DT and extract SOP guards.
+
+        Target is binary: "appears" / "not_appears".
+
+        Args:
+            X: Feature DataFrame (all firings of the transition).
+            y_presence: Boolean Series aligned with X.
+
+        Returns:
+            Tuple (guards, status): EffectGuards or None, and status string.
+        """
+        y = y_presence.map({True: "appears", False: "not_appears"})
+        if y.nunique() < 2:
+            return None, "fallback"
+
+        raw_guards, accuracy = self._train_and_extract(X, y)
+
+        if accuracy < self.config.dt_min_accuracy:
+            logger.info(
+                "Appearance DT discarded: accuracy %.2f < threshold %.2f.",
+                accuracy, self.config.dt_min_accuracy,
+            )
+            return None, "fallback"
+
+        if not raw_guards or "appears" not in raw_guards:
+            logger.info("Appearance DT discarded: 'appears' class pruned away.")
+            return None, "fallback"
+
+        return (
+            EffectGuards(
+                subtype="appearance",
+                guards=raw_guards,
+                total_samples=len(y),
+                dt_accuracy=round(accuracy, 4),
+            ),
+            "dt",
+        )
+
+    def _mine_value(
+        self,
+        X: pd.DataFrame,
+        y_value: pd.Series,
+        active_values: Optional[Set[str]] = None,
+    ) -> Tuple[Optional[EffectGuards], str]:
+        """Train a 2B (value) DT and extract SOP guards.
+
+        Only rows where the attribute actually changed (non-NA y_value) are used.
+        If active_values is provided, rows whose value (as string) is not in the
+        set are excluded from training (pruned values).
+
+        Args:
+            X: Feature DataFrame (all firings of the transition).
+            y_value: Series aligned with X; pd.NA where unchanged.
+            active_values: If provided, only keep these values in training.
+
+        Returns:
+            Tuple (guards, status): EffectGuards or None, and status string.
+        """
+        mask = y_value.notna()
+        X_filtered = X.loc[mask].reset_index(drop=True)
+        y_filtered = y_value.loc[mask].reset_index(drop=True).astype(str)
+
+        if active_values is not None:
+            value_mask = y_filtered.isin(active_values)
+            X_filtered = X_filtered.loc[value_mask].reset_index(drop=True)
+            y_filtered = y_filtered.loc[value_mask].reset_index(drop=True)
+
+        if y_filtered.nunique() < 2:
+            return None, "insufficient"
+
+        raw_guards, accuracy = self._train_and_extract(X_filtered, y_filtered)
+
+        if accuracy < self.config.dt_min_accuracy:
+            logger.info(
+                "Value DT discarded: accuracy %.2f < threshold %.2f.",
+                accuracy, self.config.dt_min_accuracy,
+            )
+            return None, "fallback"
+
+        if not raw_guards:
+            logger.info("Value DT discarded: all leaves pruned away.")
+            return None, "fallback"
+
+        return (
+            EffectGuards(
+                subtype="value",
+                guards=raw_guards,
+                total_samples=int(mask.sum()),
+                dt_accuracy=round(accuracy, 4),
+            ),
+            "dt",
+        )

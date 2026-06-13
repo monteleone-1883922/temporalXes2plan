@@ -1,9 +1,11 @@
 from dataclasses import dataclass, field
 from collections import defaultdict
-from typing import Any, DefaultDict, Dict, List, Optional, Set
+from typing import Any, DefaultDict, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
+
+import core_utils as utils
 
 
 @dataclass
@@ -57,6 +59,57 @@ class PetriNetLog:
 
 
 @dataclass
+class TransitionFiringData:
+    """Preprocessed data for one firing of a labeled transition.
+
+    Produced by LogPreprocessor.preprocess() during a single pass over the
+    PetriNetLog.  Materialises the attribute state that was accumulated before
+    the transition fired (pre_state) and the attributes that actually changed
+    in this firing (changed_attrs).
+
+    Downstream consumers (ProbabilityEstimator, DecisionMiner) use these
+    pre-built snapshots instead of scanning the raw log themselves.
+
+    Attributes:
+        activity_name: Sanitized label of the transition that fired.
+        pre_state: Accumulated attribute state immediately before this firing.
+            Represents the "decision context" — what was known when the
+            transition was about to execute.  Keys are sanitized attribute
+            names; values are discretized when a Discretizer was provided.
+        changed_attrs: Attributes whose value in this step differs from
+            pre_state (or that appear for the first time in this execution).
+            Keys are sanitized attribute names; values are the new
+            (possibly discretized) values.
+        from_places: Input places that held a token when the transition fired.
+            Used to index XOR-split traversals.
+    """
+    activity_name: str
+    pre_state: Dict[str, Any]
+    changed_attrs: Dict[str, Any]
+    from_places: FrozenSet[PetriNet.Place]
+
+
+@dataclass
+class PreprocessedLog:
+    """Result of a single-pass preprocessing of a PetriNetLog.
+
+    Produced by LogPreprocessor.preprocess().  Both indexes below point to the
+    same TransitionFiringData objects — no data is duplicated.
+
+    Attributes:
+        transition_firings: Per-transition index.  Maps each sanitized activity
+            name to the list of TransitionFiringData for every firing of that
+            transition, ordered by appearance in the log.
+        xor_firings: Per-XOR-split-place index.  Maps each place name to the
+            list of TransitionFiringData for every traversal through that place
+            (i.e. every step whose from_places included the XOR-split place and
+            whose transition was one of the place's outgoing branches).
+    """
+    transition_firings: Dict[str, List[TransitionFiringData]]
+    xor_firings: Dict[str, List[TransitionFiringData]]
+
+
+@dataclass
 class XorSplitStats:
     """Branch probabilities and sample size for a single XOR-split decision point.
 
@@ -107,6 +160,72 @@ class XorSplitGuards:
 
 
 @dataclass
+class EffectGuards:
+    """Decision tree guards for one effect analysis in SOP (sum-of-products) form.
+
+    Produced by DecisionMiner for each (transition, attribute) pair that passes
+    the sample and accuracy thresholds.
+
+    subtype is 'appearance' for 2A analysis (does the attribute change?) or
+    'value' for 2B analysis (what value does it take?).
+
+    guards maps each outcome to a list of AND-clause lists, analogous to
+    XorSplitGuards:
+        2A example: {"appears":     [[Guard("risk", "high", False)], ...],
+                     "not_appears": [[Guard("risk", "low",  False)], ...]}
+        2B example: {"lte_6_0": [[Guard("admitted", None, False)], ...],
+                     "gte_6_0": [[Guard("admitted", None, True)],  ...]}
+    """
+    subtype: str
+    guards: Dict[str, List[List["Guard"]]]
+    total_samples: int
+    dt_accuracy: float
+
+
+@dataclass
+class ConditionalEffect:
+    """Conditional effect analysis for one (transition, attribute) pair.
+
+    Produced by DecisionMiner.mine_effects() for each attribute that is a
+    plausible effect target of a labeled transition.
+
+    appearance holds the 2A DT result (when does the attribute appear?).
+    value holds the 2B DT result (what value does it take?).
+    Both may be None; the corresponding status field explains why.
+
+    Status vocabulary (same for appearance_status and value_status):
+        "dt"            DT trained, accuracy ok, guards populated.
+        "deterministic" Screened out: always present (2A) or single value (2B).
+        "never"         Screened out: attribute never changes for this transition.
+        "insufficient"  Pre-check failed: too few samples to train.
+        "fallback"      DT trained but discarded (low accuracy or pruning).
+    """
+    attribute: str
+    presence_probability: float
+    possible_values: List[Any]
+
+    appearance: Optional["EffectGuards"]
+    appearance_status: str
+
+    value: Optional["EffectGuards"]
+    value_status: str
+
+
+@dataclass
+class TransitionEffects:
+    """All conditional effect analyses for one labeled transition.
+
+    Produced by DecisionMiner.mine_effects().
+
+    effects maps each analysed attribute name to its ConditionalEffect.
+    Attributes screened out as "never" are absent from the dict.
+    """
+    transition_name: str
+    total_firings: int
+    effects: Dict[str, ConditionalEffect]
+
+
+@dataclass
 class AttributeEffect:
     """Attribute change probabilities for a single non-tau transition.
 
@@ -116,6 +235,91 @@ class AttributeEffect:
     presence_probabilities: Dict[str, float]
     value_probabilities: Dict[str, Dict[Any, float]]
     total_firings: int
+
+
+# ---------------------------------------------------------------------------
+# Screening dataclasses — decisions made BEFORE DT training
+# ---------------------------------------------------------------------------
+
+@dataclass
+class XorBranchScreening:
+    """Screening result for one branch of an XOR-split place.
+
+    Attributes:
+        activity_name: Sanitized name of the branch transition.
+        probability: Observed firing probability from XorSplitStats.
+        status: "active" (kept for DT training), "pruned" (probability below
+            xor_prune_threshold), or "certain" (sole remaining active branch).
+    """
+    activity_name: str
+    probability: float
+    status: str
+
+
+@dataclass
+class XorSplitScreening:
+    """Screening result for one XOR-split place.
+
+    Attributes:
+        total_samples: Number of traversals through this XOR place.
+        action: "dt" (train decision tree), "deterministic" (single certain
+            branch), or "fallback" (insufficient samples or no active branches).
+        branches: Per-branch screening results keyed by activity name.
+    """
+    total_samples: int
+    action: str
+    branches: Dict[str, XorBranchScreening]
+
+
+@dataclass
+class EffectValueScreening:
+    """Screening result for one possible value of an attribute effect.
+
+    Attributes:
+        probability: Observed value probability from AttributeEffect.
+        status: "active" (kept for DT training), "pruned" (probability below
+            effect_value_prune_threshold), or "certain" (probability above
+            effect_value_certain_threshold).
+    """
+    probability: float
+    status: str
+
+
+@dataclass
+class EffectAttrScreening:
+    """Screening result for one attribute of a transition effect.
+
+    Attributes:
+        presence_probability: How often this attribute changes when the
+            transition fires.
+        appearance_action: What to do for 2A analysis: "dt", "deterministic",
+            "insufficient".
+        appearance_samples: Available samples for 2A DT training.
+        value_action: What to do for 2B analysis: "dt", "deterministic",
+            "insufficient".
+        value_samples: Available samples for 2B DT training.
+        values: Per-value screening results.
+    """
+    presence_probability: float
+    appearance_action: str
+    appearance_samples: int
+    value_action: str
+    value_samples: int
+    values: Dict[Any, "EffectValueScreening"]
+
+
+@dataclass
+class TransitionScreening:
+    """Screening result for all effect attributes of one labeled transition.
+
+    Attributes:
+        transition_name: Sanitized activity name.
+        total_firings: Total number of firings in the preprocessed log.
+        attributes: Per-attribute screening results.
+    """
+    transition_name: str
+    total_firings: int
+    attributes: Dict[str, EffectAttrScreening]
 
 
 @dataclass
@@ -142,6 +346,91 @@ class PetriNetModel:
     trans_outputs: Dict[Transition, Set[PetriNet.Place]]
     xor_splits: Dict[PetriNet.Place, List[Transition]]
     place_inputs: Dict[PetriNet.Place, List[Transition]]
+
+    def prune_transitions(
+        self, to_remove: Set[PetriNet.Transition]
+    ) -> "PetriNetModel":
+        """Remove transitions from the Petri net and rebuild all indexes.
+
+        Mutates the underlying PetriNet (transitions, arcs, places) and returns
+        a new PetriNetModel with consistent indexes.  The caller should discard
+        the old model after calling this method.
+
+        Args:
+            to_remove: Transitions to remove.
+
+        Returns:
+            New PetriNetModel with updated structure and indexes.
+        """
+        if not to_remove:
+            return self
+
+        for t in to_remove:
+            self.petrinet.transitions.discard(t)
+
+        arcs_to_remove = {
+            a for a in self.petrinet.arcs
+            if a.source in to_remove or a.target in to_remove
+        }
+        for a in arcs_to_remove:
+            self.petrinet.arcs.discard(a)
+
+        connected_places: Set[PetriNet.Place] = set()
+        for a in self.petrinet.arcs:
+            if isinstance(a.source, PetriNet.Place):
+                connected_places.add(a.source)
+            if isinstance(a.target, PetriNet.Place):
+                connected_places.add(a.target)
+        marking_places = set(self.initial_marking) | set(self.final_marking)
+        orphaned = self.petrinet.places - connected_places - marking_places
+        for p in orphaned:
+            self.petrinet.places.discard(p)
+
+        new_trans_inputs = {
+            t: places for t, places in self.trans_inputs.items()
+            if t not in to_remove
+        }
+        new_trans_outputs = {
+            t: places for t, places in self.trans_outputs.items()
+            if t not in to_remove
+        }
+
+        new_xor_splits: Dict[PetriNet.Place, List[Transition]] = {}
+        for place, transitions in self.xor_splits.items():
+            if place in orphaned:
+                continue
+            remaining = [t for t in transitions if t not in to_remove]
+            if len(remaining) > 1:
+                new_xor_splits[place] = remaining
+
+        new_place_inputs: Dict[PetriNet.Place, List[Transition]] = {}
+        for place, transitions in self.place_inputs.items():
+            if place in orphaned:
+                continue
+            remaining = [t for t in transitions if t not in to_remove]
+            if remaining:
+                new_place_inputs[place] = remaining
+
+        new_activities = {
+            utils.sanitize_name(t.label)
+            for t in self.petrinet.transitions if t.label
+        }
+        new_silent = {
+            t: name for t, name in self.silent_transitions.items()
+            if t not in to_remove
+        }
+
+        return PetriNetModel(
+            petrinet=self.petrinet,
+            initial_marking=self.initial_marking,
+            final_marking=self.final_marking,
+            activities=new_activities,
+            silent_transitions=new_silent,
+            trans_inputs=new_trans_inputs,
+            trans_outputs=new_trans_outputs,
+            xor_splits=new_xor_splits,
+            place_inputs=new_place_inputs,
+        )
 
 
 @dataclass
@@ -178,6 +467,18 @@ class AnalysisConfig:
     # majority_only | weighted | pruned_weighted
     xor_statistical_mode: str = "pruned_weighted"
     xor_prune_threshold: float = 0.10
+
+    # --- Conditional effect screening ---
+    # Attributes with presence_probability below never_threshold are not effects.
+    # Attributes above always_threshold are always present: skip 2A, only run 2B.
+    effect_never_threshold: float = 0.05
+    effect_always_threshold: float = 0.95
+
+    # --- Effect value screening ---
+    # Values with probability below prune_threshold are excluded from DT training.
+    # Values above certain_threshold are treated as always-this-value.
+    effect_value_prune_threshold: float = 0.10
+    effect_value_certain_threshold: float = 0.95
 
     # --- Conditional effect statistical fallback (Level 2) ---
     # appearance (2A): threshold | always | duplicate
