@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from collections import defaultdict
 from typing import Any, DefaultDict, Dict, FrozenSet, List, Optional, Set, Tuple
 
@@ -241,8 +241,36 @@ class AttributeEffect:
 # Screening dataclasses — decisions made BEFORE DT training
 # ---------------------------------------------------------------------------
 
+class ScreeningBase:
+    """Mixin for screening dataclasses that need JSON serialization.
+
+    Provides to_dict() which recursively converts the dataclass (and any
+    nested ScreeningBase instances or plain dicts) to a JSON-serializable
+    structure.  Non-string dict keys are coerced to strings because JSON
+    requires string keys (EffectAttrScreening.values uses Dict[Any, ...]).
+    """
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert this screening object to a JSON-serializable dict."""
+        return _screening_to_dict(self)
+
+
+def _screening_to_dict(obj: Any) -> Any:
+    """Recursively convert a ScreeningBase dataclass to a serializable form."""
+    if isinstance(obj, ScreeningBase):
+        return {
+            f.name: _screening_to_dict(getattr(obj, f.name))
+            for f in dataclass_fields(obj)
+        }
+    if isinstance(obj, dict):
+        return {str(k): _screening_to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_screening_to_dict(v) for v in obj]
+    return obj
+
+
 @dataclass
-class XorBranchScreening:
+class XorBranchScreening(ScreeningBase):
     """Screening result for one branch of an XOR-split place.
 
     Attributes:
@@ -257,7 +285,7 @@ class XorBranchScreening:
 
 
 @dataclass
-class XorSplitScreening:
+class XorSplitScreening(ScreeningBase):
     """Screening result for one XOR-split place.
 
     Attributes:
@@ -272,7 +300,7 @@ class XorSplitScreening:
 
 
 @dataclass
-class EffectValueScreening:
+class EffectValueScreening(ScreeningBase):
     """Screening result for one possible value of an attribute effect.
 
     Attributes:
@@ -286,7 +314,7 @@ class EffectValueScreening:
 
 
 @dataclass
-class EffectAttrScreening:
+class EffectAttrScreening(ScreeningBase):
     """Screening result for one attribute of a transition effect.
 
     Attributes:
@@ -309,7 +337,7 @@ class EffectAttrScreening:
 
 
 @dataclass
-class TransitionScreening:
+class TransitionScreening(ScreeningBase):
     """Screening result for all effect attributes of one labeled transition.
 
     Attributes:
