@@ -27,9 +27,13 @@ from pm4py import PetriNet
 
 import core_utils as utils
 from models import (
+    ActionDurationStats,
     AnalysisConfig,
+    AttributeCatalogEntry,
     AttributeEffect,
+    EffectGuards,
     EffectInfo,
+    Guard,
     ParseResult,
     PetriNetModel,
     PreprocessedLog,
@@ -48,6 +52,7 @@ from .model_discoverer import ModelDiscoverer
 from .petri_net_log_builder import PetriNetLogBuilder
 from .probability_estimator import ProbabilityEstimator
 from .decision_mining import DecisionMiner
+from .temporal_extractor import ExternalDuration, TemporalExtractor
 
 SEED = 42
 random.seed(SEED)
@@ -73,6 +78,7 @@ class Parser:
         discovery_algorithm: str = 'inductive',
         use_activity_classifier: bool = False,
         config: Optional[AnalysisConfig] = None,
+        external_durations: Optional[Dict[str, ExternalDuration]] = None,
     ) -> None:
         """Run the full analysis pipeline up to and including DT mining.
 
@@ -85,6 +91,9 @@ class Parser:
             use_activity_classifier: Combine concept:name + lifecycle:transition
                 as activity label when True.
             config: Analysis configuration; defaults to AnalysisConfig() if None.
+            external_durations: Optional user-supplied duration bounds per
+                activity.  These take priority over log-derived estimates.
+                Activities not listed fall back to lifecycle or inter-event data.
         """
         self.config = config or AnalysisConfig()
 
@@ -134,6 +143,18 @@ class Parser:
         )
         self.pn_log = builder.build(self.log)
         logger.info("Token replay complete: %d traces accepted", len(self.pn_log.executions))
+
+        # --- Step 4.5: duration extraction ---
+        logger.info("Starting duration extraction")
+        self.duration_stats: Dict[str, ActionDurationStats] = TemporalExtractor().extract(
+            external_durations=external_durations,
+            fallback_to_inter_event=True,
+            petri_net_log=self.pn_log,
+        )
+        logger.info(
+            "Duration extraction complete: %d activities with duration data",
+            len(self.duration_stats),
+        )
 
         # --- Step 5: single-pass log preprocessing ---
         logger.info("Starting log preprocessing")
@@ -529,6 +550,7 @@ class Parser:
                 total_firings=attr_effects.total_firings if attr_effects else 0,
                 xor_branch=self._xor_branch_info.get(act),
                 effects=self._transition_effect_info.get(act, {}),
+                duration=self.duration_stats.get(act),
             )
 
         # Start / end place names from markings (single-place markings assumed)
@@ -542,7 +564,68 @@ class Parser:
             transitions=transitions,
             start_place=start_place,
             end_place=end_place,
+            attribute_catalog=self._build_attribute_catalog(),
         )
+
+
+    def _build_attribute_catalog(self) -> Dict[str, AttributeCatalogEntry]:
+        """Build the filtered attribute catalog from surviving effects and guards.
+
+        Collects every attribute (and its observed/guard values) that appears in:
+          - EffectInfo.value_probabilities  (values a transition can write)
+          - appearance_guards / value_guards (DT conditions on effects)
+          - XorBranchInfo.guards            (DT conditions on XOR routing)
+
+        Attributes and values pruned or filtered out during the cascade are
+        absent.  Boolean guard conditions (Guard.value is None) contribute the
+        attribute name but no explicit value.
+
+        Returns:
+            Dict mapping sanitized attribute name to AttributeCatalogEntry.
+        """
+        attr_values: Dict[str, Set[Any]] = {}
+
+        def _touch(attr: str) -> None:
+            if attr not in attr_values:
+                attr_values[attr] = set()
+
+        def _add_value(attr: str, value: Any) -> None:
+            _touch(attr)
+            if value is not None:
+                attr_values[attr].add(value)
+
+        def _scan_sop(sop: List[List[Guard]]) -> None:
+            for path in sop:
+                for g in path:
+                    _add_value(g.attribute, g.value)
+
+        def _scan_effect_guards(eg: Optional[EffectGuards]) -> None:
+            if eg is None:
+                return
+            for sop in eg.guards.values():
+                _scan_sop(sop)
+
+        # Collect from effect info (already filtered by _filter_effects)
+        for attr_infos in self._transition_effect_info.values():
+            for attr, eff in attr_infos.items():
+                _touch(attr)
+                for v in eff.value_probabilities:
+                    _add_value(attr, v)
+                _scan_effect_guards(eff.appearance_guards)
+                _scan_effect_guards(eff.value_guards)
+
+        # Collect from XOR branch guards (already filtered by _filter_xor_splits)
+        for branch_info in self._xor_branch_info.values():
+            if branch_info.guards is not None:
+                _scan_sop(branch_info.guards)
+
+        return {
+            attr: AttributeCatalogEntry(
+                attribute_type=self.attribute_categories.get(attr, 'categorical'),
+                possible_values=values,
+            )
+            for attr, values in attr_values.items()
+        }
 
 
 # ---------------------------------------------------------------------------

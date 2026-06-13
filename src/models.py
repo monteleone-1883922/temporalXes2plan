@@ -548,6 +548,58 @@ class AnalysisConfig:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class ActionDurationStats:
+    """Duration statistics for a single action, suitable for PDDL duration constraints.
+
+    For log-derived sources ('lifecycle', 'inter_event') effective_min and
+    effective_max are:
+        effective_min = max(observed_min, mean - std_dev)
+        effective_max = min(observed_max, mean + std_dev)
+
+    For externally supplied data ('external') effective_min/max are set
+    directly from user-provided bounds; all statistical fields remain None.
+
+    Attributes:
+        effective_min: Lower bound for the PDDL duration inequality (seconds).
+        effective_max: Upper bound for the PDDL duration inequality (seconds).
+        source: Origin — 'lifecycle', 'inter_event', or 'external'.
+        mean: Mean duration in seconds (log-derived only).
+        std_dev: Standard deviation in seconds (log-derived only).
+        observed_min: Smallest raw duration observed in the log (log-derived only).
+        observed_max: Largest raw duration observed in the log (log-derived only).
+        count: Number of observations used to compute the statistics (log-derived only).
+    """
+    effective_min: float
+    effective_max: float
+    source: str
+    mean: Optional[float] = None
+    std_dev: Optional[float] = None
+    observed_min: Optional[float] = None
+    observed_max: Optional[float] = None
+    count: Optional[int] = None
+
+
+@dataclass
+class AttributeCatalogEntry:
+    """Type and active value domain for one attribute in the final ParseResult.
+
+    Only attributes referenced by at least one EffectInfo or XOR guard survive
+    into this catalog — attributes filtered out during the cascade are absent.
+
+    For discretized numerical attributes possible_values contains interval
+    labels (e.g. 'lte_10_0', 'gte_10_0_lte_97_5') because that is the
+    representation the encoder operates on.  Boolean attributes carry an
+    empty set: their guards use the negated flag rather than explicit values.
+
+    Attributes:
+        attribute_type: One of 'boolean', 'numerical', 'categorical'.
+        possible_values: Set of values that appear in effects or guard conditions.
+    """
+    attribute_type: str
+    possible_values: Set[Any]
+
+
+@dataclass
 class XorBranchInfo:
     """XOR routing information for a single branch transition.
 
@@ -617,6 +669,7 @@ class TransitionInfo:
     total_firings: int
     xor_branch: Optional[XorBranchInfo]
     effects: Dict[str, EffectInfo]
+    duration: Optional[ActionDurationStats] = None
 
 
 @dataclass
@@ -636,6 +689,9 @@ class ParseResult:
         transitions: Encoder-ready info for every labeled transition.
         start_place: Name of the initial marking place.
         end_place: Name of the final marking place.
+        attribute_catalog: Attributes that survive into the final output, with
+            their type and the set of values referenced by effects or guards.
+            Attributes filtered out during the cascade are absent.
     """
     petri_net_model: PetriNetModel
     place_predecessors: Dict[str, List[str]]
@@ -643,3 +699,4 @@ class ParseResult:
     transitions: Dict[str, TransitionInfo]
     start_place: str
     end_place: str
+    attribute_catalog: Dict[str, AttributeCatalogEntry]

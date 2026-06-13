@@ -20,12 +20,11 @@ from pm4py import PetriNet, Marking
 
 from tests.helpers import make_event, make_trace, make_log, _transition, ts
 from parsing.temporal_extractor import (
-    ActionDurationStats,
     ExternalDuration,
     TemporalExtractor,
     _stats_to_duration,
 )
-from models import FiringStep, TraceExecution, PetriNetLog
+from models import ActionDurationStats, FiringStep, TraceExecution, PetriNetLog
 
 
 def _step_with_duration(activity: str, duration: float) -> FiringStep:

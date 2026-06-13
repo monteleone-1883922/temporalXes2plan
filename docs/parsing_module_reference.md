@@ -19,25 +19,84 @@ XES file
    ▼
 Parser.__init__()   ← single public entry point
    │
-   ├─ Step 1  LogProcessor          load + lifecycle filter + variant filter + 80/20 split
-   ├─ Step 2  ModelDiscoverer       Petri net discovery + structural analysis
-   ├─ Step 3  Discretizer           k-means++ boundaries for numeric attributes
-   ├─ Step 4  PetriNetLogBuilder    token replay → PetriNetLog
-   ├─ Step 5  LogPreprocessor       single-pass → PreprocessedLog (pre_state, changed_attrs)
-   ├─ Step 6  ProbabilityEstimator  XOR branch probs + attribute effect probs
-   ├─ Step 7  DecisionMiner         screen_xor_splits() → XorSplitScreening
-   ├─ Step 8  DecisionMiner         screen_effects()    → TransitionScreening
-   ├─ Step 9  DecisionMiner         mine_xor_splits()   → XorSplitGuards (DT)
-   ├─ Step 10 DecisionMiner         mine_effects()      → TransitionEffects (DT)
+   ├─ Step 1    LogProcessor          load + lifecycle filter + variant filter + 80/20 split
+   ├─ Step 2    ModelDiscoverer       Petri net discovery + structural analysis
+   ├─ Step 3    Discretizer           k-means++ boundaries for numeric attributes
+   ├─ Step 4    PetriNetLogBuilder    token replay → PetriNetLog
+   ├─ Step 4.5  TemporalExtractor     duration stats per activity → duration_stats
+   ├─ Step 5    LogPreprocessor       single-pass → PreprocessedLog (pre_state, changed_attrs)
+   ├─ Step 6    ProbabilityEstimator  XOR branch probs + attribute effect probs
+   ├─ Step 7    DecisionMiner         screen_xor_splits() → XorSplitScreening
+   ├─ Step 8    DecisionMiner         screen_effects()    → TransitionScreening
+   ├─ Step 9    DecisionMiner         mine_xor_splits()   → XorSplitGuards (DT)
+   ├─ Step 10   DecisionMiner         mine_effects()      → TransitionEffects (DT)
    │
-   ├─ _save_snapshot()       write PNML + JSON to snapshot_dir
-   ├─ _filter_xor_splits()   prune Petri net branches; build XorBranchInfo
-   ├─ _filter_effects()      build EffectInfo per (transition, attribute)
-   └─ _build_parse_result()  assemble ParseResult
+   ├─ _save_snapshot()          write PNML + JSON to snapshot_dir
+   ├─ _filter_xor_splits()      prune Petri net branches; build XorBranchInfo
+   ├─ _filter_effects()         build EffectInfo per (transition, attribute)
+   └─ _build_parse_result()     assemble ParseResult
+         └─ _build_attribute_catalog()  filter attribute→type→values from effects+guards
 ```
 
 All modules below the `Parser` facade are internal to the pipeline.
 Consumers interact only with `Parser` and its `parse_result` attribute.
+
+---
+
+## Key encoder-ready models (`models.py`)
+
+### `ActionDurationStats`
+
+Duration statistics for one activity, produced by `TemporalExtractor` and
+attached to `TransitionInfo.duration`.
+
+| Field | Type | Description |
+|---|---|---|
+| `effective_min` | `float` | Lower bound for PDDL `duration >=` (seconds) |
+| `effective_max` | `float` | Upper bound for PDDL `duration <=` (seconds) |
+| `source` | `str` | `'lifecycle'`, `'inter_event'`, or `'external'` |
+| `mean` | `Optional[float]` | Mean duration (log-derived only) |
+| `std_dev` | `Optional[float]` | Std deviation (log-derived only) |
+| `observed_min` | `Optional[float]` | Smallest observation (log-derived only) |
+| `observed_max` | `Optional[float]` | Largest observation (log-derived only) |
+| `count` | `Optional[int]` | Number of observations (log-derived only) |
+
+Formula for log-derived sources:
+```
+effective_min = max(observed_min, mean - std_dev)
+effective_max = min(observed_max, mean + std_dev)
+```
+
+### `AttributeCatalogEntry`
+
+Type and active value domain for one attribute in the final `ParseResult`.
+Only attributes referenced in at least one surviving `EffectInfo` or guard
+condition are present.
+
+| Field | Type | Description |
+|---|---|---|
+| `attribute_type` | `str` | `'boolean'`, `'numerical'`, or `'categorical'` |
+| `possible_values` | `Set[Any]` | Values appearing in effects or guards; empty for booleans |
+
+For discretized numeric attributes `possible_values` contains interval labels
+(e.g. `'lte_10_0'`), not raw floats, because that is the representation the
+encoder operates on.
+
+### `TransitionInfo` (updated)
+
+Added field:
+
+| Field | Type | Description |
+|---|---|---|
+| `duration` | `Optional[ActionDurationStats]` | Duration statistics; `None` if no data available |
+
+### `ParseResult` (updated)
+
+Added field:
+
+| Field | Type | Description |
+|---|---|---|
+| `attribute_catalog` | `Dict[str, AttributeCatalogEntry]` | Filtered attribute registry from surviving effects and guards |
 
 ---
 
@@ -58,8 +117,13 @@ Parser(
     discovery_algorithm: str = 'inductive',   # 'alpha' | 'inductive' | 'heuristics' | 'ilp'
     use_activity_classifier: bool = False,
     config: Optional[AnalysisConfig] = None,
+    external_durations: Optional[Dict[str, ExternalDuration]] = None,
 )
 ```
+
+`external_durations` allows supplying user-provided `min/max` duration bounds per
+activity.  These take priority over both lifecycle and inter-event log-derived estimates.
+Activities not listed fall back to log-derived data automatically.
 
 **Key intermediate attributes** (available after `__init__` completes):
 
@@ -79,6 +143,7 @@ Parser(
 | `effect_screening` | `Dict[str, TransitionScreening]` | DecisionMiner |
 | `xor_guards` | `Dict[str, XorSplitGuards]` | DecisionMiner |
 | `transition_effects` | `Dict[str, TransitionEffects]` | DecisionMiner |
+| `duration_stats` | `Dict[str, ActionDurationStats]` | TemporalExtractor |
 | `parse_result` | `ParseResult` | `_build_parse_result()` |
 
 **Private methods:**
@@ -91,6 +156,7 @@ Parser(
 | `_apply_deterministic()` | Cascade level 1 — single certain branch |
 | `_apply_fallback()` | Cascade level 2/3 — statistical fallback |
 | `_filter_effects()` | Build `_transition_effect_info` from screening results |
+| `_build_attribute_catalog()` | Collect attributes+values from surviving effects and guards |
 | `_build_parse_result()` | Assemble `ParseResult` from pruned net + info maps |
 
 ### XOR cascade levels
@@ -550,12 +616,16 @@ Activities whose *all* leaves are pruned are handled by
 
 ---
 
-## Independent module — `temporal_extractor.py`
+## Step 4.5 — `temporal_extractor.py`
 
 ### `class TemporalExtractor`
 
-Extracts action duration statistics for durative PDDL actions. **Not** called
-by `Parser.__init__()`; used separately when temporal planning is required.
+Extracts action duration statistics for durative PDDL actions.
+Called by `Parser.__init__()` after token replay (step 4), before log
+preprocessing (step 5), because it needs only `pn_log`.
+
+`ActionDurationStats` is defined in `models.py` and imported here; it is
+the canonical output type shared with `TransitionInfo.duration`.
 
 **Three extraction strategies:**
 
@@ -596,6 +666,8 @@ Falls back to `(observed_min, observed_max)` if `effective_min > effective_max`.
 | Test file | Scope | Strategy |
 |---|---|---|
 | `test_parser.py` | `Parser` integration | Module-scoped fixture; 120-trace synthetic log |
+| `test_parser.py::TestDurationInfo` | `TransitionInfo.duration` | Integration: checks field types, effective bounds, sources |
+| `test_parser.py::TestAttributeCatalog` | `ParseResult.attribute_catalog` | Integration: checks completeness vs effects and guards |
 | `test_parser.py::TestFilterEffectsLevel3` | `_filter_effects` | Unit tests via `object.__new__(Parser)` stub |
 | `test_decision_mining.py` | `DecisionMiner` (all methods) | Synthetic `PreprocessedLog` / `TransitionFiringData` |
 | `test_discretizer.py` | `Discretizer.fit` + `transform_value` | Synthetic pm4py `EventLog` objects in-memory |

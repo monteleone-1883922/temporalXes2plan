@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 import core_utils as utils
-from models import PetriNetLog
+from models import ActionDurationStats, PetriNetLog
 
 logger = utils.get_logger(__name__)
 
@@ -48,40 +48,6 @@ class ExternalDuration:
                 f"min_duration ({self.min_duration}) must be <= max_duration ({self.max_duration})"
             )
 
-
-@dataclass
-class ActionDurationStats:
-    """
-    Unified duration statistics for a single action, suitable for generating
-    PDDL durative-action duration constraints.
-
-    For data derived from the log (source 'lifecycle' or 'inter_event'),
-    effective_min and effective_max are computed as:
-        effective_min = max(observed_min, mean - std_dev)
-        effective_max = min(observed_max, mean + std_dev)
-
-    For externally supplied data (source 'external'), effective_min and
-    effective_max are set directly from the user-provided bounds; all
-    statistical fields remain None.
-
-    Attributes:
-        effective_min: Lower bound for the PDDL duration inequality (seconds).
-        effective_max: Upper bound for the PDDL duration inequality (seconds).
-        source: Origin of the data — 'lifecycle', 'inter_event', or 'external'.
-        mean: Mean duration in seconds (log-derived sources only).
-        std_dev: Standard deviation in seconds (log-derived sources only).
-        observed_min: Smallest raw duration observed in the log (log-derived only).
-        observed_max: Largest raw duration observed in the log (log-derived only).
-        count: Number of observations used to compute the statistics (log-derived only).
-    """
-    effective_min: float
-    effective_max: float
-    source: str
-    mean: Optional[float] = None
-    std_dev: Optional[float] = None
-    observed_min: Optional[float] = None
-    observed_max: Optional[float] = None
-    count: Optional[int] = None
 
 
 def _stats_to_duration(
