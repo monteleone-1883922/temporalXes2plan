@@ -223,3 +223,40 @@ def build_and_net(
     }
     all_places = {p_in} | set(branch_places) | set(out_places)
     return arcs, all_places, [t_src, *branch_ts], {}
+
+
+def build_and_join_net(
+    branch_names: List[str],
+    join_name: str,
+) -> Tuple[Set[PetriNet.Arc], Set[PetriNet.Place], List[PetriNet.Transition], Dict]:
+    """
+    Build an AND-join net: N independent branch transitions each write to their own
+    place, and a single join transition consumes from all N places simultaneously.
+
+        p_in_B -> t_B -> p_out_B ->
+        p_in_C -> t_C -> p_out_C -> t_join -> p_final
+
+    t_join has multiple incoming places (one per branch), making it an AND-join.
+    identify_and_joins() should return {join_name: [branch_names...]}.
+
+    Args:
+        branch_names: Activity names for the parallel branch transitions.
+        join_name: Activity name for the AND-join transition.
+
+    Returns:
+        Tuple of (arcs, places, [*branch_ts, t_join], silent_transitions={}).
+    """
+    branch_ts = [_transition(f"t_{n}", n) for n in branch_names]
+    in_places = [_place(f"p_in_{n}") for n in branch_names]
+    out_places = [_place(f"p_out_{n}") for n in branch_names]
+    t_join = _transition(f"t_{join_name}", join_name)
+    p_final = _place("p_final")
+
+    arcs: Set[PetriNet.Arc] = {
+        *[_arc(ip, bt) for ip, bt in zip(in_places, branch_ts)],
+        *[_arc(bt, op) for bt, op in zip(branch_ts, out_places)],
+        *[_arc(op, t_join) for op in out_places],
+        _arc(t_join, p_final),
+    }
+    all_places = set(in_places) | set(out_places) | {p_final}
+    return arcs, all_places, [*branch_ts, t_join], {}
