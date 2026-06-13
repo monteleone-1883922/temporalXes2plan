@@ -503,3 +503,109 @@ class AnalysisConfig:
 
     # --- Logging ---
     log_removed_effects: bool = True
+
+    # --- Snapshot output ---
+    # Directory where pre-pruning snapshots (PNML + JSON) are written.
+    snapshot_dir: str = "output/snapshots"
+
+
+# ---------------------------------------------------------------------------
+# Encoder-ready output dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class XorBranchInfo:
+    """XOR routing information for a single branch transition.
+
+    Attached to TransitionInfo when the transition is one of the branches of
+    an XOR split.  All fields concern this specific branch only; the cascade
+    level and sample count refer to the split point as a whole.
+
+    Attributes:
+        probability: Observed firing probability of this branch in the log.
+        total_samples: Total traversal count at the XOR split place.
+        cascade_level: 1 = DT guards available, 2 = statistical fallback,
+            3 = no data (all branches kept with equal cost).
+        guards: DT conditions for THIS branch in SOP form (List[List[Guard]]).
+            None when cascade_level > 1.
+    """
+    probability: float
+    total_samples: int
+    cascade_level: int
+    guards: Optional[List[List[Guard]]]
+
+
+@dataclass
+class EffectInfo:
+    """Encoder-ready conditional effect info for one (transition, attribute) pair.
+
+    Produced by Parser after applying the full cascade (DT → statistical → default).
+    Both appearance and value sides carry a cascade level and optional DT guards.
+
+    Attributes:
+        attribute: Sanitized attribute name.
+        presence_probability: How often this attribute changes when the transition fires.
+        appearance_level: 1=DT, 2=statistical fallback, 3=effect removed.
+        appearance_guards: DT guards for appearance (2A); None if level > 1.
+        value_probabilities: Observed probability of each active value (pruned values excluded).
+        value_level: 1=DT, 2=statistical fallback, 3=effect removed.
+        value_guards: DT guards for value (2B); None if level > 1.
+    """
+    attribute: str
+    presence_probability: float
+    appearance_level: int
+    appearance_guards: Optional[EffectGuards]
+    value_probabilities: Dict[Any, float]
+    value_level: int
+    value_guards: Optional[EffectGuards]
+
+
+@dataclass
+class TransitionInfo:
+    """Encoder-ready summary of one labeled transition.
+
+    Aggregates structural (input places), statistical (firings), XOR routing,
+    and conditional effect information into a single encoder-facing object.
+
+    Attributes:
+        activity_name: Sanitized activity name.
+        input_places: Names of the Petri net places that must hold a token to
+            enable this transition (direct structural predecessors).
+        total_firings: Number of times this transition fired in the log.
+        xor_branch: XOR routing info if this transition is a branch of an XOR
+            split; None otherwise.
+        effects: Encoder-ready conditional effects keyed by attribute name.
+            Attributes screened as "never" and effects at cascade level 3 are
+            excluded.
+    """
+    activity_name: str
+    input_places: List[str]
+    total_firings: int
+    xor_branch: Optional[XorBranchInfo]
+    effects: Dict[str, EffectInfo]
+
+
+@dataclass
+class ParseResult:
+    """Complete encoder-ready output of the XES parsing pipeline.
+
+    Produced by Parser after Petri net discovery, log preprocessing, decision
+    mining, and post-pruning cleanup.  All structures reflect the pruned net —
+    removed branches and effects are absent.
+
+    Attributes:
+        petri_net_model: Petri net model after pruning (consistent indexes).
+        place_predecessors: For each place, the transitions whose output arcs
+            lead into it (Trans→Place arcs).  Derived from place_inputs.
+        transition_predecessors: For each transition, the places that must hold
+            a token to enable it (Place→Trans arcs).  Derived from trans_inputs.
+        transitions: Encoder-ready info for every labeled transition.
+        start_place: Name of the initial marking place.
+        end_place: Name of the final marking place.
+    """
+    petri_net_model: PetriNetModel
+    place_predecessors: Dict[str, List[str]]
+    transition_predecessors: Dict[str, List[str]]
+    transitions: Dict[str, TransitionInfo]
+    start_place: str
+    end_place: str
