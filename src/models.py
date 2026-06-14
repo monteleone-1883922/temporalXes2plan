@@ -514,6 +514,15 @@ class AnalysisConfig:
     effect_value_prune_threshold: float = 0.10
     effect_value_certain_threshold: float = 0.95
 
+    # --- Effect co-occurrence classification ---
+    # Pairs with joint probability >= related_effect_prob are classified as
+    # "related" (always appear together in the same firing).
+    # Pairs with joint probability <= incompatible_effect_prob are classified as
+    # "incompatible" (never appear together in the same firing).
+    # Pairs in between carry no structural constraint.
+    related_effect_prob: float = 0.9
+    incompatible_effect_prob: float = 0.05
+
     # --- Conditional effect statistical fallback (Level 2) ---
     # appearance (2A): threshold | always | duplicate
     effect_appearance_mode: str = "duplicate"
@@ -670,7 +679,8 @@ class TransitionInfo:
     xor_branch: Optional[XorBranchInfo]
     effects: Dict[str, EffectInfo]
     duration: Optional[ActionDurationStats] = None
-    effect_joint_probability: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    related_effects: Set[FrozenSet[str]] = field(default_factory=set)
+    incompatible_effects: Set[FrozenSet[str]] = field(default_factory=set)
 
 
 @dataclass

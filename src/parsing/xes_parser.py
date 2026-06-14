@@ -165,8 +165,10 @@ class Parser:
         ).preprocess(self.pn_log, pnm.xor_splits)
         logger.info("Log preprocessing complete")
 
-        # --- Step 5b: effect co-occurrence analysis ---
-        self._effect_joint_prob = EffectCorrelationAnalyzer().compute(self.preprocessed_log)
+        # --- Step 5b: effect co-occurrence classification ---
+        self._effect_cooccurrence = EffectCorrelationAnalyzer().analyze(
+            self.preprocessed_log, self.config
+        )
 
         # --- Step 6: probability estimation ---
         logger.info("Starting probability estimation")
@@ -548,6 +550,7 @@ class Parser:
                 continue
             act = utils.sanitize_name(t.label)
             attr_effects = self.attribute_effects.get(act)
+            cooccurrence = self._effect_cooccurrence.get(act, (set(), set()))
             transitions[act] = TransitionInfo(
                 activity_name=act,
                 input_places=[p.name for p in input_places],
@@ -555,7 +558,8 @@ class Parser:
                 xor_branch=self._xor_branch_info.get(act),
                 effects=self._transition_effect_info.get(act, {}),
                 duration=self.duration_stats.get(act),
-                effect_joint_probability=self._effect_joint_prob.get(act, {}),
+                related_effects=cooccurrence[0],
+                incompatible_effects=cooccurrence[1],
             )
 
         # Start / end place names from markings (single-place markings assumed)
