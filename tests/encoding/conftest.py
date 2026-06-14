@@ -8,6 +8,16 @@ from models import (
     PetriNetModel, TransitionInfo, XorBranchInfo,
 )
 
+_APPEARANCE_LEVEL2_EFFECT = EffectInfo(
+    attribute="diagnosis",
+    presence_probability=0.7,
+    appearance_level=2,
+    appearance_guards=None,
+    value_probabilities={"flu": 0.6, "cold": 0.4},
+    value_level=2,
+    value_guards=None,
+)
+
 
 def _arc(src, tgt):
     return PetriNet.Arc(src, tgt)
@@ -601,4 +611,75 @@ def xor_parse_result_no_guards(xor_net):
         end_place="p_end_left",
         attribute_catalog={},
         negated_attributes=set(),
+    )
+
+
+@pytest.fixture
+def xor_parse_result_with_tau(xor_net):
+    """ParseResult already post-injection: cascade_level=2 branches with
+    appearance_level=2 effects have a virtual xor_tau_ interposed.
+
+    Simulates what _inject_xor_taus() produces in the real parser:
+      - xor_tau_left_branch: cascade_level=2, no effects, precond=(marked p_xor)
+      - left_branch: xor_branch=None, precond=(marked xor_tau_left_branch), effects
+      - right_branch: cascade_level=2, no effects (no injection needed)
+    """
+    catalog = {
+        "diagnosis": AttributeCatalogEntry(
+            attribute_type="categorical",
+            possible_values={"flu", "cold"},
+        ),
+    }
+    return ParseResult(
+        petri_net_model=xor_net,
+        place_predecessors={
+            "p_xor": ["source"],
+            "p_end_left": ["left_branch"],
+            "p_end_right": ["right_branch"],
+        },
+        transition_predecessors={
+            "source": ["p_start"],
+            "xor_tau_left_branch": ["p_xor"],
+            "left_branch": ["xor_tau_left_branch"],
+            "right_branch": ["p_xor"],
+        },
+        transitions={
+            "source": TransitionInfo("source", ["p_start"], 100, None, {}),
+            "xor_tau_left_branch": TransitionInfo(
+                activity_name="xor_tau_left_branch",
+                input_places=["p_xor"],
+                total_firings=60,
+                xor_branch=XorBranchInfo(
+                    probability=0.6,
+                    total_samples=100,
+                    cascade_level=2,
+                    guards=None,
+                ),
+                effects={},
+            ),
+            "left_branch": TransitionInfo(
+                activity_name="left_branch",
+                input_places=["xor_tau_left_branch"],
+                total_firings=60,
+                xor_branch=None,
+                effects={"diagnosis": _APPEARANCE_LEVEL2_EFFECT},
+            ),
+            "right_branch": TransitionInfo(
+                activity_name="right_branch",
+                input_places=["p_xor"],
+                total_firings=40,
+                xor_branch=XorBranchInfo(
+                    probability=0.4,
+                    total_samples=100,
+                    cascade_level=2,
+                    guards=None,
+                ),
+                effects={},
+            ),
+        },
+        start_place="p_start",
+        end_place="p_end_left",
+        attribute_catalog=catalog,
+        negated_attributes=set(),
+        xor_virtual_taus={"xor_tau_left_branch"},
     )

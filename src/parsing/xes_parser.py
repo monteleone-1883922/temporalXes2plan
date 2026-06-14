@@ -557,6 +557,8 @@ class Parser:
         start_place = next(iter(pnm.initial_marking)).name
         end_place = next(iter(pnm.final_marking)).name
 
+        xor_virtual_taus = self._inject_xor_taus(transitions, transition_predecessors)
+
         return ParseResult(
             petri_net_model=pnm,
             place_predecessors=place_predecessors,
@@ -566,8 +568,65 @@ class Parser:
             end_place=end_place,
             attribute_catalog=self._build_attribute_catalog(),
             negated_attributes=self._collect_negated_attributes(),
+            xor_virtual_taus=xor_virtual_taus,
         )
 
+
+    def _inject_xor_taus(
+        self,
+        transitions: Dict[str, TransitionInfo],
+        transition_predecessors: Dict[str, List[str]],
+    ) -> Set[str]:
+        """Inject virtual tau transitions for XOR cascade-level-2 branches that
+        also carry appearance-level-2 effects.
+
+        When both XOR-branch cost and effect-appearance cost apply to the same
+        transition, they would conflict if stored on a single action.  A virtual
+        tau is interposed to carry only the XOR cost, freeing the real transition
+        to carry only the effect costs.
+
+        The tau inherits the original transition's XOR branch info (so
+        XorBranchProcessor assigns the cost to it) while the original transition
+        has its xor_branch cleared and its input redirected through the tau.
+
+        Condition for injection:
+            cascade_level == 2  AND  any effect has appearance_level == 2
+
+        Args:
+            transitions: Mutable dict of TransitionInfo, modified in place.
+            transition_predecessors: Mutable predecessor map, modified in place.
+
+        Returns:
+            Set of injected tau names (empty if no injection occurred).
+        """
+        injected: Set[str] = set()
+
+        for trans_name, info in list(transitions.items()):
+            if info.xor_branch is None or info.xor_branch.cascade_level != 2:
+                continue
+            if not any(e.appearance_level == 2 for e in info.effects.values()):
+                continue
+
+            tau_name = f"xor_tau_{trans_name}"
+            logger.debug("Injecting XOR tau '%s' before '%s'", tau_name, trans_name)
+
+            transitions[tau_name] = TransitionInfo(
+                activity_name=tau_name,
+                input_places=list(info.input_places),
+                total_firings=info.total_firings,
+                xor_branch=info.xor_branch,
+                effects={},
+            )
+
+            info.xor_branch = None
+            info.input_places = [tau_name]
+
+            transition_predecessors[tau_name] = list(transition_predecessors[trans_name])
+            transition_predecessors[trans_name] = [tau_name]
+
+            injected.add(tau_name)
+
+        return injected
 
     def _build_attribute_catalog(self) -> Dict[str, AttributeCatalogEntry]:
         """Build the filtered attribute catalog from surviving effects and guards.

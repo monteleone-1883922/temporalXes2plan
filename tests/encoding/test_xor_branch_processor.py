@@ -234,6 +234,52 @@ class TestDurativeActionsWithGuards:
         assert variant.additional_cost == pytest.approx(-math.log(0.6))
 
 
+class TestXorTauStructure:
+    """Verify encoding behavior when a virtual xor_tau_ has been injected."""
+
+    def test_tau_action_present_in_registry(self, xor_parse_result_with_tau):
+        registry = _make_registry(xor_parse_result_with_tau)
+        assert "execute_xor_tau_left_branch" in registry
+
+    def test_tau_action_has_cost(self, xor_parse_result_with_tau):
+        registry = _make_registry(xor_parse_result_with_tau)
+        XorBranchProcessor(xor_parse_result_with_tau).apply(registry)
+
+        tau = registry.get("execute_xor_tau_left_branch")[0]
+        assert tau.additional_cost == pytest.approx(-math.log(0.6))
+
+    def test_real_action_has_no_cost(self, xor_parse_result_with_tau):
+        registry = _make_registry(xor_parse_result_with_tau)
+        XorBranchProcessor(xor_parse_result_with_tau).apply(registry)
+
+        real = registry.get("execute_left_branch")[0]
+        assert real.additional_cost is None
+
+    def test_real_action_precondition_is_tau_marking(self, xor_parse_result_with_tau):
+        registry = _make_registry(xor_parse_result_with_tau)
+        real = registry.get("execute_left_branch")[0]
+        assert "(marked xor_tau_left_branch)" in real.preconditions
+
+    def test_tau_action_precondition_is_xor_place(self, xor_parse_result_with_tau):
+        registry = _make_registry(xor_parse_result_with_tau)
+        tau = registry.get("execute_xor_tau_left_branch")[0]
+        assert "(marked p_xor)" in tau.preconditions
+
+    def test_no_duplication_of_tau(self, xor_parse_result_with_tau):
+        registry = _make_registry(xor_parse_result_with_tau)
+        XorBranchProcessor(xor_parse_result_with_tau).apply(registry)
+
+        assert len(registry.get("execute_xor_tau_left_branch")) == 1
+
+    def test_right_branch_also_gets_cost(self, xor_parse_result_with_tau):
+        """right_branch has no appearance_level=2 effect → no tau, cost on action."""
+        registry = _make_registry(xor_parse_result_with_tau)
+        XorBranchProcessor(xor_parse_result_with_tau).apply(registry)
+
+        right = registry.get("execute_right_branch")[0]
+        assert right.additional_cost == pytest.approx(-math.log(0.4))
+
+
 class TestCartesianProduct:
 
     def test_existing_two_variants_times_two_clauses(self, xor_parse_result_multi_clause):

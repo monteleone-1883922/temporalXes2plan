@@ -704,3 +704,4 @@ class ParseResult:
     end_place: str
     attribute_catalog: Dict[str, AttributeCatalogEntry]
     negated_attributes: Set[str] = field(default_factory=set)
+    xor_virtual_taus: Set[str] = field(default_factory=set)
