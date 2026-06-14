@@ -670,6 +670,7 @@ class TransitionInfo:
     xor_branch: Optional[XorBranchInfo]
     effects: Dict[str, EffectInfo]
     duration: Optional[ActionDurationStats] = None
+    effect_joint_probability: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
 
 @dataclass

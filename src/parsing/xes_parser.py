@@ -45,13 +45,14 @@ from models import (
     XorSplitScreening,
     XorSplitStats,
 )
+from .decision_mining import DecisionMiner
 from .discretizer import Discretizer
+from .effect_correlation_analyzer import EffectCorrelationAnalyzer
 from .log_preprocessor import LogPreprocessor
 from .log_processor import LogProcessor
 from .model_discoverer import ModelDiscoverer
 from .petri_net_log_builder import PetriNetLogBuilder
 from .probability_estimator import ProbabilityEstimator
-from .decision_mining import DecisionMiner
 from .temporal_extractor import ExternalDuration, TemporalExtractor
 
 SEED = 42
@@ -163,6 +164,9 @@ class Parser:
             discretizer=discretizer,
         ).preprocess(self.pn_log, pnm.xor_splits)
         logger.info("Log preprocessing complete")
+
+        # --- Step 5b: effect co-occurrence analysis ---
+        self._effect_joint_prob = EffectCorrelationAnalyzer().compute(self.preprocessed_log)
 
         # --- Step 6: probability estimation ---
         logger.info("Starting probability estimation")
@@ -551,6 +555,7 @@ class Parser:
                 xor_branch=self._xor_branch_info.get(act),
                 effects=self._transition_effect_info.get(act, {}),
                 duration=self.duration_stats.get(act),
+                effect_joint_probability=self._effect_joint_prob.get(act, {}),
             )
 
         # Start / end place names from markings (single-place markings assumed)
