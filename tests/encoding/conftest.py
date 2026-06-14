@@ -216,7 +216,10 @@ def catalog_mixed():
 
 @pytest.fixture
 def simple_parse_result(sequence_net, deterministic_effect, catalog_categorical):
-    """Minimal ParseResult: 2 transitions, 1 deterministic effect on activity_a."""
+    """Minimal ParseResult: 2 transitions, 1 deterministic effect on activity_a.
+
+    negated_attributes is empty — no negative predicates should be generated.
+    """
     return ParseResult(
         petri_net_model=sequence_net,
         place_predecessors={
@@ -246,6 +249,46 @@ def simple_parse_result(sequence_net, deterministic_effect, catalog_categorical)
         start_place="p_start",
         end_place="p_end",
         attribute_catalog=catalog_categorical,
+        negated_attributes=set(),
+    )
+
+
+@pytest.fixture
+def negated_parse_result(sequence_net, deterministic_effect, catalog_categorical):
+    """ParseResult where 'diagnosis' is in negated_attributes.
+
+    Negative predicates and effects should be generated for 'diagnosis'.
+    """
+    return ParseResult(
+        petri_net_model=sequence_net,
+        place_predecessors={
+            "p_mid": ["activity_a"],
+            "p_end": ["activity_b"],
+        },
+        transition_predecessors={
+            "activity_a": ["p_start"],
+            "activity_b": ["p_mid"],
+        },
+        transitions={
+            "activity_a": TransitionInfo(
+                activity_name="activity_a",
+                input_places=["p_start"],
+                total_firings=100,
+                xor_branch=None,
+                effects={"diagnosis": deterministic_effect},
+            ),
+            "activity_b": TransitionInfo(
+                activity_name="activity_b",
+                input_places=["p_mid"],
+                total_firings=80,
+                xor_branch=None,
+                effects={},
+            ),
+        },
+        start_place="p_start",
+        end_place="p_end",
+        attribute_catalog=catalog_categorical,
+        negated_attributes={"diagnosis"},
     )
 
 
@@ -273,4 +316,5 @@ def tau_parse_result(tau_net):
         start_place="p_start",
         end_place="p_end",
         attribute_catalog={},
+        negated_attributes=set(),
     )

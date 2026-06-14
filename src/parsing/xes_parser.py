@@ -565,6 +565,7 @@ class Parser:
             start_place=start_place,
             end_place=end_place,
             attribute_catalog=self._build_attribute_catalog(),
+            negated_attributes=self._collect_negated_attributes(),
         )
 
 
@@ -626,6 +627,42 @@ class Parser:
             )
             for attr, values in attr_values.items()
         }
+
+    def _collect_negated_attributes(self) -> Set[str]:
+        """Collect attributes that appear with negated=True in any guard.
+
+        Scans all surviving guards — XOR branch guards and effect guards — and
+        returns the set of attribute names where at least one Guard has
+        negated=True.  The encoder uses this set to decide which attributes
+        need negative predicates (_is_not / _false).
+
+        Returns:
+            Set of sanitized attribute names that require negative predicates.
+        """
+        negated: Set[str] = set()
+
+        def _scan_sop(sop: List[List[Guard]]) -> None:
+            for path in sop:
+                for g in path:
+                    if g.negated:
+                        negated.add(g.attribute)
+
+        def _scan_effect_guards(eg: Optional[EffectGuards]) -> None:
+            if eg is None:
+                return
+            for sop in eg.guards.values():
+                _scan_sop(sop)
+
+        for attr_infos in self._transition_effect_info.values():
+            for eff in attr_infos.values():
+                _scan_effect_guards(eff.appearance_guards)
+                _scan_effect_guards(eff.value_guards)
+
+        for branch_info in self._xor_branch_info.values():
+            if branch_info.guards is not None:
+                _scan_sop(branch_info.guards)
+
+        return negated
 
 
 # ---------------------------------------------------------------------------

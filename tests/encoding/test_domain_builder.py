@@ -101,34 +101,74 @@ class TestBuildPredicates:
         assert len(marked) == 1
         assert marked[0].parameters == [("?x", "petri_element")]
 
-    def test_categorical_positive_and_negative_predicates(self, simple_parse_result):
+    def test_categorical_positive_predicate_always_present(self, simple_parse_result):
         domain = DomainBuilder().build(simple_parse_result)
+        pred_names = {p.name for p in domain.predicates}
+
+        assert "diagnosis_is" in pred_names
+
+    def test_categorical_negative_predicate_absent_when_not_negated(self, simple_parse_result):
+        domain = DomainBuilder().build(simple_parse_result)
+        pred_names = {p.name for p in domain.predicates}
+
+        assert "diagnosis_is_not" not in pred_names
+
+    def test_categorical_negative_predicate_present_when_negated(self, negated_parse_result):
+        domain = DomainBuilder().build(negated_parse_result)
         pred_names = {p.name for p in domain.predicates}
 
         assert "diagnosis_is" in pred_names
         assert "diagnosis_is_not" in pred_names
 
-    def test_categorical_predicate_has_typed_parameter(self, simple_parse_result):
-        domain = DomainBuilder().build(simple_parse_result)
+    def test_categorical_predicate_has_typed_parameter(self, negated_parse_result):
+        domain = DomainBuilder().build(negated_parse_result)
         diag_is = next(p for p in domain.predicates if p.name == "diagnosis_is")
+        diag_is_not = next(p for p in domain.predicates if p.name == "diagnosis_is_not")
 
         assert diag_is.parameters == [("?v", "diagnosis_val")]
+        assert diag_is_not.parameters == [("?v", "diagnosis_val")]
 
-    def test_boolean_predicates_are_ground(self, simple_parse_result):
+    def test_boolean_false_predicate_absent_when_not_negated(self, simple_parse_result):
         from models import AttributeCatalogEntry
         simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
-            attribute_type="boolean",
-            possible_values=set(),
+            attribute_type="boolean", possible_values=set(),
         )
         domain = DomainBuilder().build(simple_parse_result)
+        pred_names = {p.name for p in domain.predicates}
+
+        assert "urgent_true" in pred_names
+        assert "urgent_false" not in pred_names
+
+    def test_boolean_false_predicate_present_when_negated(self, simple_parse_result):
+        from models import AttributeCatalogEntry
+        simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
+            attribute_type="boolean", possible_values=set(),
+        )
+        simple_parse_result.negated_attributes = {"urgent"}
+        domain = DomainBuilder().build(simple_parse_result)
+        pred_names = {p.name for p in domain.predicates}
+
         urgent_true = next(p for p in domain.predicates if p.name == "urgent_true")
         urgent_false = next(p for p in domain.predicates if p.name == "urgent_false")
-
         assert urgent_true.parameters == []
         assert urgent_false.parameters == []
 
-    def test_mixed_catalog_predicates(self, simple_parse_result, catalog_mixed):
+    def test_mixed_catalog_no_negated(self, simple_parse_result, catalog_mixed):
         simple_parse_result.attribute_catalog = catalog_mixed
+        simple_parse_result.negated_attributes = set()
+        domain = DomainBuilder().build(simple_parse_result)
+        pred_names = {p.name for p in domain.predicates}
+
+        assert "diagnosis_is" in pred_names
+        assert "crp_is" in pred_names
+        assert "urgent_true" in pred_names
+        assert "diagnosis_is_not" not in pred_names
+        assert "crp_is_not" not in pred_names
+        assert "urgent_false" not in pred_names
+
+    def test_mixed_catalog_all_negated(self, simple_parse_result, catalog_mixed):
+        simple_parse_result.attribute_catalog = catalog_mixed
+        simple_parse_result.negated_attributes = {"diagnosis", "crp", "urgent"}
         domain = DomainBuilder().build(simple_parse_result)
         pred_names = {p.name for p in domain.predicates}
 

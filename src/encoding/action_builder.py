@@ -147,24 +147,43 @@ class ActionBuilder:
             return self._categorical_effect(attr_name, value, catalog_entry)
 
     def _boolean_effect(self, attr_name: str, value: Any) -> List[str]:
-        """PDDL effects for a deterministic boolean attribute change."""
+        """PDDL effects for a deterministic boolean attribute change.
+
+        When attr_name is not in negated_attributes the _false predicate does
+        not exist, so the false state is expressed by clearing _true only.
+        """
+        needs_negative = attr_name in self._pr.negated_attributes
         if value is True or str(value).lower() == "true":
-            return [f"({attr_name}_true)", f"(not ({attr_name}_false))"]
+            effects = [f"({attr_name}_true)"]
+            if needs_negative:
+                effects.append(f"(not ({attr_name}_false))")
         else:
-            return [f"({attr_name}_false)", f"(not ({attr_name}_true))"]
+            if needs_negative:
+                effects = [f"({attr_name}_false)", f"(not ({attr_name}_true))"]
+            else:
+                effects = [f"(not ({attr_name}_true))"]
+        return effects
 
     def _categorical_effect(
         self, attr_name: str, value: Any, catalog_entry: AttributeCatalogEntry
     ) -> List[str]:
-        """PDDL effects for a deterministic categorical attribute change."""
+        """PDDL effects for a deterministic categorical attribute change.
+
+        _is_not terms are emitted only when attr_name is in negated_attributes.
+        (not (_is X)) terms are always emitted to keep the positive predicate
+        consistent regardless of whether negative predicates exist.
+        """
         val_str = str(value)
+        needs_negative = attr_name in self._pr.negated_attributes
         effects = [f"({attr_name}_is {val_str})"]
 
         for other_val in sorted(str(v) for v in catalog_entry.possible_values):
             if other_val == val_str:
-                effects.append(f"(not ({attr_name}_is_not {other_val}))")
+                if needs_negative:
+                    effects.append(f"(not ({attr_name}_is_not {other_val}))")
             else:
-                effects.append(f"({attr_name}_is_not {other_val})")
+                if needs_negative:
+                    effects.append(f"({attr_name}_is_not {other_val})")
                 effects.append(f"(not ({attr_name}_is {other_val}))")
 
         return effects

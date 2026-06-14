@@ -692,6 +692,9 @@ class ParseResult:
         attribute_catalog: Attributes that survive into the final output, with
             their type and the set of values referenced by effects or guards.
             Attributes filtered out during the cascade are absent.
+        negated_attributes: Attributes that appear with negated=True in at least
+            one guard (XOR split or effect).  The encoder generates negative
+            predicates (_is_not / _false) only for these attributes.
     """
     petri_net_model: PetriNetModel
     place_predecessors: Dict[str, List[str]]
@@ -700,3 +703,4 @@ class ParseResult:
     start_place: str
     end_place: str
     attribute_catalog: Dict[str, AttributeCatalogEntry]
+    negated_attributes: Set[str] = field(default_factory=set)

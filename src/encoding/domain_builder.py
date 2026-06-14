@@ -23,7 +23,9 @@ class DomainBuilder:
         """
         types = self._build_types(parse_result.attribute_catalog)
         constants = self._build_constants(parse_result)
-        predicates = self._build_predicates(parse_result.attribute_catalog)
+        predicates = self._build_predicates(
+            parse_result.attribute_catalog, parse_result.negated_attributes
+        )
 
         action_builder = ActionBuilder(parse_result)
         actions = action_builder.build_all()
@@ -78,9 +80,16 @@ class DomainBuilder:
         return constants
 
     def _build_predicates(
-        self, attribute_catalog: Dict[str, AttributeCatalogEntry]
+        self,
+        attribute_catalog: Dict[str, AttributeCatalogEntry],
+        negated_attributes: set,
     ) -> List[PDDLPredicate]:
-        """Build PDDL predicates: marked + attribute predicates."""
+        """Build PDDL predicates: marked + attribute predicates.
+
+        Negative predicates (_is_not / _false) are generated only for
+        attributes in negated_attributes, i.e. those that appear negated
+        in at least one guard condition.
+        """
         predicates: List[PDDLPredicate] = [
             PDDLPredicate("marked", [("?x", "petri_element")]),
         ]
@@ -91,12 +100,14 @@ class DomainBuilder:
                 predicates.append(
                     PDDLPredicate(f"{attr_name}_is", [("?v", type_name)])
                 )
-                predicates.append(
-                    PDDLPredicate(f"{attr_name}_is_not", [("?v", type_name)])
-                )
+                if attr_name in negated_attributes:
+                    predicates.append(
+                        PDDLPredicate(f"{attr_name}_is_not", [("?v", type_name)])
+                    )
             elif entry.attribute_type == "boolean":
                 predicates.append(PDDLPredicate(f"{attr_name}_true"))
-                predicates.append(PDDLPredicate(f"{attr_name}_false"))
+                if attr_name in negated_attributes:
+                    predicates.append(PDDLPredicate(f"{attr_name}_false"))
 
         return predicates
 

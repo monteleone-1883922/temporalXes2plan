@@ -139,15 +139,16 @@ class TestDeterministicEffects:
 
         assert "(diagnosis_is flu)" in action.effects
 
-    def test_categorical_negative_predicates_for_other_values(self, simple_parse_result):
+    # --- categorical without negated_attributes ---
+
+    def test_categorical_no_is_not_when_not_negated(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(diagnosis_is_not cold)" in action.effects
-        assert "(diagnosis_is_not covid)" in action.effects
+        assert not any("diagnosis_is_not" in e for e in action.effects)
 
-    def test_categorical_clears_positive_for_other_values(self, simple_parse_result):
+    def test_categorical_still_clears_positive_for_other_values(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
@@ -155,14 +156,34 @@ class TestDeterministicEffects:
         assert "(not (diagnosis_is cold))" in action.effects
         assert "(not (diagnosis_is covid))" in action.effects
 
-    def test_categorical_clears_negative_for_active_value(self, simple_parse_result):
-        builder = ActionBuilder(simple_parse_result)
+    # --- categorical with negated_attributes ---
+
+    def test_categorical_is_not_present_when_negated(self, negated_parse_result):
+        builder = ActionBuilder(negated_parse_result)
+        actions = builder._build_transition_actions()
+        action = next(a for a in actions if a.name == "execute_activity_a")
+
+        assert "(diagnosis_is_not cold)" in action.effects
+        assert "(diagnosis_is_not covid)" in action.effects
+
+    def test_categorical_clears_is_not_for_active_value_when_negated(self, negated_parse_result):
+        builder = ActionBuilder(negated_parse_result)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
         assert "(not (diagnosis_is_not flu))" in action.effects
 
-    def test_boolean_true_effect(self, simple_parse_result, boolean_effect):
+    def test_categorical_clears_positive_for_other_values_when_negated(self, negated_parse_result):
+        builder = ActionBuilder(negated_parse_result)
+        actions = builder._build_transition_actions()
+        action = next(a for a in actions if a.name == "execute_activity_a")
+
+        assert "(not (diagnosis_is cold))" in action.effects
+        assert "(not (diagnosis_is covid))" in action.effects
+
+    # --- boolean without negated_attributes ---
+
+    def test_boolean_true_no_clear_false_when_not_negated(self, simple_parse_result, boolean_effect):
         simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
             attribute_type="boolean", possible_values=set(),
         )
@@ -173,12 +194,48 @@ class TestDeterministicEffects:
         action = next(a for a in actions if a.name == "execute_activity_a")
 
         assert "(urgent_true)" in action.effects
-        assert "(not (urgent_false))" in action.effects
+        assert "(not (urgent_false))" not in action.effects
 
-    def test_boolean_false_effect(self, simple_parse_result):
+    def test_boolean_false_clears_true_when_not_negated(self, simple_parse_result):
         simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
             attribute_type="boolean", possible_values=set(),
         )
+        effect = EffectInfo(
+            attribute="urgent", presence_probability=1.0,
+            appearance_level=1, appearance_guards=None,
+            value_probabilities={False: 1.0},
+            value_level=1, value_guards=None,
+        )
+        simple_parse_result.transitions["activity_a"].effects["urgent"] = effect
+
+        builder = ActionBuilder(simple_parse_result)
+        actions = builder._build_transition_actions()
+        action = next(a for a in actions if a.name == "execute_activity_a")
+
+        assert "(not (urgent_true))" in action.effects
+        assert "(urgent_false)" not in action.effects
+
+    # --- boolean with negated_attributes ---
+
+    def test_boolean_true_clears_false_when_negated(self, simple_parse_result, boolean_effect):
+        simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
+            attribute_type="boolean", possible_values=set(),
+        )
+        simple_parse_result.negated_attributes = {"urgent"}
+        simple_parse_result.transitions["activity_a"].effects["urgent"] = boolean_effect
+
+        builder = ActionBuilder(simple_parse_result)
+        actions = builder._build_transition_actions()
+        action = next(a for a in actions if a.name == "execute_activity_a")
+
+        assert "(urgent_true)" in action.effects
+        assert "(not (urgent_false))" in action.effects
+
+    def test_boolean_false_sets_false_when_negated(self, simple_parse_result):
+        simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
+            attribute_type="boolean", possible_values=set(),
+        )
+        simple_parse_result.negated_attributes = {"urgent"}
         effect = EffectInfo(
             attribute="urgent", presence_probability=1.0,
             appearance_level=1, appearance_guards=None,
