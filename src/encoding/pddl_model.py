@@ -28,9 +28,15 @@ class PDDLBaseAction:
     """Common base for all PDDL action types.
 
     Holds only the fields shared by instantaneous and durative actions.
+
+    Attributes:
+        base_cost: Fixed action cost (reserved for future use, e.g. global frequency).
+        additional_cost: XOR branch cost derived from statistical fallback: -log(p).
     """
     name: str
     parameters: List[Tuple[str, str]] = field(default_factory=list)
+    base_cost: Optional[float] = None
+    additional_cost: Optional[float] = None
 
 
 @dataclass

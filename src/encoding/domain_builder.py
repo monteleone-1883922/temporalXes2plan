@@ -5,7 +5,7 @@ from models import AttributeCatalogEntry, ParseResult, PetriNetModel
 from encoding.pddl_model import PDDLDurativeAction, PDDLDomain, PDDLObject, PDDLPredicate, PDDLType
 from encoding.action_builder import ActionBuilder
 from encoding.action_registry import ActionRegistry
-from encoding.xor_guard_duplicator import XorGuardDuplicator
+from encoding.xor_branch_processor import XorBranchProcessor
 
 logger = utils.get_logger(__name__)
 
@@ -41,7 +41,7 @@ class DomainBuilder:
         base_actions = action_builder.build_all()
 
         registry = ActionRegistry.from_base_actions(base_actions)
-        XorGuardDuplicator(parse_result).apply(registry)
+        XorBranchProcessor(parse_result).apply(registry)
         actions = registry.all_actions()
 
         requirements = [":strips", ":typing"]

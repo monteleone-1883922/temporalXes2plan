@@ -3,7 +3,7 @@ from encoding.domain_builder import DomainBuilder
 from encoding.guard_encoder import and_clause_to_pddl, guard_to_pddl
 from encoding.pddl_model import PDDLBaseAction, PDDLAction, PDDLDurativeAction
 from encoding.pddl_writer import PDDLWriter
-from encoding.xor_guard_duplicator import XorGuardDuplicator
+from encoding.xor_branch_processor import XorBranchProcessor
 
 __all__ = [
     "ActionRegistry",
@@ -12,7 +12,7 @@ __all__ = [
     "PDDLBaseAction",
     "PDDLAction",
     "PDDLDurativeAction",
-    "XorGuardDuplicator",
+    "XorBranchProcessor",
     "guard_to_pddl",
     "and_clause_to_pddl",
 ]

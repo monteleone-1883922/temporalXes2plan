@@ -507,6 +507,55 @@ def xor_parse_result_multi_clause(xor_net):
 
 
 @pytest.fixture
+def xor_parse_result_level3(xor_net):
+    """ParseResult where XOR branches have cascade_level=3 (no data at all)."""
+    return ParseResult(
+        petri_net_model=xor_net,
+        place_predecessors={
+            "p_xor": ["source"],
+            "p_end_left": ["left_branch"],
+            "p_end_right": ["right_branch"],
+        },
+        transition_predecessors={
+            "source": ["p_start"],
+            "left_branch": ["p_xor"],
+            "right_branch": ["p_xor"],
+        },
+        transitions={
+            "source": TransitionInfo("source", ["p_start"], 100, None, {}),
+            "left_branch": TransitionInfo(
+                activity_name="left_branch",
+                input_places=["p_xor"],
+                total_firings=60,
+                xor_branch=XorBranchInfo(
+                    probability=0.6,
+                    total_samples=100,
+                    cascade_level=3,
+                    guards=None,
+                ),
+                effects={},
+            ),
+            "right_branch": TransitionInfo(
+                activity_name="right_branch",
+                input_places=["p_xor"],
+                total_firings=40,
+                xor_branch=XorBranchInfo(
+                    probability=0.4,
+                    total_samples=100,
+                    cascade_level=3,
+                    guards=None,
+                ),
+                effects={},
+            ),
+        },
+        start_place="p_start",
+        end_place="p_end_left",
+        attribute_catalog={},
+        negated_attributes=set(),
+    )
+
+
+@pytest.fixture
 def xor_parse_result_no_guards(xor_net):
     """ParseResult where XOR branches have cascade_level=2 (no DT guards)."""
     return ParseResult(
