@@ -371,3 +371,185 @@ def durative_parse_result(sequence_net, deterministic_effect, catalog_categorica
         attribute_catalog=catalog_categorical,
         negated_attributes=set(),
     )
+
+
+# ---------------------------------------------------------------------------
+# XOR split fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def xor_parse_result_single_clause(xor_net):
+    """ParseResult where left_branch has a single-OR-clause XOR guard.
+
+    Guard: risk_is high  (one AND-clause, no duplication)
+    """
+    from models import Guard
+    return ParseResult(
+        petri_net_model=xor_net,
+        place_predecessors={
+            "p_xor": ["source"],
+            "p_end_left": ["left_branch"],
+            "p_end_right": ["right_branch"],
+        },
+        transition_predecessors={
+            "source": ["p_start"],
+            "left_branch": ["p_xor"],
+            "right_branch": ["p_xor"],
+        },
+        transitions={
+            "source": TransitionInfo("source", ["p_start"], 100, None, {}),
+            "left_branch": TransitionInfo(
+                activity_name="left_branch",
+                input_places=["p_xor"],
+                total_firings=60,
+                xor_branch=XorBranchInfo(
+                    probability=0.6,
+                    total_samples=100,
+                    cascade_level=1,
+                    guards=[[Guard("risk", "high", negated=False)]],
+                ),
+                effects={},
+            ),
+            "right_branch": TransitionInfo(
+                activity_name="right_branch",
+                input_places=["p_xor"],
+                total_firings=40,
+                xor_branch=XorBranchInfo(
+                    probability=0.4,
+                    total_samples=100,
+                    cascade_level=1,
+                    guards=[[Guard("risk", "high", negated=True)]],
+                ),
+                effects={},
+            ),
+        },
+        start_place="p_start",
+        end_place="p_end_left",
+        attribute_catalog={
+            "risk": AttributeCatalogEntry(
+                attribute_type="categorical",
+                possible_values={"high", "low"},
+            ),
+        },
+        negated_attributes={"risk"},
+    )
+
+
+@pytest.fixture
+def xor_parse_result_multi_clause(xor_net):
+    """ParseResult where left_branch has a two-OR-clause XOR guard.
+
+    Guards: (risk_is high) OR (urgent_true AND crp_is lte_10_0)
+    -> action must be duplicated into 2 variants.
+    """
+    from models import Guard
+    return ParseResult(
+        petri_net_model=xor_net,
+        place_predecessors={
+            "p_xor": ["source"],
+            "p_end_left": ["left_branch"],
+            "p_end_right": ["right_branch"],
+        },
+        transition_predecessors={
+            "source": ["p_start"],
+            "left_branch": ["p_xor"],
+            "right_branch": ["p_xor"],
+        },
+        transitions={
+            "source": TransitionInfo("source", ["p_start"], 100, None, {}),
+            "left_branch": TransitionInfo(
+                activity_name="left_branch",
+                input_places=["p_xor"],
+                total_firings=60,
+                xor_branch=XorBranchInfo(
+                    probability=0.6,
+                    total_samples=100,
+                    cascade_level=1,
+                    guards=[
+                        [Guard("risk", "high", negated=False)],
+                        [Guard("urgent", None, negated=False),
+                         Guard("crp", "lte_10_0", negated=False)],
+                    ],
+                ),
+                effects={},
+            ),
+            "right_branch": TransitionInfo(
+                activity_name="right_branch",
+                input_places=["p_xor"],
+                total_firings=40,
+                xor_branch=XorBranchInfo(
+                    probability=0.4,
+                    total_samples=100,
+                    cascade_level=1,
+                    guards=[[Guard("risk", "high", negated=True)]],
+                ),
+                effects={},
+            ),
+        },
+        start_place="p_start",
+        end_place="p_end_left",
+        attribute_catalog={
+            "risk": AttributeCatalogEntry(
+                attribute_type="categorical",
+                possible_values={"high", "low"},
+            ),
+            "urgent": AttributeCatalogEntry(
+                attribute_type="boolean",
+                possible_values=set(),
+            ),
+            "crp": AttributeCatalogEntry(
+                attribute_type="numerical",
+                possible_values={"lte_10_0", "gte_10_0"},
+            ),
+        },
+        negated_attributes={"risk"},
+    )
+
+
+@pytest.fixture
+def xor_parse_result_no_guards(xor_net):
+    """ParseResult where XOR branches have cascade_level=2 (no DT guards)."""
+    return ParseResult(
+        petri_net_model=xor_net,
+        place_predecessors={
+            "p_xor": ["source"],
+            "p_end_left": ["left_branch"],
+            "p_end_right": ["right_branch"],
+        },
+        transition_predecessors={
+            "source": ["p_start"],
+            "left_branch": ["p_xor"],
+            "right_branch": ["p_xor"],
+        },
+        transitions={
+            "source": TransitionInfo("source", ["p_start"], 100, None, {}),
+            "left_branch": TransitionInfo(
+                activity_name="left_branch",
+                input_places=["p_xor"],
+                total_firings=60,
+                xor_branch=XorBranchInfo(
+                    probability=0.6,
+                    total_samples=100,
+                    cascade_level=2,
+                    guards=None,
+                ),
+                effects={},
+            ),
+            "right_branch": TransitionInfo(
+                activity_name="right_branch",
+                input_places=["p_xor"],
+                total_firings=40,
+                xor_branch=XorBranchInfo(
+                    probability=0.4,
+                    total_samples=100,
+                    cascade_level=2,
+                    guards=None,
+                ),
+                effects={},
+            ),
+        },
+        start_place="p_start",
+        end_place="p_end_left",
+        attribute_catalog={},
+        negated_attributes=set(),
+    )
