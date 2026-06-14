@@ -1,0 +1,171 @@
+"""Tests for encoding.pddl_writer.PDDLWriter."""
+import pytest
+from pathlib import Path
+
+from encoding.pddl_model import (
+    PDDLAction, PDDLDomain, PDDLObject, PDDLPredicate, PDDLType,
+)
+from encoding.pddl_writer import PDDLWriter
+from encoding.domain_builder import DomainBuilder
+
+
+@pytest.fixture
+def minimal_domain():
+    return PDDLDomain(
+        name="test",
+        requirements=[":strips", ":typing"],
+        types=[
+            PDDLType("petri_element"),
+            PDDLType("place", parent="petri_element"),
+            PDDLType("transition", parent="petri_element"),
+        ],
+        constants=[
+            PDDLObject("p1", "place"),
+            PDDLObject("t1", "transition"),
+        ],
+        predicates=[
+            PDDLPredicate("marked", [("?x", "petri_element")]),
+        ],
+        actions=[
+            PDDLAction(
+                name="mark_p1_from_t1",
+                preconditions=["(marked t1)"],
+                effects=["(marked p1)"],
+            ),
+        ],
+    )
+
+
+class TestRenderDomain:
+
+    def test_domain_name_in_output(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert "(define (domain test)" in text
+
+    def test_requirements_in_output(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert ":strips" in text
+        assert ":typing" in text
+
+    def test_types_grouped_by_parent(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert "place transition - petri_element" in text or \
+               "transition place - petri_element" in text
+
+    def test_constants_grouped_by_type(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert "p1 - place" in text
+        assert "t1 - transition" in text
+
+    def test_predicate_with_parameters(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert "(marked ?x - petri_element)" in text
+
+    def test_ground_predicate(self):
+        domain = PDDLDomain(
+            name="test", requirements=[":strips"],
+            types=[], constants=[],
+            predicates=[PDDLPredicate("urgent_true")],
+            actions=[],
+        )
+        text = PDDLWriter()._render_domain(domain)
+        assert "(urgent_true)" in text
+
+    def test_closing_parenthesis(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert text.strip().endswith(")")
+
+
+class TestRenderAction:
+
+    def test_single_precondition_no_and(self):
+        action = PDDLAction(
+            name="simple",
+            preconditions=["(marked p1)"],
+            effects=["(marked t1)"],
+        )
+        text = PDDLWriter()._render_action(action)
+        assert ":precondition (marked p1)" in text
+        assert "(and" not in text
+
+    def test_multiple_preconditions_wrapped_in_and(self):
+        action = PDDLAction(
+            name="join",
+            preconditions=["(marked p1)", "(marked p2)"],
+            effects=["(marked t1)"],
+        )
+        text = PDDLWriter()._render_action(action)
+        assert ":precondition (and" in text
+        assert "(marked p1)" in text
+        assert "(marked p2)" in text
+
+    def test_empty_precondition(self):
+        action = PDDLAction(name="noop", preconditions=[], effects=["(marked p1)"])
+        text = PDDLWriter()._render_action(action)
+        assert ":precondition ()" in text
+
+    def test_single_effect_no_and(self):
+        action = PDDLAction(
+            name="simple",
+            preconditions=["(marked p1)"],
+            effects=["(marked t1)"],
+        )
+        text = PDDLWriter()._render_action(action)
+        assert ":effect (marked t1)" in text
+
+    def test_multiple_effects_wrapped_in_and(self):
+        action = PDDLAction(
+            name="multi",
+            preconditions=[],
+            effects=["(marked t1)", "(diagnosis_is flu)"],
+        )
+        text = PDDLWriter()._render_action(action)
+        assert ":effect (and" in text
+
+    def test_empty_parameters(self):
+        action = PDDLAction(name="act", preconditions=[], effects=[])
+        text = PDDLWriter()._render_action(action)
+        assert ":parameters ()" in text
+
+
+class TestWriteToFile:
+
+    def test_writes_file(self, tmp_path, minimal_domain):
+        out = tmp_path / "domain.pddl"
+        text = PDDLWriter().write_domain(minimal_domain, out)
+
+        assert out.exists()
+        assert out.read_text(encoding="utf-8") == text
+
+    def test_creates_parent_directories(self, tmp_path, minimal_domain):
+        out = tmp_path / "sub" / "dir" / "domain.pddl"
+        PDDLWriter().write_domain(minimal_domain, out)
+
+        assert out.exists()
+
+
+class TestEndToEnd:
+
+    def test_full_pipeline_produces_valid_structure(self, simple_parse_result):
+        domain = DomainBuilder().build(simple_parse_result)
+        text = PDDLWriter()._render_domain(domain)
+
+        assert "(define (domain process)" in text
+        assert "(:requirements" in text
+        assert "(:types" in text
+        assert "(:constants" in text
+        assert "(:predicates" in text
+        assert "(:action" in text
+
+    def test_full_pipeline_with_tau(self, tau_parse_result):
+        domain = DomainBuilder().build(tau_parse_result)
+        text = PDDLWriter()._render_domain(domain)
+
+        assert "execute_tau_0" in text
+        assert "(marked tau_0)" in text
+
+    def test_pddl_parentheses_balanced(self, simple_parse_result):
+        domain = DomainBuilder().build(simple_parse_result)
+        text = PDDLWriter()._render_domain(domain)
+
+        assert text.count("(") == text.count(")")
