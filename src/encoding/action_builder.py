@@ -1,8 +1,8 @@
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 import core_utils as utils
 from models import EffectInfo, ParseResult, TransitionInfo, AttributeCatalogEntry
-from encoding.pddl_model import PDDLAction
+from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLDurativeAction
 
 logger = utils.get_logger(__name__)
 
@@ -10,25 +10,30 @@ logger = utils.get_logger(__name__)
 class ActionBuilder:
     """Builds PDDL actions from a ParseResult.
 
-    Produces two kinds of actions:
-    - Place-marking actions: propagate a token from a completed transition to its output places.
-    - Transition base actions: fire a transition when all input places are marked,
-      producing the marked predicate for the transition plus any deterministic effects.
+    Produces three kinds of actions:
+    - Place-marking actions: propagate a token from a completed transition to
+      its output places (always instantaneous).
+    - Transition base actions: fire a transition when all input places are
+      marked.  When use_durative=True and the transition has duration data,
+      a PDDLDurativeAction is produced instead of a PDDLAction.
+    - Tau (silent) transition actions: same structure as labeled transitions
+      but never durative (tau transitions carry no duration in the model).
     """
 
-    def __init__(self, parse_result: ParseResult) -> None:
+    def __init__(self, parse_result: ParseResult, use_durative: bool = False) -> None:
         self._pr = parse_result
+        self._use_durative = use_durative
 
-    def build_all(self) -> List[PDDLAction]:
+    def build_all(self) -> List[PDDLBaseAction]:
         """Build all PDDL actions for the domain."""
-        actions: List[PDDLAction] = []
+        actions: List[PDDLBaseAction] = []
         actions.extend(self._build_place_marking_actions())
         actions.extend(self._build_transition_actions())
         actions.extend(self._build_tau_actions())
         return actions
 
     # ------------------------------------------------------------------
-    # Place-marking actions
+    # Place-marking actions (always instantaneous)
     # ------------------------------------------------------------------
 
     def _build_place_marking_actions(self) -> List[PDDLAction]:
@@ -49,27 +54,37 @@ class ActionBuilder:
     # Transition base actions (labeled)
     # ------------------------------------------------------------------
 
-    def _build_transition_actions(self) -> List[PDDLAction]:
+    def _build_transition_actions(self) -> List[PDDLBaseAction]:
         """One base action per labeled transition."""
-        actions: List[PDDLAction] = []
+        actions: List[PDDLBaseAction] = []
 
         for trans_name, info in sorted(self._pr.transitions.items()):
             preconditions = self._transition_preconditions(trans_name)
             effects = self._transition_effects(trans_name, info)
-            actions.append(PDDLAction(
-                name=f"execute_{trans_name}",
-                preconditions=preconditions,
-                effects=effects,
-            ))
+
+            if self._use_durative and info.duration is not None:
+                actions.append(PDDLDurativeAction(
+                    name=f"execute_{trans_name}",
+                    duration_min=info.duration.effective_min,
+                    duration_max=info.duration.effective_max,
+                    conditions_at_start=preconditions,
+                    effects_at_end=effects,
+                ))
+            else:
+                actions.append(PDDLAction(
+                    name=f"execute_{trans_name}",
+                    preconditions=preconditions,
+                    effects=effects,
+                ))
 
         return actions
 
     # ------------------------------------------------------------------
-    # Tau (silent) transition actions
+    # Tau (silent) transition actions (always instantaneous)
     # ------------------------------------------------------------------
 
     def _build_tau_actions(self) -> List[PDDLAction]:
-        """One action per silent transition."""
+        """One action per silent transition.  Tau transitions are never durative."""
         actions: List[PDDLAction] = []
 
         for trans_obj, tau_label in sorted(

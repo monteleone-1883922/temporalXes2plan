@@ -2,7 +2,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List
 
-from encoding.pddl_model import PDDLAction, PDDLDomain, PDDLObject, PDDLPredicate, PDDLType
+from encoding.pddl_model import (
+    PDDLAction, PDDLBaseAction, PDDLDurativeAction,
+    PDDLDomain, PDDLObject, PDDLPredicate, PDDLType,
+)
 
 import core_utils as utils
 
@@ -38,7 +41,10 @@ class PDDLWriter:
         ]
 
         for action in domain.actions:
-            sections.append(self._render_action(action))
+            if isinstance(action, PDDLDurativeAction):
+                sections.append(self._render_durative_action(action))
+            else:
+                sections.append(self._render_action(action))
 
         sections.append(")")
         return "\n\n".join(sections) + "\n"
@@ -101,25 +107,97 @@ class PDDLWriter:
         else:
             lines.append("    :parameters ()")
 
-        if len(action.preconditions) == 0:
-            lines.append("    :precondition ()")
-        elif len(action.preconditions) == 1:
-            lines.append(f"    :precondition {action.preconditions[0]}")
+        lines.append(self._render_condition_block(
+            ":precondition", action.preconditions, indent="    "
+        ))
+        lines.append(self._render_condition_block(
+            ":effect", action.effects, indent="    "
+        ))
+
+        lines.append("  )")
+        return "\n".join(lines)
+
+    def _render_durative_action(self, action: PDDLDurativeAction) -> str:
+        lines = [f"  (:durative-action {action.name}"]
+
+        if action.parameters:
+            params = " ".join(
+                f"{name} - {ptype}" for name, ptype in action.parameters
+            )
+            lines.append(f"    :parameters ({params})")
         else:
-            lines.append("    :precondition (and")
-            for p in action.preconditions:
-                lines.append(f"      {p}")
+            lines.append("    :parameters ()")
+
+        lines.append(
+            f"    :duration (and (>= ?duration {action.duration_min})"
+            f" (<= ?duration {action.duration_max}))"
+        )
+
+        condition_parts = []
+        if action.conditions_at_start:
+            condition_parts.append(
+                self._render_timed_block("at start", action.conditions_at_start)
+            )
+        if action.conditions_over_all:
+            condition_parts.append(
+                self._render_timed_block("over all", action.conditions_over_all)
+            )
+        if action.conditions_at_end:
+            condition_parts.append(
+                self._render_timed_block("at end", action.conditions_at_end)
+            )
+
+        if not condition_parts:
+            lines.append("    :condition ()")
+        elif len(condition_parts) == 1:
+            lines.append(f"    :condition {condition_parts[0]}")
+        else:
+            lines.append("    :condition (and")
+            for part in condition_parts:
+                lines.append(f"      {part}")
             lines.append("    )")
 
-        if len(action.effects) == 0:
+        effect_parts = []
+        if action.effects_at_start:
+            effect_parts.append(
+                self._render_timed_block("at start", action.effects_at_start)
+            )
+        if action.effects_at_end:
+            effect_parts.append(
+                self._render_timed_block("at end", action.effects_at_end)
+            )
+
+        if not effect_parts:
             lines.append("    :effect ()")
-        elif len(action.effects) == 1:
-            lines.append(f"    :effect {action.effects[0]}")
+        elif len(effect_parts) == 1:
+            lines.append(f"    :effect {effect_parts[0]}")
         else:
             lines.append("    :effect (and")
-            for e in action.effects:
-                lines.append(f"      {e}")
+            for part in effect_parts:
+                lines.append(f"      {part}")
             lines.append("    )")
 
         lines.append("  )")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _render_condition_block(
+        self, keyword: str, items: List[str], indent: str = "    "
+    ) -> str:
+        """Render a :precondition or :effect block."""
+        if not items:
+            return f"{indent}{keyword} ()"
+        if len(items) == 1:
+            return f"{indent}{keyword} {items[0]}"
+        inner = f"\n{indent}  ".join(items)
+        return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
+
+    def _render_timed_block(self, timing: str, items: List[str]) -> str:
+        """Render an (at start ...) or (over all ...) or (at end ...) block."""
+        if len(items) == 1:
+            return f"({timing} {items[0]})"
+        inner = "\n        ".join(items)
+        return f"({timing} (and\n        {inner}\n      ))"

@@ -2,7 +2,7 @@ from typing import Dict, List, Set
 
 import core_utils as utils
 from models import AttributeCatalogEntry, ParseResult, PetriNetModel
-from encoding.pddl_model import PDDLAction, PDDLDomain, PDDLObject, PDDLPredicate, PDDLType
+from encoding.pddl_model import PDDLDurativeAction, PDDLDomain, PDDLObject, PDDLPredicate, PDDLType
 from encoding.action_builder import ActionBuilder
 
 logger = utils.get_logger(__name__)
@@ -11,12 +11,20 @@ logger = utils.get_logger(__name__)
 class DomainBuilder:
     """Builds a PDDLDomain from a ParseResult."""
 
-    def build(self, parse_result: ParseResult, domain_name: str = "process") -> PDDLDomain:
+    def build(
+        self,
+        parse_result: ParseResult,
+        domain_name: str = "process",
+        use_durative: bool = False,
+    ) -> PDDLDomain:
         """Transform a ParseResult into a complete PDDLDomain.
 
         Args:
             parse_result: Encoder-ready output from the parsing pipeline.
             domain_name: Name for the PDDL domain.
+            use_durative: When True, transitions that carry duration data are
+                encoded as durative-action blocks instead of instantaneous
+                actions.  Adds :durative-actions to requirements automatically.
 
         Returns:
             A fully populated PDDLDomain.
@@ -27,12 +35,16 @@ class DomainBuilder:
             parse_result.attribute_catalog, parse_result.negated_attributes
         )
 
-        action_builder = ActionBuilder(parse_result)
+        action_builder = ActionBuilder(parse_result, use_durative=use_durative)
         actions = action_builder.build_all()
+
+        requirements = [":strips", ":typing"]
+        if any(isinstance(a, PDDLDurativeAction) for a in actions):
+            requirements.append(":durative-actions")
 
         return PDDLDomain(
             name=domain_name,
-            requirements=[":strips", ":typing"],
+            requirements=requirements,
             types=types,
             constants=constants,
             predicates=predicates,

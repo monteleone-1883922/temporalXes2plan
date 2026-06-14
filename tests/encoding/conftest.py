@@ -4,8 +4,8 @@ from pm4py.objects.petri_net.obj import PetriNet
 from pm4py.objects.petri_net.obj import Marking
 
 from models import (
-    AttributeCatalogEntry, EffectInfo, ParseResult, PetriNetModel,
-    TransitionInfo, XorBranchInfo,
+    ActionDurationStats, AttributeCatalogEntry, EffectInfo, ParseResult,
+    PetriNetModel, TransitionInfo, XorBranchInfo,
 )
 
 
@@ -316,5 +316,58 @@ def tau_parse_result(tau_net):
         start_place="p_start",
         end_place="p_end",
         attribute_catalog={},
+        negated_attributes=set(),
+    )
+
+
+@pytest.fixture
+def duration_stats():
+    """Duration statistics for a single action (10–30 seconds)."""
+    return ActionDurationStats(
+        effective_min=10.0,
+        effective_max=30.0,
+        source="lifecycle",
+        mean=20.0,
+        std_dev=5.0,
+        observed_min=8.0,
+        observed_max=35.0,
+        count=100,
+    )
+
+
+@pytest.fixture
+def durative_parse_result(sequence_net, deterministic_effect, catalog_categorical, duration_stats):
+    """ParseResult where activity_a has duration data and activity_b does not."""
+    return ParseResult(
+        petri_net_model=sequence_net,
+        place_predecessors={
+            "p_mid": ["activity_a"],
+            "p_end": ["activity_b"],
+        },
+        transition_predecessors={
+            "activity_a": ["p_start"],
+            "activity_b": ["p_mid"],
+        },
+        transitions={
+            "activity_a": TransitionInfo(
+                activity_name="activity_a",
+                input_places=["p_start"],
+                total_firings=100,
+                xor_branch=None,
+                effects={"diagnosis": deterministic_effect},
+                duration=duration_stats,
+            ),
+            "activity_b": TransitionInfo(
+                activity_name="activity_b",
+                input_places=["p_mid"],
+                total_firings=80,
+                xor_branch=None,
+                effects={},
+                duration=None,
+            ),
+        },
+        start_place="p_start",
+        end_place="p_end",
+        attribute_catalog=catalog_categorical,
         negated_attributes=set(),
     )
