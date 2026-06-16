@@ -5,7 +5,7 @@ import pytest
 
 from encoding.action_builder import ActionBuilder
 from encoding.action_registry import ActionRegistry
-from encoding.pddl_model import PDDLAction, PDDLDurativeAction
+from encoding.pddl_model import PDDLAction, PDDLCondition, PDDLDurativeAction
 from encoding.xor_branch_processor import XorBranchProcessor
 
 
@@ -35,21 +35,21 @@ class TestSingleClauseGuard:
         XorBranchProcessor(xor_parse_result_single_clause).apply(registry)
 
         variant = registry.get("execute_left_branch")[0]
-        assert "(risk_is high)" in variant.preconditions
+        assert PDDLCondition.attr_is("risk", "high") in variant.preconditions
 
     def test_negated_guard_added_to_other_branch(self, xor_parse_result_single_clause):
         registry = _make_registry(xor_parse_result_single_clause)
         XorBranchProcessor(xor_parse_result_single_clause).apply(registry)
 
         variant = registry.get("execute_right_branch")[0]
-        assert "(risk_is_not high)" in variant.preconditions
+        assert PDDLCondition.attr_is_not("risk", "high") in variant.preconditions
 
     def test_base_preconditions_preserved(self, xor_parse_result_single_clause):
         registry = _make_registry(xor_parse_result_single_clause)
         XorBranchProcessor(xor_parse_result_single_clause).apply(registry)
 
         variant = registry.get("execute_left_branch")[0]
-        assert "(marked p_xor)" in variant.preconditions
+        assert PDDLCondition.marked("p_xor") in variant.preconditions
 
     def test_no_cost_assigned_for_level1(self, xor_parse_result_single_clause):
         registry = _make_registry(xor_parse_result_single_clause)
@@ -81,7 +81,7 @@ class TestMultiClauseGuard:
 
         variants = {v.name: v for v in registry.get("execute_left_branch")}
         v0 = variants["execute_left_branch_v0"]
-        assert "(risk_is high)" in v0.preconditions
+        assert PDDLCondition.attr_is("risk", "high") in v0.preconditions
 
     def test_second_variant_has_second_clause_conditions(self, xor_parse_result_multi_clause):
         registry = _make_registry(xor_parse_result_multi_clause)
@@ -89,15 +89,15 @@ class TestMultiClauseGuard:
 
         variants = {v.name: v for v in registry.get("execute_left_branch")}
         v1 = variants["execute_left_branch_v1"]
-        assert "(urgent_true)" in v1.preconditions
-        assert "(crp_is lte_10_0)" in v1.preconditions
+        assert PDDLCondition.attr_true("urgent") in v1.preconditions
+        assert PDDLCondition.attr_is("crp", "lte_10_0") in v1.preconditions
 
     def test_base_preconditions_in_all_variants(self, xor_parse_result_multi_clause):
         registry = _make_registry(xor_parse_result_multi_clause)
         XorBranchProcessor(xor_parse_result_multi_clause).apply(registry)
 
         for variant in registry.get("execute_left_branch"):
-            assert "(marked p_xor)" in variant.preconditions
+            assert PDDLCondition.marked("p_xor") in variant.preconditions
 
     def test_no_duplication_for_actions_without_guards(self, xor_parse_result_multi_clause):
         registry = _make_registry(xor_parse_result_multi_clause)
@@ -210,7 +210,7 @@ class TestDurativeActionsWithGuards:
 
         variant = registry.get("execute_left_branch")[0]
         assert isinstance(variant, PDDLDurativeAction)
-        assert "(risk_is high)" in variant.conditions_at_start
+        assert PDDLCondition.attr_is("risk", "high") in variant.conditions_at_start
 
     def test_multi_clause_durative_renamed(
         self, xor_parse_result_multi_clause, duration_stats
@@ -258,12 +258,12 @@ class TestXorTauStructure:
     def test_real_action_precondition_is_tau_marking(self, xor_parse_result_with_tau):
         registry = _make_registry(xor_parse_result_with_tau)
         real = registry.get("execute_left_branch")[0]
-        assert "(marked xor_tau_left_branch)" in real.preconditions
+        assert PDDLCondition.marked("xor_tau_left_branch") in real.preconditions
 
     def test_tau_action_precondition_is_xor_place(self, xor_parse_result_with_tau):
         registry = _make_registry(xor_parse_result_with_tau)
         tau = registry.get("execute_xor_tau_left_branch")[0]
-        assert "(marked p_xor)" in tau.preconditions
+        assert PDDLCondition.marked("p_xor") in tau.preconditions
 
     def test_no_duplication_of_tau(self, xor_parse_result_with_tau):
         registry = _make_registry(xor_parse_result_with_tau)
@@ -287,8 +287,14 @@ class TestCartesianProduct:
         the result must be 4 variants."""
         registry = _make_registry(xor_parse_result_multi_clause)
 
-        v0 = PDDLAction(name="execute_left_branch_pre0", preconditions={"(marked p_xor)"})
-        v1 = PDDLAction(name="execute_left_branch_pre1", preconditions={"(marked p_xor)"})
+        v0 = PDDLAction(
+            name="execute_left_branch_pre0",
+            preconditions={PDDLCondition.marked("p_xor")},
+        )
+        v1 = PDDLAction(
+            name="execute_left_branch_pre1",
+            preconditions={PDDLCondition.marked("p_xor")},
+        )
         registry.replace("execute_left_branch", [v0, v1])
 
         XorBranchProcessor(xor_parse_result_multi_clause).apply(registry)

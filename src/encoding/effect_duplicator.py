@@ -1,8 +1,7 @@
 """Action duplication for conditional effects (appearance and value guards)."""
 import dataclasses
 import math
-import re
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import core_utils as utils
 from models import (
@@ -11,8 +10,8 @@ from models import (
 )
 from encoding.action_registry import ActionRegistry
 from encoding.effect_encoder import value_to_pddl_effects
-from encoding.guard_encoder import and_clause_to_pddl
-from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLDurativeAction
+from encoding.guard_encoder import and_clause_to_conditions
+from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLCondition, PDDLDurativeAction, PDDLEffect
 
 logger = utils.get_logger(__name__)
 
@@ -22,9 +21,9 @@ class EffectDuplicator:
 
     Processes each non-deterministic EffectInfo on every transition,
     expanding ActionRegistry variants through appearance and value phases.
-    After all effects of a transition are processed, deduplicates
-    preconditions and merges compatible variants.  Finalises probability
-    costs across the entire registry at the end.
+    After all effects of a transition are processed, merges compatible
+    variants.  Finalises probability costs across the entire registry
+    at the end.
     """
 
     def __init__(
@@ -123,9 +122,7 @@ class EffectDuplicator:
             (with_effect, without_effect) variant lists.
         """
         if effect.appearance_level == 1 and effect.appearance_guards is None:
-            return self._appearance_deterministic(
-                variants, info, attr_name
-            )
+            return self._appearance_deterministic(variants, info, attr_name)
         if effect.appearance_level == 1 and effect.appearance_guards is not None:
             return self._appearance_dt(
                 variants, info, attr_name, effect.appearance_guards
@@ -174,7 +171,6 @@ class EffectDuplicator:
                 expanded = self._expand_with_guards(v, appears_clauses)
                 with_eff.extend(expanded)
             else:
-                #fixme: shouldn't this be a copy of v?
                 without.append(v)
                 expanded = self._expand_with_guards(v, appears_clauses)
                 with_eff.extend(expanded)
@@ -235,17 +231,11 @@ class EffectDuplicator:
             return []
 
         if effect.value_level == 1 and effect.value_guards is None:
-            return self._value_deterministic(
-                variants, attr_name, effect, catalog_entry
-            )
+            return self._value_deterministic(variants, attr_name, effect, catalog_entry)
         if effect.value_level == 1 and effect.value_guards is not None:
-            return self._value_dt(
-                variants, attr_name, effect.value_guards, catalog_entry
-            )
+            return self._value_dt(variants, attr_name, effect.value_guards, catalog_entry)
         if effect.value_level == 2:
-            return self._value_probabilistic(
-                variants, attr_name, effect, catalog_entry
-            )
+            return self._value_probabilistic(variants, attr_name, effect, catalog_entry)
         return variants
 
     def _value_deterministic(
@@ -284,7 +274,7 @@ class EffectDuplicator:
                     self._pr.negated_attributes,
                 )
                 for clause in or_clauses:
-                    conditions = and_clause_to_pddl(clause)
+                    conditions = and_clause_to_conditions(clause)
                     if _conditions_conflict(existing, conditions):
                         continue
                     new_v = self._add_conditions(v, conditions)
@@ -319,7 +309,7 @@ class EffectDuplicator:
         return result
 
     # ------------------------------------------------------------------
-    # Post-processing: deduplicate + merge
+    # Post-processing: merge
     # ------------------------------------------------------------------
 
     def _post_process(
@@ -329,100 +319,9 @@ class EffectDuplicator:
         info: TransitionInfo,
     ) -> None:
         variants = registry.get(base_name)
-        variants = self._merge_compatible(variants, info)
+        variants = _deduplicate_variants(variants)
         variants = self._rename_variants(variants, base_name)
         registry.replace(base_name, variants)
-
-    def _merge_compatible(
-        self,
-        variants: List[PDDLBaseAction],
-        info: TransitionInfo,
-    ) -> List[PDDLBaseAction]:
-        groups: Dict[FrozenSet[str], List[PDDLBaseAction]] = {}
-        for v in variants:
-            key = frozenset(_get_preconditions(v))
-            groups.setdefault(key, []).append(v)
-
-        result: List[PDDLBaseAction] = []
-        for _key, group in groups.items():
-            if len(group) == 1:
-                result.append(group[0])
-                continue
-            merged = self._try_merge_group(group, info)
-            result.extend(merged)
-        return result
-
-    def _try_merge_group(
-        self,
-        group: List[PDDLBaseAction],
-        info: TransitionInfo,
-    ) -> List[PDDLBaseAction]:
-        merged: List[PDDLBaseAction] = []
-        remaining = list(group)
-
-        while remaining:
-            current = remaining.pop(0)
-            to_retry: List[PDDLBaseAction] = []
-
-            for other in remaining:
-                if self._can_merge(current, other, info):
-                    current = self._merge_two(current, other)
-                else:
-                    to_retry.append(other)
-
-            merged.append(current)
-            remaining = to_retry
-
-        return merged
-
-    def _can_merge(
-        self,
-        a: PDDLBaseAction,
-        b: PDDLBaseAction,
-        info: TransitionInfo,
-    ) -> bool:
-        if a.effect_attributes != b.effect_attributes:
-            return False
-
-        effects_a = set(_get_effects(a))
-        effects_b = set(_get_effects(b))
-        for attr in a.effect_attributes:
-            if {e for e in effects_a if attr in e} != {e for e in effects_b if attr in e}:
-                return False
-
-        all_attrs = a.effect_attributes | b.effect_attributes
-        for pair in info.incompatible_effects:
-            if set(pair) <= all_attrs:
-                return False
-
-        return True
-
-    @staticmethod
-    def _merge_two(a: PDDLBaseAction, b: PDDLBaseAction) -> PDDLBaseAction:
-        effects_a = _get_effects(a)
-        effects_b = _get_effects(b)
-        merged_effects = _dedup(effects_a + effects_b)
-        merged_attrs = a.effect_attributes | b.effect_attributes
-        prob = min(a.effect_probability + b.effect_probability, 1.0)
-
-        if isinstance(a, PDDLDurativeAction) and isinstance(b, PDDLDurativeAction):
-            merged_eff_start = _dedup(a.effects_at_start + b.effects_at_start)
-            merged_eff_end = _dedup(a.effects_at_end + b.effects_at_end)
-            return dataclasses.replace(
-                a,
-                effects_at_start=merged_eff_start,
-                effects_at_end=merged_eff_end,
-                effect_attributes=merged_attrs,
-                effect_probability=prob,
-            )
-        if isinstance(a, PDDLAction) and isinstance(b, PDDLAction):
-            return dataclasses.replace(
-                a,
-                effects=merged_effects,
-                effect_attributes=merged_attrs,
-                effect_probability=prob,
-            )
-        return a
 
     @staticmethod
     def _rename_variants(
@@ -488,7 +387,7 @@ class EffectDuplicator:
         result: List[PDDLBaseAction] = []
         existing = _get_preconditions(action)
         for clause in or_clauses:
-            conditions = and_clause_to_pddl(clause)
+            conditions = and_clause_to_conditions(clause)
             if _conditions_conflict(existing, conditions):
                 continue
             new_action = EffectDuplicator._add_conditions(action, conditions)
@@ -497,7 +396,7 @@ class EffectDuplicator:
 
     @staticmethod
     def _add_conditions(
-        action: PDDLBaseAction, conditions: List[str]
+        action: PDDLBaseAction, conditions: List[PDDLCondition]
     ) -> PDDLBaseAction:
         if isinstance(action, PDDLDurativeAction):
             return dataclasses.replace(
@@ -512,7 +411,9 @@ class EffectDuplicator:
 
     @staticmethod
     def _add_effects(
-        action: PDDLBaseAction, effects: List[str], attr_name: Optional[str] = None
+        action: PDDLBaseAction,
+        effects: List[PDDLEffect],
+        attr_name: Optional[str] = None,
     ) -> PDDLBaseAction:
         new_attrs = (
             action.effect_attributes | {attr_name}
@@ -538,10 +439,25 @@ class EffectDuplicator:
 # Module-level helpers
 # ------------------------------------------------------------------
 
-def _dedup(items: List[str]) -> List[str]:
+def _deduplicate_variants(
+    variants: List[PDDLBaseAction],
+) -> List[PDDLBaseAction]:
+    """Remove duplicate variants, keeping the one with the highest effect_probability."""
+    groups: Dict[tuple, List[PDDLBaseAction]] = {}
+    for v in variants:
+        key = (
+            frozenset(_get_preconditions(v)),
+            frozenset(v.effect_attributes),
+            frozenset(_get_effects(v)),
+        )
+        groups.setdefault(key, []).append(v)
+    return [max(group, key=lambda v: v.effect_probability) for group in groups.values()]
+
+
+def _dedup(items: List[PDDLEffect]) -> List[PDDLEffect]:
     """Remove duplicates preserving order."""
-    seen: Set[str] = set()
-    result: List[str] = []
+    seen: Set[PDDLEffect] = set()
+    result: List[PDDLEffect] = []
     for item in items:
         if item not in seen:
             seen.add(item)
@@ -549,7 +465,7 @@ def _dedup(items: List[str]) -> List[str]:
     return result
 
 
-def _get_preconditions(action: PDDLBaseAction) -> Set[str]:
+def _get_preconditions(action: PDDLBaseAction) -> Set[PDDLCondition]:
     # TODO: for durative actions the merge key is the union of all three condition
     # slots, so two actions with identical conditions distributed differently across
     # slots (e.g. X in at_start vs X in over_all) would be considered equivalent
@@ -565,7 +481,7 @@ def _get_preconditions(action: PDDLBaseAction) -> Set[str]:
     return set()
 
 
-def _get_effects(action: PDDLBaseAction) -> List[str]:
+def _get_effects(action: PDDLBaseAction) -> List[PDDLEffect]:
     if isinstance(action, PDDLDurativeAction):
         return action.effects_at_start + action.effects_at_end
     if isinstance(action, PDDLAction):
@@ -573,67 +489,35 @@ def _get_effects(action: PDDLBaseAction) -> List[str]:
     return []
 
 
-def _negation_of(condition: str) -> Optional[str]:
-    """Return the syntactic negation of a PDDL guard predicate, or None."""
-    m = re.match(r'^\((\w+)_is (\S+)\)$', condition)
-    if m:
-        return f"({m.group(1)}_is_not {m.group(2)})"
-    m = re.match(r'^\((\w+)_is_not (\S+)\)$', condition)
-    if m:
-        return f"({m.group(1)}_is {m.group(2)})"
-    m = re.match(r'^\((\w+)_true\)$', condition)
-    if m:
-        return f"({m.group(1)}_false)"
-    m = re.match(r'^\((\w+)_false\)$', condition)
-    if m:
-        return f"({m.group(1)}_true)"
-    return None
-
-
-def _conditions_conflict(existing: Set[str], new_conditions: List[str]) -> bool:
-    """Return True if any new condition contradicts an existing precondition.
+def _conditions_conflict(
+    existing: Set[PDDLCondition], new_conditions: List[PDDLCondition]
+) -> bool:
+    """Return True if any new condition directly contradicts an existing precondition.
 
     Detects two kinds of contradiction:
-    - Direct negation: (X_is Y) vs (X_is_not Y), or (X_true) vs (X_false).
-    - Same-attribute different value: (X_is Y) vs (X_is Z) with Z != Y.
+    - Direct negation: attr_is ↔ attr_is_not for same attribute+value,
+      attr_true ↔ attr_false for same attribute.
+    - Same-attribute different value: (X_is A) conflicts with (X_is B) when A ≠ B.
 
     Called once per AND-clause so OR clauses are handled naturally: a
     conflicting clause is simply skipped while compatible ones proceed.
     """
     for cond in new_conditions:
-        neg = _negation_of(cond)
-        if neg and neg in existing:
+        if cond.kind == "marked":
+            continue
+        try:
+            if cond.logical_negation() in existing:
+                return True
+        except ValueError:
+            pass
+        if cond.kind == "attr_is" and any(
+            e.kind == "attr_is" and e.same_attribute_as(cond) and e.value != cond.value
+            for e in existing
+        ):
             return True
-        m = re.match(r'^\((\w+)_is (\S+)\)$', cond)
-        if m:
-            attr, val = m.group(1), m.group(2)
-            attr_pattern = re.compile(rf'^\({re.escape(attr)}_is (\S+)\)$')
-            for e in existing:
-                em = attr_pattern.match(e)
-                if em and em.group(1) != val:
-                    return True
     return False
 
 
-def _extract_effect_attributes(effects: Set[str]) -> Set[str]:
-    """Extract attribute names from PDDL effect strings.
-
-    Recognises patterns like (attr_is val), (attr_true), (not (attr_is val)),
-    (attr_is_not val), (attr_false).  The 'marked' predicate is excluded.
-    """
-    attrs: Set[str] = set()
-    for eff in effects:
-        cleaned = eff.replace("(not ", "").replace("(", "").replace(")", "").strip()
-        parts = cleaned.split()
-        if not parts:
-            continue
-        pred = parts[0]
-        if pred == "marked":
-            continue
-        for suffix in ("_is_not", "_is", "_true", "_false"):
-            if pred.endswith(suffix):
-                attr = pred[: -len(suffix)]
-                if attr:
-                    attrs.add(attr)
-                break
-    return attrs
+def _extract_effect_attributes(effects: Iterable[PDDLEffect]) -> Set[str]:
+    """Extract attribute names from PDDLEffect objects (excluding 'marked')."""
+    return {e.attribute for e in effects if e.kind != "marked"}

@@ -1,39 +1,41 @@
-"""Utilities for converting Guard objects to PDDL predicate strings."""
+"""Utilities for converting Guard objects to PDDLCondition instances."""
 from typing import List
 
 from models import Guard
+from encoding.pddl_model import PDDLCondition
 
 
-def guard_to_pddl(guard: Guard) -> str:
-    """Convert a single Guard to its PDDL predicate string.
+def guard_to_condition(guard: Guard) -> PDDLCondition:
+    """Convert a single Guard to a structured PDDLCondition.
 
     Args:
         guard: A Guard produced by the decision tree mining phase.
 
     Returns:
-        A PDDL predicate string ready to be used as a precondition.
+        A PDDLCondition ready to be added to an action's precondition set.
 
     Examples:
-        Guard("diagnosis", "flu",  negated=False) -> "(diagnosis_is flu)"
-        Guard("diagnosis", "flu",  negated=True)  -> "(diagnosis_is_not flu)"
-        Guard("urgent",    None,   negated=False) -> "(urgent_true)"
-        Guard("urgent",    None,   negated=True)  -> "(urgent_false)"
+        Guard("diagnosis", "flu",  negated=False) → PDDLCondition.attr_is("diagnosis", "flu")
+        Guard("diagnosis", "flu",  negated=True)  → PDDLCondition.attr_is_not("diagnosis", "flu")
+        Guard("urgent",    None,   negated=False) → PDDLCondition.attr_true("urgent")
+        Guard("urgent",    None,   negated=True)  → PDDLCondition.attr_false("urgent")
     """
     if guard.value is None:
-        suffix = "false" if guard.negated else "true"
-        return f"({guard.attribute}_{suffix})"
+        if guard.negated:
+            return PDDLCondition.attr_false(guard.attribute)
+        return PDDLCondition.attr_true(guard.attribute)
     if guard.negated:
-        return f"({guard.attribute}_is_not {guard.value})"
-    return f"({guard.attribute}_is {guard.value})"
+        return PDDLCondition.attr_is_not(guard.attribute, guard.value)
+    return PDDLCondition.attr_is(guard.attribute, guard.value)
 
 
-def and_clause_to_pddl(guards: List[Guard]) -> List[str]:
-    """Convert a list of AND-ed guards to a list of PDDL predicate strings.
+def and_clause_to_conditions(guards: List[Guard]) -> List[PDDLCondition]:
+    """Convert a list of AND-ed guards to a list of PDDLCondition instances.
 
     Args:
         guards: A single AND-clause from a SOP guard structure.
 
     Returns:
-        One PDDL string per guard, suitable for adding to a precondition list.
+        One PDDLCondition per guard, suitable for adding to a precondition set.
     """
-    return [guard_to_pddl(g) for g in guards]
+    return [guard_to_condition(g) for g in guards]

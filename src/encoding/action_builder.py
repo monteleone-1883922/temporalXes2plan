@@ -2,7 +2,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import core_utils as utils
 from models import EffectInfo, ParseResult, TransitionInfo, AttributeCatalogEntry
-from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLDurativeAction
+from encoding.pddl_model import (
+    PDDLAction, PDDLBaseAction, PDDLCondition, PDDLDurativeAction, PDDLEffect,
+)
 from encoding.effect_encoder import value_to_pddl_effects
 
 logger = utils.get_logger(__name__)
@@ -45,8 +47,8 @@ class ActionBuilder:
             for trans_name in sorted(predecessors):
                 actions.append(PDDLAction(
                     name=f"mark_{place_name}_from_{trans_name}",
-                    preconditions={f"(marked {trans_name})"},
-                    effects=[f"(marked {place_name})"],
+                    preconditions={PDDLCondition.marked(trans_name)},
+                    effects=[PDDLEffect.marking(place_name)],
                 ))
 
         return actions
@@ -97,10 +99,10 @@ class ActionBuilder:
             tau_name = utils.sanitize_name(tau_label)
             input_places = self._pr.petri_net_model.trans_inputs.get(trans_obj, set())
             preconditions = {
-                f"(marked {utils.sanitize_name(p.name)})"
+                PDDLCondition.marked(utils.sanitize_name(p.name))
                 for p in input_places
             }
-            effects = [f"(marked {tau_name})"]
+            effects = [PDDLEffect.marking(tau_name)]
 
             actions.append(PDDLAction(
                 name=f"execute_{tau_name}",
@@ -114,16 +116,16 @@ class ActionBuilder:
     # Preconditions & effects helpers
     # ------------------------------------------------------------------
 
-    def _transition_preconditions(self, trans_name: str) -> Set[str]:
+    def _transition_preconditions(self, trans_name: str) -> Set[PDDLCondition]:
         """Build precondition set: all predecessor places must be marked."""
         predecessor_places = self._pr.transition_predecessors.get(trans_name, [])
-        return {f"(marked {p})" for p in predecessor_places}
+        return {PDDLCondition.marked(p) for p in predecessor_places}
 
     def _transition_effects(
         self, trans_name: str, info: TransitionInfo
-    ) -> Tuple[List[str], Set[str]]:
+    ) -> Tuple[List[PDDLEffect], Set[str]]:
         """Build effect list and attribute set: mark self + deterministic attribute effects."""
-        effects = [f"(marked {trans_name})"]
+        effects: List[PDDLEffect] = [PDDLEffect.marking(trans_name)]
         effect_attrs: Set[str] = set()
 
         for attr_name, effect_info in sorted(info.effects.items()):
@@ -136,8 +138,8 @@ class ActionBuilder:
 
     def _deterministic_effect(
         self, attr_name: str, effect: EffectInfo
-    ) -> Optional[List[str]]:
-        """Return PDDL effect strings if the effect is deterministic, else None.
+    ) -> Optional[List[PDDLEffect]]:
+        """Return PDDLEffect list if the effect is deterministic, else None.
 
         An effect is deterministic when both appearance_level and value_level
         are 1 (screened as certain) AND both appearance_guards and value_guards

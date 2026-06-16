@@ -3,7 +3,8 @@ import pytest
 from pathlib import Path
 
 from encoding.pddl_model import (
-    PDDLAction, PDDLDomain, PDDLObject, PDDLPredicate, PDDLType,
+    PDDLAction, PDDLCondition, PDDLDomain, PDDLEffect, PDDLObject,
+    PDDLPredicate, PDDLType,
 )
 from encoding.pddl_writer import PDDLWriter
 from encoding.domain_builder import DomainBuilder
@@ -29,8 +30,8 @@ def minimal_domain():
         actions=[
             PDDLAction(
                 name="mark_p1_from_t1",
-                preconditions=["(marked t1)"],
-                effects=["(marked p1)"],
+                preconditions={PDDLCondition.marked("t1")},
+                effects=[PDDLEffect.marking("p1")],
             ),
         ],
     )
@@ -81,8 +82,8 @@ class TestRenderAction:
     def test_single_precondition_no_and(self):
         action = PDDLAction(
             name="simple",
-            preconditions=["(marked p1)"],
-            effects=["(marked t1)"],
+            preconditions={PDDLCondition.marked("p1")},
+            effects=[PDDLEffect.marking("t1")],
         )
         text = PDDLWriter()._render_action(action)
         assert ":precondition (marked p1)" in text
@@ -91,8 +92,8 @@ class TestRenderAction:
     def test_multiple_preconditions_wrapped_in_and(self):
         action = PDDLAction(
             name="join",
-            preconditions=["(marked p1)", "(marked p2)"],
-            effects=["(marked t1)"],
+            preconditions={PDDLCondition.marked("p1"), PDDLCondition.marked("p2")},
+            effects=[PDDLEffect.marking("t1")],
         )
         text = PDDLWriter()._render_action(action)
         assert ":precondition (and" in text
@@ -100,15 +101,15 @@ class TestRenderAction:
         assert "(marked p2)" in text
 
     def test_empty_precondition(self):
-        action = PDDLAction(name="noop", preconditions=[], effects=["(marked p1)"])
+        action = PDDLAction(name="noop", preconditions=set(), effects=[PDDLEffect.marking("p1")])
         text = PDDLWriter()._render_action(action)
         assert ":precondition ()" in text
 
     def test_single_effect_no_and(self):
         action = PDDLAction(
             name="simple",
-            preconditions=["(marked p1)"],
-            effects=["(marked t1)"],
+            preconditions={PDDLCondition.marked("p1")},
+            effects=[PDDLEffect.marking("t1")],
         )
         text = PDDLWriter()._render_action(action)
         assert ":effect (marked t1)" in text
@@ -116,14 +117,14 @@ class TestRenderAction:
     def test_multiple_effects_wrapped_in_and(self):
         action = PDDLAction(
             name="multi",
-            preconditions=[],
-            effects=["(marked t1)", "(diagnosis_is flu)"],
+            preconditions=set(),
+            effects=[PDDLEffect.marking("t1"), PDDLEffect.set_attr_is("diagnosis", "flu")],
         )
         text = PDDLWriter()._render_action(action)
         assert ":effect (and" in text
 
     def test_empty_parameters(self):
-        action = PDDLAction(name="act", preconditions=[], effects=[])
+        action = PDDLAction(name="act", preconditions=set(), effects=[])
         text = PDDLWriter()._render_action(action)
         assert ":parameters ()" in text
 

@@ -6,8 +6,8 @@ from typing import List, Optional
 import core_utils as utils
 from models import Guard, ParseResult
 from encoding.action_registry import ActionRegistry
-from encoding.guard_encoder import and_clause_to_pddl
-from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLDurativeAction
+from encoding.guard_encoder import and_clause_to_conditions
+from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLCondition, PDDLDurativeAction
 
 logger = utils.get_logger(__name__)
 
@@ -101,7 +101,7 @@ class XorBranchProcessor:
         expanded: List[PDDLBaseAction] = []
         for variant in current_variants:
             for clause in or_clauses:
-                conditions = and_clause_to_pddl(clause)
+                conditions = and_clause_to_conditions(clause)
                 expanded.append(self._add_conditions(variant, conditions))
 
         if single_clause:
@@ -113,7 +113,7 @@ class XorBranchProcessor:
         ]
 
     def _add_conditions(
-        self, action: PDDLBaseAction, conditions: List[str]
+        self, action: PDDLBaseAction, conditions: List[PDDLCondition]
     ) -> PDDLBaseAction:
         """Return a copy of action with extra conditions added to preconditions.
 
@@ -122,7 +122,7 @@ class XorBranchProcessor:
 
         Args:
             action: The action to copy and extend.
-            conditions: PDDL predicate strings to add.
+            conditions: PDDLCondition instances to add.
 
         Returns:
             A new action instance (original is not mutated).

@@ -3,7 +3,9 @@ import pytest
 
 from encoding.action_builder import ActionBuilder
 from encoding.domain_builder import DomainBuilder
-from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLDurativeAction
+from encoding.pddl_model import (
+    PDDLAction, PDDLBaseAction, PDDLCondition, PDDLDurativeAction, PDDLEffect,
+)
 from encoding.pddl_writer import PDDLWriter
 
 
@@ -33,19 +35,22 @@ class TestPDDLDurativeActionModel:
             name="act",
             duration_min=10.0,
             duration_max=30.0,
-            conditions_at_start={"(marked p1)"},
-            conditions_over_all={"(some_inv)"},
-            conditions_at_end={"(goal_cond)"},
-            effects_at_start=["(start_eff)"],
-            effects_at_end=["(marked t1)", "(diagnosis_is flu)"],
+            conditions_at_start={PDDLCondition.marked("p1")},
+            conditions_over_all={PDDLCondition.attr_true("some_inv")},
+            conditions_at_end={PDDLCondition.attr_true("goal_cond")},
+            effects_at_start=[PDDLEffect.marking("start_eff")],
+            effects_at_end=[PDDLEffect.marking("t1"), PDDLEffect.set_attr_is("diagnosis", "flu")],
         )
         assert action.duration_min == 10.0
         assert action.duration_max == 30.0
-        assert action.conditions_at_start == {"(marked p1)"}
-        assert action.conditions_over_all == {"(some_inv)"}
-        assert action.conditions_at_end == {"(goal_cond)"}
-        assert action.effects_at_start == ["(start_eff)"]
-        assert action.effects_at_end == ["(marked t1)", "(diagnosis_is flu)"]
+        assert action.conditions_at_start == {PDDLCondition.marked("p1")}
+        assert action.conditions_over_all == {PDDLCondition.attr_true("some_inv")}
+        assert action.conditions_at_end == {PDDLCondition.attr_true("goal_cond")}
+        assert action.effects_at_start == [PDDLEffect.marking("start_eff")]
+        assert action.effects_at_end == [
+            PDDLEffect.marking("t1"),
+            PDDLEffect.set_attr_is("diagnosis", "flu"),
+        ]
 
 
 class TestActionBuilderDurative:
@@ -85,21 +90,21 @@ class TestActionBuilderDurative:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if isinstance(a, PDDLDurativeAction))
 
-        assert "(marked p_start)" in action.conditions_at_start
+        assert PDDLCondition.marked("p_start") in action.conditions_at_start
 
     def test_durative_action_effects_at_end_includes_marked_self(self, durative_parse_result):
         builder = ActionBuilder(durative_parse_result, use_durative=True)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if isinstance(a, PDDLDurativeAction))
 
-        assert "(marked activity_a)" in action.effects_at_end
+        assert PDDLEffect.marking("activity_a") in action.effects_at_end
 
     def test_durative_action_deterministic_effects_in_effects_at_end(self, durative_parse_result):
         builder = ActionBuilder(durative_parse_result, use_durative=True)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if isinstance(a, PDDLDurativeAction))
 
-        assert "(diagnosis_is flu)" in action.effects_at_end
+        assert PDDLEffect.set_attr_is("diagnosis", "flu") in action.effects_at_end
 
     def test_tau_actions_never_durative(self, tau_parse_result):
         tau_parse_result.transitions["activity_a"].duration = None
@@ -186,8 +191,8 @@ class TestPDDLWriterDurative:
             name="test_act",
             duration_min=5.0,
             duration_max=10.0,
-            conditions_at_start={"(marked p1)"},
-            effects_at_end=["(marked t1)"],
+            conditions_at_start={PDDLCondition.marked("p1")},
+            effects_at_end=[PDDLEffect.marking("t1")],
         )
         text = PDDLWriter()._render_durative_action(action)
         assert "(:durative-action test_act" in text
@@ -199,9 +204,9 @@ class TestPDDLWriterDurative:
             name="multi",
             duration_min=1.0,
             duration_max=2.0,
-            conditions_at_start={"(marked p1)", "(marked p2)"},
-            conditions_over_all={"(resource_free)"},
-            effects_at_end=["(marked t1)", "(diagnosis_is flu)"],
+            conditions_at_start={PDDLCondition.marked("p1"), PDDLCondition.marked("p2")},
+            conditions_over_all={PDDLCondition.attr_true("resource_free")},
+            effects_at_end=[PDDLEffect.marking("t1"), PDDLEffect.set_attr_is("diagnosis", "flu")],
         )
         text = PDDLWriter()._render_durative_action(action)
         assert "(at start" in text

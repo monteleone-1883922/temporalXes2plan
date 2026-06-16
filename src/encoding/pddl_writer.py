@@ -110,7 +110,7 @@ class PDDLWriter:
         lines.append(self._render_condition_block(
             ":precondition", action.preconditions, indent="    "
         ))
-        lines.append(self._render_condition_block(
+        lines.append(self._render_effect_block(
             ":effect", action.effects, indent="    "
         ))
 
@@ -160,11 +160,11 @@ class PDDLWriter:
         effect_parts = []
         if action.effects_at_start:
             effect_parts.append(
-                self._render_timed_block("at start", action.effects_at_start)
+                self._render_timed_effect_block("at start", action.effects_at_start)
             )
         if action.effects_at_end:
             effect_parts.append(
-                self._render_timed_block("at end", action.effects_at_end)
+                self._render_timed_effect_block("at end", action.effects_at_end)
             )
 
         if not effect_parts:
@@ -187,8 +187,20 @@ class PDDLWriter:
     def _render_condition_block(
         self, keyword: str, items, indent: str = "    "
     ) -> str:
-        """Render a :precondition or :effect block."""
-        ordered = sorted(items)
+        """Render a :precondition block from a collection of PDDLCondition."""
+        ordered = sorted(c.to_pddl() for c in items)
+        if not ordered:
+            return f"{indent}{keyword} ()"
+        if len(ordered) == 1:
+            return f"{indent}{keyword} {ordered[0]}"
+        inner = f"\n{indent}  ".join(ordered)
+        return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
+
+    def _render_effect_block(
+        self, keyword: str, items, indent: str = "    "
+    ) -> str:
+        """Render a :effect block from a collection of PDDLEffect."""
+        ordered = sorted(e.to_pddl() for e in items)
         if not ordered:
             return f"{indent}{keyword} ()"
         if len(ordered) == 1:
@@ -197,8 +209,16 @@ class PDDLWriter:
         return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
 
     def _render_timed_block(self, timing: str, items) -> str:
-        """Render an (at start ...) or (over all ...) or (at end ...) block."""
-        ordered = sorted(items)
+        """Render a timed condition block (at start/over all/at end) from PDDLCondition."""
+        ordered = sorted(c.to_pddl() for c in items)
+        if len(ordered) == 1:
+            return f"({timing} {ordered[0]})"
+        inner = "\n        ".join(ordered)
+        return f"({timing} (and\n        {inner}\n      ))"
+
+    def _render_timed_effect_block(self, timing: str, items) -> str:
+        """Render a timed effect block (at start/at end) from PDDLEffect."""
+        ordered = sorted(e.to_pddl() for e in items)
         if len(ordered) == 1:
             return f"({timing} {ordered[0]})"
         inner = "\n        ".join(ordered)

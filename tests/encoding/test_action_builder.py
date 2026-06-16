@@ -6,6 +6,7 @@ from models import (
     PetriNetModel, TransitionInfo,
 )
 from encoding.action_builder import ActionBuilder
+from encoding.pddl_model import PDDLCondition, PDDLEffect
 
 
 class TestPlaceMarkingActions:
@@ -24,14 +25,14 @@ class TestPlaceMarkingActions:
         actions = builder._build_place_marking_actions()
         action = next(a for a in actions if a.name == "mark_p_mid_from_activity_a")
 
-        assert action.preconditions == {"(marked activity_a)"}
+        assert action.preconditions == {PDDLCondition.marked("activity_a")}
 
     def test_effect_is_place_marked(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_place_marking_actions()
         action = next(a for a in actions if a.name == "mark_p_mid_from_activity_a")
 
-        assert action.effects == ["(marked p_mid)"]
+        assert action.effects == [PDDLEffect.marking("p_mid")]
 
     def test_no_parameters(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
@@ -82,7 +83,7 @@ class TestTransitionActions:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert action.preconditions == {"(marked p_start)"}
+        assert action.preconditions == {PDDLCondition.marked("p_start")}
 
     def test_multiple_predecessor_places_and_join(self):
         """AND-join: transition with 2 input places."""
@@ -119,7 +120,7 @@ class TestTransitionActions:
         actions = builder._build_transition_actions()
         action = actions[0]
 
-        assert action.preconditions == {"(marked p1)", "(marked p2)"}
+        assert action.preconditions == {PDDLCondition.marked("p1"), PDDLCondition.marked("p2")}
 
     def test_effect_always_includes_marked_self(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
@@ -127,7 +128,7 @@ class TestTransitionActions:
 
         for action in actions:
             trans_name = action.name.replace("execute_", "")
-            assert f"(marked {trans_name})" in action.effects
+            assert PDDLEffect.marking(trans_name) in action.effects
 
 
 class TestDeterministicEffects:
@@ -137,7 +138,7 @@ class TestDeterministicEffects:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(diagnosis_is flu)" in action.effects
+        assert PDDLEffect.set_attr_is("diagnosis", "flu") in action.effects
 
     # --- categorical without negated_attributes ---
 
@@ -146,15 +147,18 @@ class TestDeterministicEffects:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert not any("diagnosis_is_not" in e for e in action.effects)
+        assert not any(
+            e.kind == "attr_is_not" and e.attribute == "diagnosis"
+            for e in action.effects
+        )
 
     def test_categorical_still_clears_positive_for_other_values(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(not (diagnosis_is cold))" in action.effects
-        assert "(not (diagnosis_is covid))" in action.effects
+        assert PDDLEffect.clear_attr_is("diagnosis", "cold") in action.effects
+        assert PDDLEffect.clear_attr_is("diagnosis", "covid") in action.effects
 
     # --- categorical with negated_attributes ---
 
@@ -163,23 +167,23 @@ class TestDeterministicEffects:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(diagnosis_is_not cold)" in action.effects
-        assert "(diagnosis_is_not covid)" in action.effects
+        assert PDDLEffect.set_attr_is_not("diagnosis", "cold") in action.effects
+        assert PDDLEffect.set_attr_is_not("diagnosis", "covid") in action.effects
 
     def test_categorical_clears_is_not_for_active_value_when_negated(self, negated_parse_result):
         builder = ActionBuilder(negated_parse_result)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(not (diagnosis_is_not flu))" in action.effects
+        assert PDDLEffect.clear_attr_is_not("diagnosis", "flu") in action.effects
 
     def test_categorical_clears_positive_for_other_values_when_negated(self, negated_parse_result):
         builder = ActionBuilder(negated_parse_result)
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(not (diagnosis_is cold))" in action.effects
-        assert "(not (diagnosis_is covid))" in action.effects
+        assert PDDLEffect.clear_attr_is("diagnosis", "cold") in action.effects
+        assert PDDLEffect.clear_attr_is("diagnosis", "covid") in action.effects
 
     # --- boolean without negated_attributes ---
 
@@ -193,8 +197,8 @@ class TestDeterministicEffects:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(urgent_true)" in action.effects
-        assert "(not (urgent_false))" not in action.effects
+        assert PDDLEffect.set_attr_true("urgent") in action.effects
+        assert PDDLEffect.clear_attr_false("urgent") not in action.effects
 
     def test_boolean_false_clears_true_when_not_negated(self, simple_parse_result):
         simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
@@ -212,8 +216,8 @@ class TestDeterministicEffects:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(not (urgent_true))" in action.effects
-        assert "(urgent_false)" not in action.effects
+        assert PDDLEffect.clear_attr_true("urgent") in action.effects
+        assert PDDLEffect.set_attr_false("urgent") not in action.effects
 
     # --- boolean with negated_attributes ---
 
@@ -228,8 +232,8 @@ class TestDeterministicEffects:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(urgent_true)" in action.effects
-        assert "(not (urgent_false))" in action.effects
+        assert PDDLEffect.set_attr_true("urgent") in action.effects
+        assert PDDLEffect.clear_attr_false("urgent") in action.effects
 
     def test_boolean_false_sets_false_when_negated(self, simple_parse_result):
         simple_parse_result.attribute_catalog["urgent"] = AttributeCatalogEntry(
@@ -248,8 +252,8 @@ class TestDeterministicEffects:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert "(urgent_false)" in action.effects
-        assert "(not (urgent_true))" in action.effects
+        assert PDDLEffect.set_attr_false("urgent") in action.effects
+        assert PDDLEffect.clear_attr_true("urgent") in action.effects
 
 
 class TestNonDeterministicEffectsExcluded:
@@ -264,7 +268,7 @@ class TestNonDeterministicEffectsExcluded:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert not any("outcome" in e for e in action.effects)
+        assert not any(e.attribute == "outcome" for e in action.effects)
 
     def test_effect_with_guards_excluded(self, simple_parse_result):
         """Even single-value effects with guards are not deterministic."""
@@ -286,8 +290,9 @@ class TestNonDeterministicEffectsExcluded:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        effect_strs = [e for e in action.effects if "diagnosis" in e]
-        assert effect_strs == []
+        assert not any(
+            e.attribute == "diagnosis" and not e.clear for e in action.effects
+        )
 
     def test_level3_effect_excluded(self, simple_parse_result):
         level3_effect = EffectInfo(
@@ -301,8 +306,7 @@ class TestNonDeterministicEffectsExcluded:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        effect_strs = [e for e in action.effects if "diagnosis" in e]
-        assert effect_strs == []
+        assert not any(e.attribute == "diagnosis" for e in action.effects)
 
     def test_appearance_level2_excluded(self, simple_parse_result):
         """appearance_level=2 means not certainly deterministic."""
@@ -318,8 +322,7 @@ class TestNonDeterministicEffectsExcluded:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        effect_strs = [e for e in action.effects if "diagnosis" in e]
-        assert effect_strs == []
+        assert not any(e.attribute == "diagnosis" for e in action.effects)
 
 
 class TestTauActions:
@@ -335,13 +338,13 @@ class TestTauActions:
         builder = ActionBuilder(tau_parse_result)
         actions = builder._build_tau_actions()
 
-        assert "(marked p_start)" in actions[0].preconditions
+        assert PDDLCondition.marked("p_start") in actions[0].preconditions
 
     def test_tau_effect_is_marked_self(self, tau_parse_result):
         builder = ActionBuilder(tau_parse_result)
         actions = builder._build_tau_actions()
 
-        assert "(marked tau_0)" in actions[0].effects
+        assert PDDLEffect.marking("tau_0") in actions[0].effects
 
     def test_no_tau_actions_when_none_exist(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
