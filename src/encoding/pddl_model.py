@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 
 @dataclass
@@ -32,17 +32,29 @@ class PDDLBaseAction:
     Attributes:
         base_cost: Fixed action cost (reserved for future use, e.g. global frequency).
         additional_cost: XOR branch cost derived from statistical fallback: -log(p).
+        effect_probability: Accumulated probability from conditional effect
+            duplication.  Starts at 1.0 (no penalty); multiplied by each
+            probabilistic effect's presence/value probability during
+            EffectDuplicator processing.  Converted to -log(p) and added
+            to additional_cost at finalisation time.
+        effect_attributes: Sanitized names of attributes modified by this
+            action's effects.  Populated by ActionBuilder for deterministic
+            effects and updated by EffectDuplicator as conditional effects
+            are resolved.  Used for fast compatibility checks during
+            duplication (replaces parsing PDDL strings at runtime).
     """
     name: str
     parameters: List[Tuple[str, str]] = field(default_factory=list)
     base_cost: Optional[float] = None
     additional_cost: Optional[float] = None
+    effect_probability: float = 1.0
+    effect_attributes: Set[str] = field(default_factory=set)
 
 
 @dataclass
 class PDDLAction(PDDLBaseAction):
     """A PDDL instantaneous action."""
-    preconditions: List[str] = field(default_factory=list)
+    preconditions: Set[str] = field(default_factory=set)
     effects: List[str] = field(default_factory=list)
 
 
@@ -65,9 +77,9 @@ class PDDLDurativeAction(PDDLBaseAction):
     """
     duration_min: float = 0.0
     duration_max: float = 0.0
-    conditions_at_start: List[str] = field(default_factory=list)
-    conditions_over_all: List[str] = field(default_factory=list)
-    conditions_at_end: List[str] = field(default_factory=list)
+    conditions_at_start: Set[str] = field(default_factory=set)
+    conditions_over_all: Set[str] = field(default_factory=set)
+    conditions_at_end: Set[str] = field(default_factory=set)
     effects_at_start: List[str] = field(default_factory=list)
     effects_at_end: List[str] = field(default_factory=list)
 

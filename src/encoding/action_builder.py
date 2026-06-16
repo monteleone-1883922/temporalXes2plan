@@ -1,8 +1,9 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import core_utils as utils
 from models import EffectInfo, ParseResult, TransitionInfo, AttributeCatalogEntry
 from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLDurativeAction
+from encoding.effect_encoder import value_to_pddl_effects
 
 logger = utils.get_logger(__name__)
 
@@ -44,7 +45,7 @@ class ActionBuilder:
             for trans_name in sorted(predecessors):
                 actions.append(PDDLAction(
                     name=f"mark_{place_name}_from_{trans_name}",
-                    preconditions=[f"(marked {trans_name})"],
+                    preconditions={f"(marked {trans_name})"},
                     effects=[f"(marked {place_name})"],
                 ))
 
@@ -60,7 +61,7 @@ class ActionBuilder:
 
         for trans_name, info in sorted(self._pr.transitions.items()):
             preconditions = self._transition_preconditions(trans_name)
-            effects = self._transition_effects(trans_name, info)
+            effects, effect_attrs = self._transition_effects(trans_name, info)
 
             if self._use_durative and info.duration is not None:
                 actions.append(PDDLDurativeAction(
@@ -69,12 +70,14 @@ class ActionBuilder:
                     duration_max=info.duration.effective_max,
                     conditions_at_start=preconditions,
                     effects_at_end=effects,
+                    effect_attributes=effect_attrs,
                 ))
             else:
                 actions.append(PDDLAction(
                     name=f"execute_{trans_name}",
                     preconditions=preconditions,
                     effects=effects,
+                    effect_attributes=effect_attrs,
                 ))
 
         return actions
@@ -93,10 +96,10 @@ class ActionBuilder:
         ):
             tau_name = utils.sanitize_name(tau_label)
             input_places = self._pr.petri_net_model.trans_inputs.get(trans_obj, set())
-            preconditions = [
+            preconditions = {
                 f"(marked {utils.sanitize_name(p.name)})"
-                for p in sorted(input_places, key=lambda p: p.name)
-            ]
+                for p in input_places
+            }
             effects = [f"(marked {tau_name})"]
 
             actions.append(PDDLAction(
@@ -111,26 +114,25 @@ class ActionBuilder:
     # Preconditions & effects helpers
     # ------------------------------------------------------------------
 
-    def _transition_preconditions(self, trans_name: str) -> List[str]:
-        """Build precondition list: all predecessor places must be marked."""
+    def _transition_preconditions(self, trans_name: str) -> Set[str]:
+        """Build precondition set: all predecessor places must be marked."""
         predecessor_places = self._pr.transition_predecessors.get(trans_name, [])
-        return [
-            f"(marked {p})"
-            for p in sorted(predecessor_places)
-        ]
+        return {f"(marked {p})" for p in predecessor_places}
 
     def _transition_effects(
         self, trans_name: str, info: TransitionInfo
-    ) -> List[str]:
-        """Build effect list: mark self + deterministic attribute effects."""
+    ) -> Tuple[List[str], Set[str]]:
+        """Build effect list and attribute set: mark self + deterministic attribute effects."""
         effects = [f"(marked {trans_name})"]
+        effect_attrs: Set[str] = set()
 
         for attr_name, effect_info in sorted(info.effects.items()):
             det_effects = self._deterministic_effect(attr_name, effect_info)
             if det_effects is not None:
                 effects.extend(det_effects)
+                effect_attrs.add(attr_name)
 
-        return effects
+        return effects, effect_attrs
 
     def _deterministic_effect(
         self, attr_name: str, effect: EffectInfo
@@ -156,49 +158,6 @@ class ActionBuilder:
             logger.warning("Attribute %s not in catalog, skipping effect", attr_name)
             return None
 
-        if catalog_entry.attribute_type == "boolean":
-            return self._boolean_effect(attr_name, value)
-        else:
-            return self._categorical_effect(attr_name, value, catalog_entry)
-
-    def _boolean_effect(self, attr_name: str, value: Any) -> List[str]:
-        """PDDL effects for a deterministic boolean attribute change.
-
-        When attr_name is not in negated_attributes the _false predicate does
-        not exist, so the false state is expressed by clearing _true only.
-        """
-        needs_negative = attr_name in self._pr.negated_attributes
-        if value is True or str(value).lower() == "true":
-            effects = [f"({attr_name}_true)"]
-            if needs_negative:
-                effects.append(f"(not ({attr_name}_false))")
-        else:
-            if needs_negative:
-                effects = [f"({attr_name}_false)", f"(not ({attr_name}_true))"]
-            else:
-                effects = [f"(not ({attr_name}_true))"]
-        return effects
-
-    def _categorical_effect(
-        self, attr_name: str, value: Any, catalog_entry: AttributeCatalogEntry
-    ) -> List[str]:
-        """PDDL effects for a deterministic categorical attribute change.
-
-        _is_not terms are emitted only when attr_name is in negated_attributes.
-        (not (_is X)) terms are always emitted to keep the positive predicate
-        consistent regardless of whether negative predicates exist.
-        """
-        val_str = str(value)
-        needs_negative = attr_name in self._pr.negated_attributes
-        effects = [f"({attr_name}_is {val_str})"]
-
-        for other_val in sorted(str(v) for v in catalog_entry.possible_values):
-            if other_val == val_str:
-                if needs_negative:
-                    effects.append(f"(not ({attr_name}_is_not {other_val}))")
-            else:
-                if needs_negative:
-                    effects.append(f"({attr_name}_is_not {other_val})")
-                effects.append(f"(not ({attr_name}_is {other_val}))")
-
-        return effects
+        return value_to_pddl_effects(
+            attr_name, value, catalog_entry, self._pr.negated_attributes
+        )

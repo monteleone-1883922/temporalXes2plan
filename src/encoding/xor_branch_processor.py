@@ -130,11 +130,11 @@ class XorBranchProcessor:
         if isinstance(action, PDDLDurativeAction):
             return dataclasses.replace(
                 action,
-                conditions_at_start=action.conditions_at_start + conditions,
+                conditions_at_start=action.conditions_at_start | set(conditions),
             )
         if isinstance(action, PDDLAction):
             return dataclasses.replace(
                 action,
-                preconditions=action.preconditions + conditions,
+                preconditions=action.preconditions | set(conditions),
             )
         raise TypeError(f"Unsupported action type: {type(action)}")

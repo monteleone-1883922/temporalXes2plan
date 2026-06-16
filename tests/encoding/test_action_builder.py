@@ -24,7 +24,7 @@ class TestPlaceMarkingActions:
         actions = builder._build_place_marking_actions()
         action = next(a for a in actions if a.name == "mark_p_mid_from_activity_a")
 
-        assert action.preconditions == ["(marked activity_a)"]
+        assert action.preconditions == {"(marked activity_a)"}
 
     def test_effect_is_place_marked(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
@@ -82,7 +82,7 @@ class TestTransitionActions:
         actions = builder._build_transition_actions()
         action = next(a for a in actions if a.name == "execute_activity_a")
 
-        assert action.preconditions == ["(marked p_start)"]
+        assert action.preconditions == {"(marked p_start)"}
 
     def test_multiple_predecessor_places_and_join(self):
         """AND-join: transition with 2 input places."""
@@ -119,7 +119,7 @@ class TestTransitionActions:
         actions = builder._build_transition_actions()
         action = actions[0]
 
-        assert sorted(action.preconditions) == ["(marked p1)", "(marked p2)"]
+        assert action.preconditions == {"(marked p1)", "(marked p2)"}
 
     def test_effect_always_includes_marked_self(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)

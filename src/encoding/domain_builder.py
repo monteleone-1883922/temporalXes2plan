@@ -1,10 +1,11 @@
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import core_utils as utils
-from models import AttributeCatalogEntry, ParseResult, PetriNetModel
+from models import AnalysisConfig, AttributeCatalogEntry, ParseResult, PetriNetModel
 from encoding.pddl_model import PDDLDurativeAction, PDDLDomain, PDDLObject, PDDLPredicate, PDDLType
 from encoding.action_builder import ActionBuilder
 from encoding.action_registry import ActionRegistry
+from encoding.effect_duplicator import EffectDuplicator
 from encoding.xor_branch_processor import XorBranchProcessor
 
 logger = utils.get_logger(__name__)
@@ -18,6 +19,7 @@ class DomainBuilder:
         parse_result: ParseResult,
         domain_name: str = "process",
         use_durative: bool = False,
+        config: Optional[AnalysisConfig] = None,
     ) -> PDDLDomain:
         """Transform a ParseResult into a complete PDDLDomain.
 
@@ -27,10 +29,15 @@ class DomainBuilder:
             use_durative: When True, transitions that carry duration data are
                 encoded as durative-action blocks instead of instantaneous
                 actions.  Adds :durative-actions to requirements automatically.
+            config: Analysis configuration controlling effect duplication
+                modes and cost tracking.  Defaults to AnalysisConfig().
 
         Returns:
             A fully populated PDDLDomain.
         """
+        if config is None:
+            config = AnalysisConfig()
+
         types = self._build_types(parse_result.attribute_catalog)
         constants = self._build_constants(parse_result)
         predicates = self._build_predicates(
@@ -42,6 +49,7 @@ class DomainBuilder:
 
         registry = ActionRegistry.from_base_actions(base_actions)
         XorBranchProcessor(parse_result).apply(registry)
+        EffectDuplicator(parse_result, config).apply(registry)
         actions = registry.all_actions()
 
         requirements = [":strips", ":typing"]

@@ -126,7 +126,7 @@ class TestCascadeLevel2:
 
     def test_no_conditions_added(self, xor_parse_result_no_guards):
         registry = _make_registry(xor_parse_result_no_guards)
-        original_preconds = list(registry.get("execute_left_branch")[0].preconditions)
+        original_preconds = set(registry.get("execute_left_branch")[0].preconditions)
 
         XorBranchProcessor(xor_parse_result_no_guards).apply(registry)
 
@@ -176,7 +176,7 @@ class TestCascadeLevel3:
 
     def test_no_conditions_added(self, xor_parse_result_level3):
         registry = _make_registry(xor_parse_result_level3)
-        original_preconds = list(registry.get("execute_left_branch")[0].preconditions)
+        original_preconds = set(registry.get("execute_left_branch")[0].preconditions)
 
         XorBranchProcessor(xor_parse_result_level3).apply(registry)
 
@@ -287,8 +287,8 @@ class TestCartesianProduct:
         the result must be 4 variants."""
         registry = _make_registry(xor_parse_result_multi_clause)
 
-        v0 = PDDLAction(name="execute_left_branch_pre0", preconditions=["(marked p_xor)"])
-        v1 = PDDLAction(name="execute_left_branch_pre1", preconditions=["(marked p_xor)"])
+        v0 = PDDLAction(name="execute_left_branch_pre0", preconditions={"(marked p_xor)"})
+        v1 = PDDLAction(name="execute_left_branch_pre1", preconditions={"(marked p_xor)"})
         registry.replace("execute_left_branch", [v0, v1])
 
         XorBranchProcessor(xor_parse_result_multi_clause).apply(registry)

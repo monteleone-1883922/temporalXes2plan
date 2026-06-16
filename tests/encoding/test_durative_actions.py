@@ -22,9 +22,9 @@ class TestPDDLDurativeActionModel:
     def test_default_fields(self):
         action = PDDLDurativeAction(name="d", duration_min=1.0, duration_max=2.0)
         assert action.parameters == []
-        assert action.conditions_at_start == []
-        assert action.conditions_over_all == []
-        assert action.conditions_at_end == []
+        assert action.conditions_at_start == set()
+        assert action.conditions_over_all == set()
+        assert action.conditions_at_end == set()
         assert action.effects_at_start == []
         assert action.effects_at_end == []
 
@@ -33,17 +33,17 @@ class TestPDDLDurativeActionModel:
             name="act",
             duration_min=10.0,
             duration_max=30.0,
-            conditions_at_start=["(marked p1)"],
-            conditions_over_all=["(some_inv)"],
-            conditions_at_end=["(goal_cond)"],
+            conditions_at_start={"(marked p1)"},
+            conditions_over_all={"(some_inv)"},
+            conditions_at_end={"(goal_cond)"},
             effects_at_start=["(start_eff)"],
             effects_at_end=["(marked t1)", "(diagnosis_is flu)"],
         )
         assert action.duration_min == 10.0
         assert action.duration_max == 30.0
-        assert action.conditions_at_start == ["(marked p1)"]
-        assert action.conditions_over_all == ["(some_inv)"]
-        assert action.conditions_at_end == ["(goal_cond)"]
+        assert action.conditions_at_start == {"(marked p1)"}
+        assert action.conditions_over_all == {"(some_inv)"}
+        assert action.conditions_at_end == {"(goal_cond)"}
         assert action.effects_at_start == ["(start_eff)"]
         assert action.effects_at_end == ["(marked t1)", "(diagnosis_is flu)"]
 
@@ -186,7 +186,7 @@ class TestPDDLWriterDurative:
             name="test_act",
             duration_min=5.0,
             duration_max=10.0,
-            conditions_at_start=["(marked p1)"],
+            conditions_at_start={"(marked p1)"},
             effects_at_end=["(marked t1)"],
         )
         text = PDDLWriter()._render_durative_action(action)
@@ -199,8 +199,8 @@ class TestPDDLWriterDurative:
             name="multi",
             duration_min=1.0,
             duration_max=2.0,
-            conditions_at_start=["(marked p1)", "(marked p2)"],
-            conditions_over_all=["(resource_free)"],
+            conditions_at_start={"(marked p1)", "(marked p2)"},
+            conditions_over_all={"(resource_free)"},
             effects_at_end=["(marked t1)", "(diagnosis_is flu)"],
         )
         text = PDDLWriter()._render_durative_action(action)

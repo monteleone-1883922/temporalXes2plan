@@ -185,19 +185,21 @@ class PDDLWriter:
     # ------------------------------------------------------------------
 
     def _render_condition_block(
-        self, keyword: str, items: List[str], indent: str = "    "
+        self, keyword: str, items, indent: str = "    "
     ) -> str:
         """Render a :precondition or :effect block."""
-        if not items:
+        ordered = sorted(items)
+        if not ordered:
             return f"{indent}{keyword} ()"
-        if len(items) == 1:
-            return f"{indent}{keyword} {items[0]}"
-        inner = f"\n{indent}  ".join(items)
+        if len(ordered) == 1:
+            return f"{indent}{keyword} {ordered[0]}"
+        inner = f"\n{indent}  ".join(ordered)
         return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
 
-    def _render_timed_block(self, timing: str, items: List[str]) -> str:
+    def _render_timed_block(self, timing: str, items) -> str:
         """Render an (at start ...) or (over all ...) or (at end ...) block."""
-        if len(items) == 1:
-            return f"({timing} {items[0]})"
-        inner = "\n        ".join(items)
+        ordered = sorted(items)
+        if len(ordered) == 1:
+            return f"({timing} {ordered[0]})"
+        inner = "\n        ".join(ordered)
         return f"({timing} (and\n        {inner}\n      ))"
