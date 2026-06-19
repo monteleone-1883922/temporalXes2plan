@@ -718,3 +718,6 @@ class ParseResult:
     attribute_catalog: Dict[str, AttributeCatalogEntry]
     negated_attributes: Set[str] = field(default_factory=set)
     xor_virtual_taus: Set[str] = field(default_factory=set)
+    artificial_xor_places: Set[str] = field(default_factory=set)
+    variant_to_art_place: Dict[str, str] = field(default_factory=dict)
+    artificial_xor_data: Dict[str, Any] = field(default_factory=dict)

@@ -14,6 +14,29 @@ logger = utils.get_logger(__name__)
 class DomainBuilder:
     """Builds a PDDLDomain from a ParseResult."""
 
+    def build_with_registry(
+        self,
+        parse_result: ParseResult,
+        domain_name: str = "process",
+        use_durative: bool = False,
+        config: Optional[AnalysisConfig] = None,
+    ) -> tuple[PDDLDomain, "ActionRegistry"]:
+        """Like build(), but also returns the ActionRegistry after EffectDuplicator.
+
+        Args:
+            parse_result: Encoder-ready output from the parsing pipeline.
+            domain_name: Name for the PDDL domain.
+            use_durative: Encode durative actions when True.
+            config: Analysis configuration; defaults to AnalysisConfig().
+
+        Returns:
+            Tuple of (PDDLDomain, ActionRegistry).
+        """
+        domain, registry = self._build_internal(
+            parse_result, domain_name, use_durative, config
+        )
+        return domain, registry
+
     def build(
         self,
         parse_result: ParseResult,
@@ -35,6 +58,18 @@ class DomainBuilder:
         Returns:
             A fully populated PDDLDomain.
         """
+        domain, _ = self._build_internal(
+            parse_result, domain_name, use_durative, config
+        )
+        return domain
+
+    def _build_internal(
+        self,
+        parse_result: ParseResult,
+        domain_name: str,
+        use_durative: bool,
+        config: Optional[AnalysisConfig],
+    ) -> tuple[PDDLDomain, "ActionRegistry"]:
         if config is None:
             config = AnalysisConfig()
 
@@ -56,7 +91,7 @@ class DomainBuilder:
         if any(isinstance(a, PDDLDurativeAction) for a in actions):
             requirements.append(":durative-actions")
 
-        return PDDLDomain(
+        domain = PDDLDomain(
             name=domain_name,
             requirements=requirements,
             types=types,
@@ -64,6 +99,7 @@ class DomainBuilder:
             predicates=predicates,
             actions=actions,
         )
+        return domain, registry
 
     def _build_types(
         self, attribute_catalog: Dict[str, AttributeCatalogEntry]
