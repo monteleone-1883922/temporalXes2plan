@@ -1,12 +1,11 @@
 """End-to-end pipeline coordinator: XES event log → PDDL domain + UI JSON files.
 
 Orchestrates:
-  1. Parsing   — Parser (xes_parser) produces a ParseResult
-  2. Encoding  — DomainBuilder.build_with_registry() builds PDDLDomain + ActionRegistry
-  3. Graph update — update_parse_result() injects artificial XOR splits for duplicated actions
-  4. Serialization — serialize_parse_result() produces the UI JSON dict
-  5. Persistence — save_original_and_current() writes original.json / current.json
-  6. PDDL write — PDDLWriter.write_domain() writes the .pddl file
+  1. Parsing        — Parser (xes_parser) produces a ParseResult
+  2. Encoding       — DomainBuilder.build() builds the PDDLDomain
+  3. Serialization  — serialize_parse_result() produces the UI JSON dict
+  4. Persistence    — save_original_and_current() writes original.json / current.json
+  5. PDDL write     — PDDLWriter.write_domain() writes the .pddl file
 """
 
 import os
@@ -17,7 +16,7 @@ import core_utils as utils
 from models import AnalysisConfig
 from parsing.xes_parser import Parser
 from encoding.domain_builder import DomainBuilder
-from encoding.graph_updater import update_parse_result, save_original_and_current
+from encoding.graph_updater import save_original_and_current
 from encoding.pddl_writer import PDDLWriter
 from web.serializer import serialize_parse_result
 
@@ -80,25 +79,21 @@ class Pipeline:
         parse_result = parser.parse_result
 
         # 2 — Encode
-        logger.info("Step 2/5: Building PDDL domain")
+        logger.info("Step 2/4: Building PDDL domain")
         builder = DomainBuilder()
-        domain, registry = builder.build_with_registry(
+        domain = builder.build(
             parse_result=parse_result,
             domain_name=domain_name,
             use_durative=use_durative,
             config=config,
         )
 
-        # 3 — Inject artificial XOR splits for duplicated actions
-        logger.info("Step 3/5: Updating ParseResult with artificial XOR splits")
-        parse_result = update_parse_result(parse_result, registry)
-
-        # 4 — Serialize
-        logger.info("Step 4/5: Serializing to UI JSON")
+        # 3 — Serialize
+        logger.info("Step 3/4: Serializing to UI JSON")
         ui_data = serialize_parse_result(parse_result)
 
-        # 5 — Persist JSON (original + current, skipped if already exist)
-        logger.info("Step 5/5: Saving JSON to %s", config_dir)
+        # 4 — Persist JSON (original + current, skipped if already exist)
+        logger.info("Step 4/4: Saving JSON to %s", config_dir)
         orig_written, curr_written = save_original_and_current(config_dir, ui_data)
         if orig_written:
             logger.info("original.json created")
@@ -109,7 +104,7 @@ class Pipeline:
         else:
             logger.info("current.json already existed — skipped")
 
-        # 6 — Write PDDL
+        # Write PDDL
         logger.info("Writing PDDL domain to %s", pddl_path)
         PDDLWriter().write_domain(domain, pddl_path)
 

@@ -52,6 +52,7 @@ from .log_preprocessor import LogPreprocessor
 from .log_processor import LogProcessor
 from .model_discoverer import ModelDiscoverer
 from .petri_net_log_builder import PetriNetLogBuilder
+from .precondition_miner import PreconditionMiner
 from .probability_estimator import ProbabilityEstimator
 from .temporal_extractor import ExternalDuration, TemporalExtractor
 
@@ -543,6 +544,22 @@ class Parser:
             if t.label
         }
 
+        # Attribute precondition mining — run here so catalog_attributes is known.
+        # Only attributes that survived the effect pipeline are candidates.
+        catalog_attributes: Set[str] = set()
+        for attr_infos in self._transition_effect_info.values():
+            catalog_attributes.update(attr_infos.keys())
+        logger.info("Starting attribute precondition mining")
+        attr_preconditions = PreconditionMiner().mine(
+            transition_firings=self.preprocessed_log.transition_firings,
+            catalog_attributes=catalog_attributes,
+            config=self.config,
+        )
+        logger.info(
+            "Attribute precondition mining complete: %d transitions with preconditions",
+            len(attr_preconditions),
+        )
+
         # TransitionInfo per labeled transition
         transitions: Dict[str, TransitionInfo] = {}
         for t, input_places in pnm.trans_inputs.items():
@@ -560,6 +577,7 @@ class Parser:
                 duration=self.duration_stats.get(act),
                 related_effects=cooccurrence[0],
                 incompatible_effects=cooccurrence[1],
+                attribute_preconditions=attr_preconditions.get(act, []),
             )
 
         # Start / end place names from markings (single-place markings assumed)

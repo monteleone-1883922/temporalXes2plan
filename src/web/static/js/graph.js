@@ -173,17 +173,12 @@ function initGraph() {
     });
 
     cy.on("tap", "node", function (evt) {
-        const node = evt.target;
-        const type       = node.data("type");
-        const id         = node.data("id");
-        const label      = node.data("label");
-        const artSplitId = node.data("art_split_id");
+        const node  = evt.target;
+        const type  = node.data("type");
+        const id    = node.data("id");
+        const label = node.data("label");
 
-        if (artSplitId) {
-            showArtificialXorPanel(artSplitId);
-        } else if (type === "xor_split_artificial") {
-            showArtificialXorPanel(id);
-        } else if (type === "transition" || type === "and_split") {
+        if (type === "transition" || type === "and_split") {
             showTransitionPanel(label);
         } else if (type === "xor_split") {
             showXorSplitPanel(id);

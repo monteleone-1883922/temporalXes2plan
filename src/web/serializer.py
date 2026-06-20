@@ -9,20 +9,17 @@ from typing import Any, Dict, List, Optional, Set
 import core_utils as utils
 from models import (
     AttributeCatalogEntry,
-    EffectGuards,
     EffectInfo,
     Guard,
     ParseResult,
     PetriNetModel,
-    TransitionInfo,
-    XorBranchInfo,
 )
 
 
 def serialize_parse_result(result: ParseResult) -> Dict[str, Any]:
     """Convert a ParseResult into a JSON-serializable dict for the web UI."""
     pnm = result.petri_net_model
-    graph = _build_graph(pnm, result)
+    graph = _build_graph(pnm)
     transitions = _build_transitions(result)
     xor_splits = _build_xor_splits(pnm, result)
     catalog = _build_attribute_catalog(result.attribute_catalog)
@@ -31,7 +28,6 @@ def serialize_parse_result(result: ParseResult) -> Dict[str, Any]:
         "graph": graph,
         "transitions": transitions,
         "xor_splits": xor_splits,
-        "artificial_xor_splits": result.artificial_xor_data,
         "attribute_catalog": catalog,
     }
 
@@ -40,40 +36,24 @@ def serialize_parse_result(result: ParseResult) -> Dict[str, Any]:
 # Graph (nodes + edges)
 # ---------------------------------------------------------------------------
 
-def _build_graph(
-    pnm: PetriNetModel, result: ParseResult
-) -> Dict[str, Any]:
+def _build_graph(pnm: PetriNetModel) -> Dict[str, Any]:
     """Build Cytoscape-ready node and edge lists from the Petri net."""
     xor_place_names: Set[str] = {p.name for p in pnm.xor_splits}
-    artificial_xor_places: Set[str] = result.artificial_xor_places
-    variant_to_art_place: Dict[str, str] = result.variant_to_art_place
 
     and_transition_names: Set[str] = set()
     for t in pnm.petrinet.transitions:
         if not t.label:
             continue
-        sanitized = utils.sanitize_name(t.label)
-        if sanitized in variant_to_art_place:
-            continue
         inputs = pnm.trans_inputs.get(t, set())
         outputs = pnm.trans_outputs.get(t, set())
         if len(inputs) > 1 or len(outputs) > 1:
-            and_transition_names.add(sanitized)
+            and_transition_names.add(utils.sanitize_name(t.label))
 
     nodes: List[Dict[str, Any]] = []
 
     for p in pnm.petrinet.places:
-        if p.name in artificial_xor_places:
-            node_type = "xor_split_artificial"
-        elif p.name in xor_place_names:
-            node_type = "xor_split"
-        else:
-            node_type = "place"
-        nodes.append({
-            "id": p.name,
-            "type": node_type,
-            "label": p.name,
-        })
+        node_type = "xor_split" if p.name in xor_place_names else "place"
+        nodes.append({"id": p.name, "type": node_type, "label": p.name})
 
     for t in pnm.petrinet.transitions:
         t_id = t.name if t.name else str(id(t))
@@ -83,9 +63,6 @@ def _build_graph(
         if is_silent:
             node_type = "silent"
             label = pnm.silent_transitions.get(t, "")
-        elif sanitized in variant_to_art_place:
-            node_type = "transition"
-            label = t.label
         elif sanitized in and_transition_names:
             node_type = "and_split"
             label = sanitized
@@ -93,15 +70,12 @@ def _build_graph(
             node_type = "transition"
             label = sanitized
 
-        node: Dict[str, Any] = {
+        nodes.append({
             "id": t_id,
             "type": node_type,
             "label": label or "",
             "is_silent": is_silent,
-        }
-        if sanitized in variant_to_art_place:
-            node["art_split_id"] = variant_to_art_place[sanitized]
-        nodes.append(node)
+        })
 
     edges: List[Dict[str, str]] = []
     for arc in pnm.petrinet.arcs:
@@ -177,8 +151,8 @@ def _build_transitions(result: ParseResult) -> Dict[str, Any]:
 
     for act, t_info in result.transitions.items():
         preconditions: List[List[Dict[str, Any]]] = []
-        if t_info.xor_branch and t_info.xor_branch.guards:
-            preconditions = _guards_to_preconditions(t_info.xor_branch.guards)
+        if t_info.attribute_preconditions:
+            preconditions = [[_guard_to_condition(g) for g in t_info.attribute_preconditions]]
 
         effects: List[Dict[str, Any]] = []
         for attr, eff_info in t_info.effects.items():

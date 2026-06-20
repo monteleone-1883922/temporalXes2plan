@@ -117,9 +117,21 @@ class ActionBuilder:
     # ------------------------------------------------------------------
 
     def _transition_preconditions(self, trans_name: str) -> Set[PDDLCondition]:
-        """Build precondition set: all predecessor places must be marked."""
+        """Build precondition set: predecessor places + structural attribute preconditions."""
         predecessor_places = self._pr.transition_predecessors.get(trans_name, [])
-        return {PDDLCondition.marked(p) for p in predecessor_places}
+        preconds: Set[PDDLCondition] = {PDDLCondition.marked(p) for p in predecessor_places}
+
+        t_info = self._pr.transitions.get(trans_name)
+        if t_info:
+            for guard in t_info.attribute_preconditions:
+                if guard.value is not None:
+                    preconds.add(PDDLCondition.attr_is(guard.attribute, guard.value))
+                elif not guard.negated:
+                    preconds.add(PDDLCondition.attr_true(guard.attribute))
+                else:
+                    preconds.add(PDDLCondition.attr_false(guard.attribute))
+
+        return preconds
 
     def _transition_effects(
         self, trans_name: str, info: TransitionInfo

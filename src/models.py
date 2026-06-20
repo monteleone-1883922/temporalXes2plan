@@ -546,6 +546,15 @@ class AnalysisConfig:
         'variant-index', 'Resource', 'org:role',
     })
 
+    # --- Attribute precondition mining ---
+    # Minimum frequency for a (attribute, value) pair in pre_state to be
+    # recognised as a structural precondition of a transition.
+    # Only firings where the attribute is already present in pre_state are counted.
+    attr_precondition_min_frequency: float = 0.95
+    # Minimum number of firings where the attribute is present before attempting
+    # the analysis for that (transition, attribute) pair.
+    attr_precondition_min_firings: int = 10
+
     # --- Logging ---
     log_removed_effects: bool = True
 
@@ -683,6 +692,7 @@ class TransitionInfo:
     duration: Optional[ActionDurationStats] = None
     related_effects: Set[FrozenSet[str]] = field(default_factory=set)
     incompatible_effects: Set[FrozenSet[str]] = field(default_factory=set)
+    attribute_preconditions: List[Guard] = field(default_factory=list)
 
 
 @dataclass
