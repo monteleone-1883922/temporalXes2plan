@@ -34,6 +34,7 @@ def create_app(data_dir: str) -> Flask:
         template_folder=os.path.join(os.path.dirname(__file__), "templates"),
     )
     app.config["DATA_DIR"] = os.path.abspath(data_dir)
+    app.config["PROJECT_ROOT"] = PROJECT_ROOT
     app.register_blueprint(api)
 
     @app.route("/")
@@ -51,6 +52,26 @@ def create_app(data_dir: str) -> Flask:
         has_original = os.path.isfile(os.path.join(config_dir, "original.json"))
         return render_template("project.html", config_name=config_name,
                                has_original=has_original)
+
+    @app.route("/setup/<log_name>")
+    def setup(log_name: str):
+        log_path = os.path.join(PROJECT_ROOT, "logs", f"{log_name}.xes")
+        if not os.path.isfile(log_path):
+            return render_template(
+                "home.html",
+                configs=_list_configurations(app.config["DATA_DIR"]),
+                error=f"Log file '{log_name}.xes' not found in logs/.",
+            ), 404
+        return render_template("setup.html", log_name=log_name)
+
+    @app.route("/predict/<config_name>")
+    def predict(config_name: str):
+        config_dir = os.path.join(app.config["DATA_DIR"], config_name)
+        if not os.path.isfile(os.path.join(config_dir, "current.json")):
+            return render_template("home.html",
+                                   configs=_list_configurations(app.config["DATA_DIR"]),
+                                   error=f"Configuration '{config_name}' not found."), 404
+        return render_template("predict.html", config_name=config_name)
 
     @app.route("/petri-net/<config_name>")
     def petri_net(config_name: str):
