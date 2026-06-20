@@ -1,6 +1,6 @@
 from encoding.action_registry import ActionRegistry
 from encoding.domain_builder import DomainBuilder
-from encoding.graph_updater import update_parse_result, save_original_and_current
+from encoding.graph_updater import save_original_and_current
 from encoding.guard_encoder import and_clause_to_conditions, guard_to_condition
 from encoding.pddl_model import PDDLBaseAction, PDDLAction, PDDLDurativeAction, PDDLCondition, PDDLEffect
 from encoding.pddl_writer import PDDLWriter
@@ -18,6 +18,5 @@ __all__ = [
     "XorBranchProcessor",
     "guard_to_condition",
     "and_clause_to_conditions",
-    "update_parse_result",
     "save_original_and_current",
 ]
