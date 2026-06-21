@@ -1,0 +1,6 @@
+/* setup.css — setup page: textarea monospace override */
+
+.form-field-textarea textarea {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.8rem;
+}

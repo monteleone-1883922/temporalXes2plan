@@ -1,0 +1,398 @@
+{% extends "base.html" %}
+
+{% block title %}Setup {{ log_name }} — XES2Plan{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/setup.css') }}">
+{% endblock %}
+
+{% block body_data %} data-log-name="{{ log_name }}"{% endblock %}
+
+{% block nav_back %}
+<a href="/" class="btn-toolbar btn-home">
+    <i class="bi bi-arrow-left"></i> Home
+</a>
+{% endblock %}
+
+{% block nav_breadcrumb %} / Setup{% endblock %}
+
+{% block content %}
+    <div class="home-hero home-hero-sm">
+        <span class="hero-badge">Pipeline Configuration</span>
+        <h1>{{ log_name }}</h1>
+        <p>Configure the analysis parameters and run the pipeline to generate the Petri net.</p>
+    </div>
+
+    <div class="home-content">
+
+        <!-- Error banner -->
+        <div id="setup-error" class="alert-error js-hidden"></div>
+
+        <!-- Form -->
+        <form id="setup-form">
+
+            <!-- Pipeline params -->
+            <div class="setup-section setup-section-open">
+                <div class="setup-section-header">
+                    <i class="bi bi-play-circle"></i>
+                    <span>Pipeline</span>
+                </div>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="p-algorithm">Discovery algorithm</label>
+                            <select id="p-algorithm" name="algorithm">
+                                <option value="alpha">alpha</option>
+                                <option value="inductive" selected>inductive</option>
+                                <option value="heuristics">heuristics</option>
+                                <option value="ilp">ilp</option>
+                            </select>
+                        </div>
+                        <div class="form-field">
+                            <label for="p-coverage">Coverage threshold</label>
+                            <input type="number" id="p-coverage" name="coverage_percentage"
+                                   value="0.001" min="0" max="1" step="0.001">
+                            <span class="field-hint">Min cumulative variant coverage</span>
+                        </div>
+                        <div class="form-field form-field-check">
+                            <label>
+                                <input type="checkbox" id="p-durative" name="use_durative">
+                                Encode durative actions
+                            </label>
+                        </div>
+                        <div class="form-field form-field-check">
+                            <label>
+                                <input type="checkbox" id="p-classifier" name="use_activity_classifier">
+                                Use activity classifier (concept:name + lifecycle:transition)
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Decision tree -->
+            <details class="setup-section" open>
+                <summary class="setup-section-header">
+                    <i class="bi bi-diagram-2"></i>
+                    <span>Decision Tree</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-dt_min_samples">dt_min_samples</label>
+                            <input type="number" id="c-dt_min_samples" name="dt_min_samples"
+                                   value="30" min="1">
+                            <span class="field-hint">Min samples to train a decision tree</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-dt_min_accuracy">dt_min_accuracy</label>
+                            <input type="number" id="c-dt_min_accuracy" name="dt_min_accuracy"
+                                   value="0.75" min="0" max="1" step="0.01">
+                            <span class="field-hint">Min DT accuracy to accept guards</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-dt_max_depth">dt_max_depth</label>
+                            <input type="number" id="c-dt_max_depth" name="dt_max_depth"
+                                   value="3" min="1" max="20">
+                            <span class="field-hint">Max depth of decision trees</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-probability_min_samples">probability_min_samples</label>
+                            <input type="number" id="c-probability_min_samples" name="probability_min_samples"
+                                   value="10" min="1">
+                            <span class="field-hint">Min samples to trust observed probabilities (level 2)</span>
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- k-means++ -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-distribute-horizontal"></i>
+                    <span>k-means++ Discretization</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-kmeans_max_k">kmeans_max_k</label>
+                            <input type="number" id="c-kmeans_max_k" name="kmeans_max_k"
+                                   value="5" min="2" max="20">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-kmeans_min_cluster_fraction">kmeans_min_cluster_fraction</label>
+                            <input type="number" id="c-kmeans_min_cluster_fraction" name="kmeans_min_cluster_fraction"
+                                   value="0.05" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-kmeans_silhouette_threshold">kmeans_silhouette_threshold</label>
+                            <input type="number" id="c-kmeans_silhouette_threshold" name="kmeans_silhouette_threshold"
+                                   value="0.10" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-kmeans_n_init">kmeans_n_init</label>
+                            <input type="number" id="c-kmeans_n_init" name="kmeans_n_init"
+                                   value="10" min="1">
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- DT Pruning -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-scissors"></i>
+                    <span>DT Leaf Pruning</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-dt_prune_min_leaf_samples">dt_prune_min_leaf_samples</label>
+                            <input type="number" id="c-dt_prune_min_leaf_samples" name="dt_prune_min_leaf_samples"
+                                   value="5" min="1">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-dt_prune_min_purity">dt_prune_min_purity</label>
+                            <input type="number" id="c-dt_prune_min_purity" name="dt_prune_min_purity"
+                                   value="0.70" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-dt_prune_orphan_mode">dt_prune_orphan_mode</label>
+                            <select id="c-dt_prune_orphan_mode" name="dt_prune_orphan_mode">
+                                <option value="keep_best" selected>keep_best</option>
+                                <option value="drop">drop</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- XOR split -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-signpost-split"></i>
+                    <span>XOR Split</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-xor_statistical_mode">xor_statistical_mode</label>
+                            <select id="c-xor_statistical_mode" name="xor_statistical_mode">
+                                <option value="majority_only">majority_only</option>
+                                <option value="weighted">weighted</option>
+                                <option value="pruned_weighted" selected>pruned_weighted</option>
+                            </select>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-xor_prune_threshold">xor_prune_threshold</label>
+                            <input type="number" id="c-xor_prune_threshold" name="xor_prune_threshold"
+                                   value="0.10" min="0" max="1" step="0.01">
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Effect screening -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-funnel"></i>
+                    <span>Effect Screening</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-effect_never_threshold">effect_never_threshold</label>
+                            <input type="number" id="c-effect_never_threshold" name="effect_never_threshold"
+                                   value="0.05" min="0" max="1" step="0.01">
+                            <span class="field-hint">Below → not an effect</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-effect_always_threshold">effect_always_threshold</label>
+                            <input type="number" id="c-effect_always_threshold" name="effect_always_threshold"
+                                   value="0.95" min="0" max="1" step="0.01">
+                            <span class="field-hint">Above → always present, skip 2A</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-effect_appearance_mode">effect_appearance_mode</label>
+                            <select id="c-effect_appearance_mode" name="effect_appearance_mode">
+                                <option value="threshold">threshold</option>
+                                <option value="always">always</option>
+                                <option value="duplicate" selected>duplicate</option>
+                                <option value="duplicate_no_cost">duplicate_no_cost</option>
+                            </select>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-effect_appearance_threshold">effect_appearance_threshold</label>
+                            <input type="number" id="c-effect_appearance_threshold" name="effect_appearance_threshold"
+                                   value="0.20" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-effect_value_mode">effect_value_mode</label>
+                            <select id="c-effect_value_mode" name="effect_value_mode">
+                                <option value="majority_only">majority_only</option>
+                                <option value="duplicate" selected>duplicate</option>
+                                <option value="duplicate_no_cost">duplicate_no_cost</option>
+                            </select>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-effect_value_prune_threshold">effect_value_prune_threshold</label>
+                            <input type="number" id="c-effect_value_prune_threshold" name="effect_value_prune_threshold"
+                                   value="0.10" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-effect_value_certain_threshold">effect_value_certain_threshold</label>
+                            <input type="number" id="c-effect_value_certain_threshold" name="effect_value_certain_threshold"
+                                   value="0.95" min="0" max="1" step="0.01">
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Effect co-occurrence -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-link-45deg"></i>
+                    <span>Effect Co-occurrence</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-related_effect_prob">related_effect_prob</label>
+                            <input type="number" id="c-related_effect_prob" name="related_effect_prob"
+                                   value="0.9" min="0" max="1" step="0.01">
+                            <span class="field-hint">Joint P ≥ this → effects always together</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-incompatible_effect_prob">incompatible_effect_prob</label>
+                            <input type="number" id="c-incompatible_effect_prob" name="incompatible_effect_prob"
+                                   value="0.05" min="0" max="1" step="0.01">
+                            <span class="field-hint">Joint P ≤ this → effects never together</span>
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Token replay -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-arrow-repeat"></i>
+                    <span>Token Replay</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-replay_min_fitness">replay_min_fitness</label>
+                            <input type="number" id="c-replay_min_fitness" name="replay_min_fitness"
+                                   value="0.8" min="0" max="1" step="0.01">
+                            <span class="field-hint">Min trace fitness to include in branch counting</span>
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Precondition mining -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-search"></i>
+                    <span>Precondition Mining</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="c-attr_precondition_min_frequency">attr_precondition_min_frequency</label>
+                            <input type="number" id="c-attr_precondition_min_frequency" name="attr_precondition_min_frequency"
+                                   value="0.95" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-attr_precondition_min_firings">attr_precondition_min_firings</label>
+                            <input type="number" id="c-attr_precondition_min_firings" name="attr_precondition_min_firings"
+                                   value="10" min="1">
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Attribute filtering -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-filter"></i>
+                    <span>Attribute Filtering</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-field form-field-full form-field-textarea">
+                        <label for="c-ignored_attributes">ignored_attributes</label>
+                        <textarea id="c-ignored_attributes" name="ignored_attributes" rows="6">case:concept:name
+concept:name
+time:timestamp
+lifecycle:transition
+org:resource
+org:group
+variant-index
+Resource
+org:role</textarea>
+                        <span class="field-hint">One raw XES attribute name per line</span>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Advanced -->
+            <details class="setup-section">
+                <summary class="setup-section-header">
+                    <i class="bi bi-sliders"></i>
+                    <span>Advanced</span>
+                    <i class="bi bi-chevron-down setup-chevron"></i>
+                </summary>
+                <div class="setup-section-body">
+                    <div class="form-grid">
+                        <div class="form-field form-field-check">
+                            <label>
+                                <input type="checkbox" id="c-log_removed_effects" name="log_removed_effects" checked>
+                                log_removed_effects
+                            </label>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-snapshot_dir">snapshot_dir</label>
+                            <input type="text" id="c-snapshot_dir" name="snapshot_dir"
+                                   value="output/snapshots">
+                        </div>
+                    </div>
+                </div>
+            </details>
+
+            <!-- Submit -->
+            <div class="setup-actions">
+                <button type="submit" id="run-btn" class="btn-run">
+                    <i class="bi bi-play-fill"></i> Run Analysis
+                </button>
+            </div>
+
+        </form>
+
+        <!-- Progress panel -->
+        <div id="progress-panel" class="js-hidden">
+            <div class="setup-section setup-section-open">
+                <div class="setup-section-header">
+                    <span class="spinner"></span>
+                    <span id="progress-title">Running pipeline...</span>
+                </div>
+                <div class="setup-section-body">
+                    <div id="progress-log" class="progress-log"></div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/setup.js') }}"></script>
+{% endblock %}
