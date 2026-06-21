@@ -1,0 +1,132 @@
+/* home.css — home page: import area and config cards */
+
+/* ─── Import area ────────────────────────────────────────────────────────── */
+.import-area {
+    background: #fff;
+    border: 1.5px dashed var(--slate-200);
+    border-radius: var(--radius-lg);
+    padding: 20px 24px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    transition: border-color .15s ease, background .15s ease;
+}
+
+.import-area:hover,
+.import-area-loading {
+    border-color: var(--indigo-500);
+    background: var(--indigo-50);
+}
+
+.import-icon {
+    font-size: 1.8rem;
+    color: var(--indigo-500);
+    flex-shrink: 0;
+}
+
+.import-body { flex: 1; min-width: 0; }
+
+.import-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--slate-900);
+    margin-bottom: 2px;
+}
+
+.import-desc {
+    font-size: 0.82rem;
+    color: var(--slate-600);
+}
+
+.btn-upload {
+    background: rgba(99,102,241,.12);
+    color: var(--indigo-500);
+    border-color: rgba(99,102,241,.3);
+    white-space: nowrap;
+}
+.btn-upload:hover { background: rgba(99,102,241,.22); }
+
+/* ─── Config cards grid ──────────────────────────────────────────────────── */
+.configs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+}
+
+.config-card {
+    background: #fff;
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    text-decoration: none;
+    color: inherit;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    box-shadow: var(--shadow-sm);
+    transition: all .18s ease;
+}
+
+.config-card:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-md);
+    border-color: var(--indigo-500);
+    color: inherit;
+    text-decoration: none;
+}
+
+.config-card-icon {
+    width: 44px;
+    height: 44px;
+    background: var(--indigo-50);
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--indigo-500);
+    font-size: 1.3rem;
+    flex-shrink: 0;
+}
+
+.config-card-body { flex: 1; min-width: 0; }
+
+.config-card-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--slate-900);
+    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.config-card-badges { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.badge-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: .03em;
+}
+
+.badge-original { background: var(--green-100); color: var(--green-600); }
+.badge-current  { background: var(--indigo-100); color: var(--indigo-600); }
+
+.config-card-arrow {
+    color: var(--slate-400);
+    font-size: 1rem;
+    transition: transform .18s ease;
+}
+.config-card:hover .config-card-arrow { transform: translateX(4px); color: var(--indigo-500); }
+
+/* ─── Empty state ────────────────────────────────────────────────────────── */
+.home-empty {
+    text-align: center;
+    padding: 60px 20px;
+    color: var(--slate-600);
+}
+.home-empty i { font-size: 3rem; color: var(--slate-300, #cbd5e1); margin-bottom: 16px; }
+.home-empty h3 { font-size: 1.1rem; font-weight: 600; margin-bottom: 8px; color: var(--slate-700, #374151); }
+.home-empty p { font-size: 0.9rem; margin: 0; }
