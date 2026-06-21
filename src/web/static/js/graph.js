@@ -98,25 +98,6 @@ function initGraph() {
                 },
             },
 
-            // ── Artificial XOR split ───────────────────────────────────────
-            {
-                selector: 'node[type="xor_split_artificial"]',
-                style: {
-                    shape: "ellipse",
-                    "background-color": "#f5f3ff",
-                    "border-color": "#8b5cf6",
-                    "border-width": 2.5,
-                    "border-style": "solid",
-                    width: 50,
-                    height: 50,
-                    "font-size": "10px",
-                    color: "#5b21b6",
-                    "font-weight": "700",
-                    "text-valign": "bottom",
-                    "text-margin-y": 4,
-                },
-            },
-
             // ── Silent (tau) ───────────────────────────────────────────────
             {
                 selector: 'node[type="silent"]',
@@ -178,17 +159,26 @@ function initGraph() {
         const id    = node.data("id");
         const label = node.data("label");
 
-        if (type === "transition" || type === "and_split") {
+        if (type === "place") {
+            onPlaceSelected(id);
+            closePanel();
+        } else if (type === "transition" || type === "and_split") {
+            onPlaceClear();
             showTransitionPanel(label);
         } else if (type === "xor_split") {
+            onPlaceSelected(id);
             showXorSplitPanel(id);
         } else {
+            onPlaceClear();
             closePanel();
         }
     });
 
     cy.on("tap", function (evt) {
-        if (evt.target === cy) closePanel();
+        if (evt.target === cy) {
+            closePanel();
+            onPlaceClear();
+        }
     });
 }
 
@@ -206,7 +196,6 @@ function renderGraph(data) {
                 label:        node.label,
                 type:         node.type,
                 is_silent:    node.is_silent || false,
-                art_split_id: node.art_split_id || null,
             },
         });
     }

@@ -2,13 +2,14 @@
  * Main application orchestrator.
  *
  * Handles API communication, version switching, import/export.
- * CONFIG_NAME is set inline by the template before this script loads.
+ * Config name is read from document.body.dataset.configName.
  */
 
 let activeVersion = "current";
+let _initPlace = null;
 
 function apiUrl(path) {
-    return `/api/${CONFIG_NAME}${path}`;
+    return `/api/${document.body.dataset.configName}${path}`;
 }
 
 async function fetchJSON(url, options) {
@@ -20,8 +21,66 @@ async function fetchJSON(url, options) {
     return resp.json();
 }
 
+// ---------------------------------------------------------------------------
+// Place selection — drives the Predict button
+// ---------------------------------------------------------------------------
+
+function onPlaceSelected(placeId) {
+    _initPlace = placeId;
+    const btn = document.getElementById("btn-predict");
+    if (!btn) return;
+    if (activeVersion === "current") {
+        btn.href = `/predict/${document.body.dataset.configName}?init_place=${encodeURIComponent(placeId)}`;
+        btn.classList.remove("disabled");
+    }
+}
+
+function onPlaceClear() {
+    if (_initPlace === null) return;
+    _initPlace = null;
+    const btn = document.getElementById("btn-predict");
+    if (!btn) return;
+    btn.removeAttribute("href");
+    btn.classList.add("disabled");
+}
+
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Domain staleness banner
+// ---------------------------------------------------------------------------
+
+function setDomainStale(stale) {
+    const banner = document.getElementById("domain-stale-banner");
+    if (!banner) return;
+    if (stale) banner.classList.add("visible");
+    else banner.classList.remove("visible");
+}
+
+async function rebuildDomain() {
+    const btn = document.querySelector(".btn-rebuild");
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Rebuilding...'; }
+    try {
+        const resp = await fetch(apiUrl("/rebuild-domain"), { method: "POST" });
+        const data = await resp.json();
+        if (data.status === "not_implemented") {
+            alert("Domain rebuild is not yet implemented. Export the edited Petri net and re-run the pipeline.");
+        } else if (data.status === "ok") {
+            setDomainStale(false);
+        }
+    } catch (err) {
+        alert("Rebuild failed: " + err.message);
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Rebuild Domain'; }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 async function loadVersion(version) {
     activeVersion = version;
+    onPlaceClear();
+    setDomainStale(false);
 
     const endpoint =
         version === "original"
@@ -51,7 +110,7 @@ function updateToolbarButtons() {
     }
 }
 
-async function resetToCurrent() {
+async function resetToOriginal() {
     if (!confirm("Reset all changes to the original version?")) return;
     try {
         await fetchJSON(apiUrl("/petri-net/reset"), { method: "POST" });
@@ -85,7 +144,7 @@ async function importConfig(event) {
 // Boot
 document.addEventListener("DOMContentLoaded", () => {
     initGraph();
-    const startVersion = (typeof INITIAL_VERSION !== "undefined" && INITIAL_VERSION === "original")
+    const startVersion = document.body.dataset.initialVersion === "original"
         ? "original" : "current";
     loadVersion(startVersion).then(() => {
         const params = new URLSearchParams(window.location.search);
@@ -93,8 +152,6 @@ document.addEventListener("DOMContentLoaded", () => {
         const panelType = params.get("type");
         if (panel && panelType === "xor") {
             showXorSplitPanel(panel);
-        } else if (panel && panelType === "art") {
-            showArtificialXorPanel(panel);
         } else if (panel) {
             showTransitionPanel(panel);
         }
