@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Predict — {{ config_name }} — XES2Plan{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/predict.css') }}">
+{% endblock %}
+
+{% block body_data %} data-config-name="{{ config_name }}"{% endblock %}
+
+{% block nav_back %}
+<a href="/project/{{ config_name }}" class="btn-toolbar btn-home">
+    <i class="bi bi-arrow-left"></i> {{ config_name }}
+</a>
+{% endblock %}
+
+{% block nav_breadcrumb %} / {{ config_name }} / predict{% endblock %}
+
+{% block content %}
+    <div class="home-hero home-hero-sm">
+        <span class="hero-badge">Predictive Monitoring</span>
+        <h1>{{ config_name }}</h1>
+        <p>Define the current state and the goal condition to generate a PDDL problem for planning.</p>
+    </div>
+
+    <div class="home-content">
+
+        <div id="monitor-loading" class="empty-note">
+            <span class="spinner"></span> Loading Petri net data...
+        </div>
+
+        <div id="monitor-forms" class="js-hidden">
+
+            <div id="init-place-banner" class="init-place-banner js-hidden">
+                <i class="bi bi-geo-alt-fill"></i>
+                Starting from place: <code id="init-place-label"></code>
+            </div>
+
+            <form id="solve-form">
+
+                <!-- Init -->
+                <details class="setup-section" open>
+                    <summary class="setup-section-header">
+                        <i class="bi bi-hourglass-split"></i>
+                        <span>Initial attribute values</span>
+                        <i class="bi bi-chevron-down setup-chevron"></i>
+                    </summary>
+                    <div class="setup-section-body">
+                        <p class="field-hint" style="margin-bottom:12px;">
+                            Add the attribute values known at this point in the trace.
+                            Unspecified attributes default to false (closed-world assumption).
+                        </p>
+                        <div id="init-predicates"></div>
+                    </div>
+                </details>
+
+                <!-- Goal -->
+                <details class="setup-section" open>
+                    <summary class="setup-section-header">
+                        <i class="bi bi-bullseye"></i>
+                        <span>Goal conditions (SOP)</span>
+                        <i class="bi bi-chevron-down setup-chevron"></i>
+                    </summary>
+                    <div class="setup-section-body">
+                        <p class="field-hint" style="margin-bottom:12px;">
+                            Define the outcome to predict as a disjunction of conjunctions (OR of ANDs).
+                            Add at least one clause with one condition.
+                        </p>
+                        <div id="goal-predicates"></div>
+                    </div>
+                </details>
+
+                <div id="solve-error" class="alert-error js-hidden" style="margin-bottom:12px;"></div>
+
+                <div class="setup-actions">
+<!--                    TODO change to build btn-->
+                    <button type="submit" id="solve-btn" class="btn-run">
+                        <i class="bi bi-hammer"></i> Build Problem
+                    </button>
+                </div>
+
+            </form>
+
+            <div id="solve-result" class="js-hidden"></div>
+
+            <div id="planner-section" class="js-hidden">
+                <h2>Run Planner</h2>
+                <div id="planner-inner"></div>
+            </div>
+
+        </div>
+
+    </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/components.js') }}"></script>
+<script src="{{ url_for('static', filename='js/monitor.js') }}"></script>
+{% endblock %}
