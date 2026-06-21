@@ -1,5 +1,0 @@
-(exec_er_triage )
-(exec_er_sepsis_triage )
-(exec_tau_2 )
-(exec_crp-gte_147_5 )
-; cost = 4 (unit cost)
