@@ -1,6 +1,6 @@
 """PDDL problem file builder using the same predicate objects as the domain encoder."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from encoding.pddl_model import PDDLCondition, PDDLEffect
 
@@ -28,6 +28,7 @@ class ProblemBuilder:
         init_effects: List[Dict[str, Any]],
         goal_sop: List[List[Dict[str, Any]]],
         attribute_catalog: Dict[str, Any],
+        init_place: Optional[str] = None,
     ) -> str:
         """Build and return a PDDL problem definition as a string.
 
@@ -41,11 +42,13 @@ class ProblemBuilder:
                 Each condition: {"attribute": str, "predicate": "="|"<>", "value": str}.
             attribute_catalog: Serialized catalog from current.json.
                 Maps attr name → {"type": "boolean"|"numerical"|"categorical", ...}.
+            init_place: Optional place ID to mark as the starting token position.
+                Emitted as (marked <place_id>) as the first :init atom.
 
         Returns:
             Complete PDDL problem text.
         """
-        init_atoms = self._build_init_atoms(init_effects, attribute_catalog)
+        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog)
         goal_str = self._build_goal(goal_sop, attribute_catalog)
 
         lines = [
@@ -65,10 +68,13 @@ class ProblemBuilder:
 
     def _build_init_atoms(
         self,
+        init_place: Optional[str],
         effects: List[Dict[str, Any]],
         catalog: Dict[str, Any],
     ) -> List[str]:
         atoms = []
+        if init_place:
+            atoms.append(PDDLEffect.marking(init_place).to_pddl())
         for eff in effects:
             attr = eff["attribute"]
             value = str(eff.get("value", ""))

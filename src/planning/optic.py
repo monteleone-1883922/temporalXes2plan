@@ -18,6 +18,61 @@ def is_available() -> bool:
     return OPTIC_BIN.is_file()
 
 
+def build(log_fn: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+    """Compile OPTIC by running run-cmake-release then build-release.
+
+    Both scripts must be run from OPTIC_DIR.
+    Safe to call if already built (cmake is idempotent).
+
+    Args:
+        log_fn: Optional callback for progress lines.
+
+    Returns:
+        Dict with keys: success (bool), message (str), stdout (str), stderr (str).
+    """
+    def _log(msg: str) -> None:
+        if log_fn:
+            log_fn(msg)
+
+    for script in ("run-cmake-release", "build-release"):
+        if not (OPTIC_DIR / script).exists():
+            msg = f"OPTIC build script not found: {OPTIC_DIR / script}"
+            _log(msg)
+            return {"success": False, "message": msg, "stdout": "", "stderr": ""}
+
+    _log("Building OPTIC — this may take several minutes...")
+    all_stdout: List[str] = []
+
+    for step, script in enumerate(("run-cmake-release", "build-release"), start=1):
+        _log(f"Step {step}/2: {script}")
+        try:
+            proc = subprocess.Popen(
+                ["bash", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=str(OPTIC_DIR),
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                all_stdout.append(line)
+                _log(line)
+            proc.wait()
+        except Exception as exc:
+            msg = f"Build execution error at step {step}: {exc}"
+            _log(msg)
+            return {"success": False, "message": msg, "stdout": "\n".join(all_stdout), "stderr": str(exc)}
+
+        if proc.returncode != 0:
+            msg = f"OPTIC build failed at step {step} ({script}), exit {proc.returncode}."
+            _log(msg)
+            return {"success": False, "message": msg, "stdout": "\n".join(all_stdout), "stderr": ""}
+
+    _log("OPTIC build complete.")
+    return {"success": True, "message": "Build complete.", "stdout": "\n".join(all_stdout), "stderr": ""}
+
+
 def run(
     pddl_dir: Path,
     stop_at_first: bool = True,
@@ -50,7 +105,13 @@ def run(
             log_fn(msg)
 
     if not is_available():
-        return {**_empty, "message": "OPTIC binary not found — build optic/release first."}
+        _log("OPTIC not built — starting build...")
+        result = build(log_fn)
+        if not result["success"]:
+            return {**_empty, "message": result["message"]}
+
+    if not is_available():
+        return {**_empty, "message": "OPTIC binary not found after build attempt."}
 
     domain = (pddl_dir / "domain.pddl").resolve()
     problem = (pddl_dir / "problem.pddl").resolve()

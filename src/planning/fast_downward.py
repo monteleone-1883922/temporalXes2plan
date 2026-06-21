@@ -10,8 +10,9 @@ from typing import Any, Callable, Dict, List, Optional
 _MODULE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = _MODULE_DIR.parent.parent
 
-FD_SCRIPT = PROJECT_ROOT / "vendor" / "downward" / "fast-downward.py"
+FD_SCRIPT  = PROJECT_ROOT / "vendor" / "downward" / "fast-downward.py"
 BUILDS_DIR = PROJECT_ROOT / "vendor" / "downward" / "builds" / "release"
+SETUP_SH   = PROJECT_ROOT / "scripts" / "setup.sh"
 
 _SEARCH_CONFIGS: Dict[str, Dict[str, str]] = {
     "astar_blind":         {"type": "search", "config": "astar(blind(), cost_type=one)"},
@@ -48,6 +49,60 @@ def get_search_configs() -> Dict[str, Any]:
     }
 
 
+def build(log_fn: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
+    """Compile Fast Downward by running scripts/setup.sh.
+
+    Handles git submodule initialisation and CMake build.
+    Safe to call if already built (setup.sh is idempotent).
+
+    Args:
+        log_fn: Optional callback for progress lines.
+
+    Returns:
+        Dict with keys: success (bool), message (str), stdout (str), stderr (str).
+    """
+    def _log(msg: str) -> None:
+        if log_fn:
+            log_fn(msg)
+
+    if not SETUP_SH.exists():
+        msg = f"Setup script not found: {SETUP_SH}"
+        _log(msg)
+        return {"success": False, "message": msg, "stdout": "", "stderr": ""}
+
+    _log("Building Fast Downward — this may take several minutes...")
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+
+    try:
+        proc = subprocess.Popen(
+            ["bash", str(SETUP_SH)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=str(PROJECT_ROOT),
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            stdout_lines.append(line)
+            _log(line)
+        proc.wait()
+    except Exception as exc:
+        msg = f"Build execution error: {exc}"
+        _log(msg)
+        return {"success": False, "message": msg, "stdout": "", "stderr": str(exc)}
+
+    stdout = "\n".join(stdout_lines)
+    if proc.returncode == 0:
+        _log("Fast Downward build complete.")
+        return {"success": True, "message": "Build complete.", "stdout": stdout, "stderr": ""}
+    else:
+        msg = f"Build failed (exit {proc.returncode})."
+        _log(msg)
+        return {"success": False, "message": msg, "stdout": stdout, "stderr": ""}
+
+
 def run(
     pddl_dir: Path,
     search_key: str = "astar_lmcut",
@@ -73,6 +128,12 @@ def run(
     def _log(msg: str) -> None:
         if log_fn:
             log_fn(msg)
+
+    if not is_built():
+        _log("Fast Downward not built — starting build...")
+        result = build(log_fn)
+        if not result["success"]:
+            return {**_empty, "message": result["message"]}
 
     if not FD_SCRIPT.exists():
         return {**_empty, "message": "Fast Downward not found — run scripts/setup.sh first."}
