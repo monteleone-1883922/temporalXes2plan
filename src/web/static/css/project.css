@@ -1,0 +1,101 @@
+/* project.css — project hub page: version cards and commands placeholder */
+
+/* ─── Version cards grid ─────────────────────────────────────────────────── */
+.project-versions-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
+}
+
+.project-version-card {
+    background: #fff;
+    border: 1px solid var(--slate-200);
+    border-radius: var(--radius-lg);
+    padding: 22px 20px;
+    text-decoration: none;
+    color: inherit;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    box-shadow: var(--shadow-sm);
+    transition: all .18s ease;
+    cursor: pointer;
+}
+
+.project-version-card:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-md);
+    text-decoration: none;
+    color: inherit;
+}
+
+.project-version-card.current:hover { border-color: var(--indigo-500); }
+.project-version-card.original:hover { border-color: var(--green-600); }
+
+.project-version-card.disabled {
+    opacity: .55;
+    cursor: default;
+    pointer-events: none;
+}
+
+.pvc-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    flex-shrink: 0;
+}
+
+.project-version-card.current .pvc-icon  { background: var(--indigo-50);  color: var(--indigo-500); }
+.project-version-card.original .pvc-icon { background: var(--green-100);  color: var(--green-600); }
+.project-version-card.disabled .pvc-icon { background: var(--slate-100); color: var(--slate-400); }
+
+.pvc-body { flex: 1; min-width: 0; }
+
+.pvc-title {
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--slate-900);
+    margin-bottom: 4px;
+}
+
+.pvc-desc {
+    font-size: 0.82rem;
+    color: var(--slate-600);
+    line-height: 1.45;
+}
+
+.pvc-arrow {
+    color: var(--slate-400);
+    font-size: 1rem;
+    transition: transform .18s ease;
+}
+.pvc-arrow-disabled { color: var(--slate-300, #cbd5e1); }
+
+.project-version-card:hover .pvc-arrow          { transform: translateX(4px); }
+.project-version-card.current:hover .pvc-arrow  { color: var(--indigo-500); }
+.project-version-card.original:hover .pvc-arrow { color: var(--green-600); }
+
+/* ─── Commands placeholder ───────────────────────────────────────────────── */
+.project-commands-placeholder {
+    background: var(--slate-50);
+    border: 1.5px dashed var(--slate-200);
+    border-radius: var(--radius-lg);
+    padding: 36px 24px;
+    text-align: center;
+    color: var(--slate-400);
+}
+
+.project-commands-placeholder i {
+    font-size: 2rem;
+    display: block;
+    margin-bottom: 10px;
+}
+
+.project-commands-placeholder p {
+    font-size: 0.85rem;
+    margin: 0;
+}
