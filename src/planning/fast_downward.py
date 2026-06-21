@@ -204,20 +204,36 @@ def _classify(return_code: int, plan_exists: bool, stdout: str, stderr: str) -> 
     return "unsolvable_resource"
 
 
-def _parse_classical_plan(plan_text: str) -> List[str]:
-    """Parse FD sas_plan format: each non-comment line is (action_name ...)."""
+def parse_plan_text(plan_text: str) -> List[str]:
+    """Parse a plan string and return normalised, tau-filtered activity names.
+
+    Handles both classical FD format ``(action_name)`` and temporal OPTIC
+    format ``0.000: (action_name) [duration]``.
+
+    Args:
+        plan_text: Raw plan file content.
+
+    Returns:
+        List of sanitised activity name strings with exec_ prefix and
+        variant/dedup suffixes stripped, tau_ actions excluded.
+    """
     actions = []
     for line in plan_text.splitlines():
         line = line.strip()
         if not line or line.startswith(";"):
             continue
-        m = re.match(r"^\(([^)]+)\)", line)
+        m = re.search(r"\(([^)]+)\)", line)
         if not m:
             continue
         name = _normalise(m.group(1).split()[0])
         if name and not name.startswith("tau_"):
             actions.append(name)
     return actions
+
+
+def _parse_classical_plan(plan_text: str) -> List[str]:
+    """Parse FD sas_plan format: each non-comment line is (action_name ...)."""
+    return parse_plan_text(plan_text)
 
 
 def _normalise(name: str) -> str:
