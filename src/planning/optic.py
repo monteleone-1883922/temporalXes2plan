@@ -1,0 +1,210 @@
+"""OPTIC temporal planner — importable wrapper."""
+
+import re
+import subprocess
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+_MODULE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = _MODULE_DIR.parent.parent
+
+OPTIC_DIR = PROJECT_ROOT / "optic"
+OPTIC_SH = OPTIC_DIR / "optic-clp.sh"
+OPTIC_BIN = OPTIC_DIR / "release" / "optic" / "optic-clp"
+
+
+def is_available() -> bool:
+    """Return True if the OPTIC binary has been compiled."""
+    return OPTIC_BIN.is_file()
+
+
+def run(
+    pddl_dir: Path,
+    stop_at_first: bool = True,
+    ignore_costs: bool = False,
+    timeout: int = 60,
+    memory_mb: int = 4000,
+    log_fn: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
+    """Execute OPTIC on domain.pddl + problem.pddl inside pddl_dir.
+
+    OPTIC writes the plan to stdout in temporal format:
+        <timestamp>: (<action>) [<duration>]
+
+    Args:
+        pddl_dir: Directory containing domain.pddl and problem.pddl.
+        stop_at_first: Pass -N flag (stop after first solution, no cost opt.).
+        ignore_costs: Pass -c flag (treat all actions as unit cost).
+        timeout: Hard timeout in seconds (enforced via subprocess).
+        memory_mb: Soft memory limit in MB (enforced via ulimit -v in bash wrapper).
+        log_fn: Optional progress callback.
+
+    Returns:
+        Dict with keys: success, solvability, plan_text, plan_actions,
+        metrics, stdout, stderr, message.
+    """
+    _empty = _empty_result()
+
+    def _log(msg: str) -> None:
+        if log_fn:
+            log_fn(msg)
+
+    if not is_available():
+        return {**_empty, "message": "OPTIC binary not found — build optic/release first."}
+
+    domain = (pddl_dir / "domain.pddl").resolve()
+    problem = (pddl_dir / "problem.pddl").resolve()
+
+    if not domain.exists() or not problem.exists():
+        return {**_empty, "message": "domain.pddl or problem.pddl not found in pddl directory."}
+
+    flags: List[str] = []
+    if stop_at_first:
+        flags.append("-N")
+    if ignore_costs:
+        flags.append("-c")
+    memory_kb = memory_mb * 1024
+
+    # Wrap in bash so ulimit applies; run from OPTIC_DIR so the .sh script
+    # resolves ./release/optic/optic-clp correctly.
+    inner_cmd = " ".join(
+        [f"ulimit -v {memory_kb};",
+         str(OPTIC_SH)] + flags + [str(domain), str(problem)]
+    )
+    cmd = ["bash", "-c", inner_cmd]
+
+    mode = ("stop at first" if stop_at_first else "optimise") + (", ignore costs" if ignore_costs else "")
+    _log(f"Mode: {mode}")
+    _log(f"Timeout: {timeout}s  Memory: {memory_mb}MB")
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(OPTIC_DIR),
+        )
+    except subprocess.TimeoutExpired:
+        _log("Timeout expired.")
+        return {**_empty,
+                "solvability": "unsolvable_resource",
+                "message": f"Planner timed out after {timeout}s"}
+    except Exception as exc:
+        return {**_empty, "solvability": "error",
+                "stderr": str(exc), "message": f"Execution error: {exc}"}
+
+    _log(f"Planner finished (exit code {proc.returncode})")
+
+    plan_lines, plan_actions = _parse_optic_stdout(proc.stdout)
+    plan_text: Optional[str] = None
+
+    if plan_actions:
+        plan_text = "\n".join(plan_lines)
+        (pddl_dir / "plan.txt").write_text(plan_text, encoding="utf-8")
+        _log(f"Plan saved — {len(plan_actions)} action(s)")
+
+    metrics = _parse_optic_metrics(proc.stdout, proc.stderr)
+    metrics["solution_length"] = len(plan_actions) if plan_actions else None
+
+    solvability = _classify(proc.returncode, plan_text is not None, proc.stdout, proc.stderr)
+    success = solvability == "solved"
+    message = (
+        f"Plan found — {len(plan_actions)} action(s)" if success
+        else "Problem proved unsolvable" if solvability == "unsolvable_structural"
+        else f"No solution found (exit {proc.returncode})"
+    )
+    _log(message)
+
+    return {
+        "success": success,
+        "solvability": solvability,
+        "plan_text": plan_text,
+        "plan_actions": plan_actions,
+        "metrics": metrics,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "message": message,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _empty_result() -> Dict[str, Any]:
+    return {
+        "success": False,
+        "solvability": "error",
+        "plan_text": None,
+        "plan_actions": [],
+        "metrics": {k: None for k in ("expanded_nodes", "search_time", "solution_length", "total_time")},
+        "stdout": "",
+        "stderr": "",
+        "message": "",
+    }
+
+
+def _parse_optic_stdout(stdout: str):
+    """Extract the last (best) plan from OPTIC stdout.
+
+    OPTIC may output multiple improving solutions; each block starts with
+    ';;; Solution Found'. We take the last one.
+
+    Returns:
+        Tuple of (raw_plan_lines, action_name_list).
+    """
+    # Split on solution delimiters, keep the last block
+    blocks = re.split(r";;; Solution Found", stdout)
+    if len(blocks) < 2:
+        return [], []
+
+    last_block = blocks[-1]
+    plan_lines = []
+    actions = []
+
+    for line in last_block.splitlines():
+        # Temporal plan line: "  0.000: (action_name) [duration]"
+        m = re.match(r"^\s*([\d.]+)\s*:\s*\(([^)]+)\)\s*\[", line)
+        if m:
+            plan_lines.append(line.strip())
+            name = _normalise(m.group(2).split()[0])
+            if name and not name.startswith("tau_"):
+                actions.append(name)
+
+    return plan_lines, actions
+
+
+def _parse_optic_metrics(stdout: str, stderr: str) -> Dict[str, Any]:
+    combined = stdout + "\n" + stderr
+    metrics: Dict[str, Any] = {k: None for k in ("expanded_nodes", "search_time", "solution_length", "total_time")}
+
+    m = re.search(r"States evaluated:\s*(\d+)", combined)
+    if m:
+        metrics["expanded_nodes"] = int(m.group(1))
+
+    m = re.search(r"Time\s+([\d.]+)", combined)
+    if m:
+        metrics["total_time"] = float(m.group(1))
+        metrics["search_time"] = metrics["total_time"]
+
+    return metrics
+
+
+def _classify(return_code: int, plan_exists: bool, stdout: str, stderr: str) -> str:
+    combined = (stdout + "\n" + stderr).lower()
+    if plan_exists:
+        return "solved"
+    if "unsolvable" in combined or "no solution" in combined:
+        return "unsolvable_structural"
+    if return_code != 0:
+        return "unsolvable_resource"
+    return "unsolvable_resource"
+
+
+def _normalise(name: str) -> str:
+    if name.startswith("exec_"):
+        name = name[5:]
+    name = name.split("_DETDUP")[0]
+    name = re.sub(r"_v\d+$", "", name)
+    return name
