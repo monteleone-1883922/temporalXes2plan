@@ -1,3 +1,4 @@
+
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Set, Tuple
 
@@ -272,6 +273,14 @@ class PDDLDurativeAction(PDDLBaseAction):
     conditions_at_end: Set[PDDLCondition] = field(default_factory=set)
     effects_at_start: List[PDDLEffect] = field(default_factory=list)
     effects_at_end: List[PDDLEffect] = field(default_factory=list)
+
+    @property
+    def effects(self) -> List[PDDLEffect]:
+        return self.effects_at_end
+
+    @property
+    def preconditions(self) -> Set[PDDLCondition]:
+        return self.conditions_at_start
 
 
 @dataclass

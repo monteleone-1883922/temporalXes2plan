@@ -10,6 +10,9 @@ import core_utils as utils
 from encoding.action_registry import ActionRegistry
 from encoding.pddl_model import PDDLEffect
 from models import ParseResult
+import json
+import os
+import tempfile
 
 logger = utils.get_logger(__name__)
 
@@ -76,9 +79,7 @@ def save_original_and_current(
         Tuple (original_written, current_written) — True when the file was
         created, False when it already existed and was skipped.
     """
-    import json
-    import os
-    import tempfile
+
 
     os.makedirs(config_dir, exist_ok=True)
 

@@ -109,6 +109,8 @@ def main() -> None:
                       help="Do not open browser automatically")
     argp.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
                       help=f"Root directory for configurations (default: {DEFAULT_DATA_DIR})")
+    argp.add_argument("--debug", action="store_true",
+                      help="Enable Flask debug mode (reloader disabled for IDE debugging)")
     args = argp.parse_args()
 
     app = create_app(args.data_dir)
@@ -118,7 +120,12 @@ def main() -> None:
 
     print(f"Starting server on http://localhost:{args.port}")
     print(f"Data directory: {os.path.abspath(args.data_dir)}")
-    app.run(host="127.0.0.1", port=args.port, debug=False)
+    app.run(
+        host="127.0.0.1",
+        port=args.port,
+        debug=args.debug,
+        use_reloader=False,
+    )
 
 
 if __name__ == "__main__":
