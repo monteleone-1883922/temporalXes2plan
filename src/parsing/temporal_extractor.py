@@ -80,8 +80,8 @@ def _stats_to_duration(
         effective_min, effective_max = obs_min, obs_max
 
     return ActionDurationStats(
-        effective_min=effective_min,
-        effective_max=effective_max,
+        effective_min=round(effective_min, 2),
+        effective_max=round(effective_max, 2),
         source=source,
         mean=mean,
         std_dev=std_dev,
