@@ -58,7 +58,7 @@ function showTransitionPanel(activityName) {
     content.appendChild(buildMetaSection(t));
     content.appendChild(buildDurationSection(t.duration));
     content.appendChild(buildPreconditionsSection(t.preconditions));
-    content.appendChild(buildEffectsSection(t.effects));
+    content.appendChild(buildEffectsSection(t.effect_groups));
     content.appendChild(buildCostSection(t.cost));
 
     _panelEntity = { type: "transition", id: activityName };
@@ -143,57 +143,57 @@ function buildPreconditionsSection(preconditions) {
     return section;
 }
 
-function buildEffectsSection(effects) {
+function buildEffectsSection(effectGroups) {
     const section = createSection("Effects");
 
-    if (!effects || effects.length === 0) {
+
+    if (effectGroups.length === 0) {
         section.appendChild(emptyNote("No effects"));
         return section;
     }
 
-    for (const eff of effects) {
-        const card = document.createElement("div");
-        card.className = "effect-card";
+    _renderEffectGroups(section, effectGroups);
+    return section;
+}
 
-        // Header row: attribute=value + probability badge
-        const headerRow = document.createElement("div");
-        headerRow.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;";
-        const hdr = document.createElement("span");
-        hdr.className = "effect-header";
-        hdr.textContent = `${eff.attribute} = ${eff.value}`;
-        const badge = document.createElement("span");
-        badge.className = "prob-badge";
-        badge.textContent = `${(eff.probability * 100).toFixed(1)}%`;
-        headerRow.appendChild(hdr);
-        headerRow.appendChild(badge);
-        card.appendChild(headerRow);
+function _renderEffectGroups(container, effectGroups) {
+    for (let i = 0; i < effectGroups.length; i++) {
+        if (i > 0) container.appendChild(orSeparator());
+        const group = effectGroups[i];
 
-        // Effect preconditions
-        if (eff.preconditions && eff.preconditions.length > 0) {
-            const label = document.createElement("div");
-            label.className = "cond-label";
-            label.textContent = "Conditions";
-            card.appendChild(label);
-           renderConditionGroups(card, eff.preconditions);
+        const groupDiv = document.createElement("div");
+        groupDiv.className = "condition-group";
+
+        for (const { attribute, value } of (group.assignments || [])) {
+            groupDiv.appendChild(_effectAssignmentPill(attribute, value));
         }
 
-        // Meta row
-        const meta = document.createElement("div");
-        meta.className = "effect-meta";
-        meta.innerHTML = `
-            <span class="meta-key">Presence</span>
-            <span>${(eff._meta.presence_probability * 100).toFixed(1)}%</span>
-            <span style="color:#cbd5e1">·</span>
-            <span class="meta-key">App.</span> ${cascadeBadge(eff._meta.appearance_level)}
-            <span style="color:#cbd5e1">·</span>
-            <span class="meta-key">Val.</span> ${cascadeBadge(eff._meta.value_level)}
-        `;
-        card.appendChild(meta);
+        if (group.probability != null) {
+            const badge = document.createElement("span");
+            badge.className = "prob-badge";
+            badge.style.cssText = "background:#6366f1;font-size:0.7rem;";
+            badge.textContent = `${(group.probability * 100).toFixed(1)}%`;
+            groupDiv.appendChild(badge);
+        }
 
-        section.appendChild(card);
+        container.appendChild(groupDiv);
+
+        if (group.guard?.length > 0) {
+            const whenLabel = document.createElement("div");
+            whenLabel.className = "cond-label";
+            whenLabel.style.cssText = "font-size:0.7rem;margin-top:2px;margin-left:4px;";
+            whenLabel.textContent = "when:";
+            container.appendChild(whenLabel);
+            renderConditionGroups(container, group.guard);
+        }
     }
+}
 
-    return section;
+function _effectAssignmentPill(attribute, value) {
+    const span = document.createElement("span");
+    span.className = "condition-pill condition-pill-eq";
+    span.textContent = `${attribute} → ${value}`;
+    return span;
 }
 
 function buildCostSection(cost) {
@@ -346,7 +346,7 @@ function _enterTransitionEdit(actName) {
 
     // Effects
     const effSection = _makeEditSection("Effects", "bi-lightning-charge");
-    const effEditor = _buildEffectEditor(t.effects || [], catalog);
+    const effEditor = createEffectGroupEditor(catalog, t.effect_groups || [], t.effects || {});
     effSection.appendChild(effEditor.el);
     content.appendChild(effSection);
 
@@ -355,7 +355,7 @@ function _enterTransitionEdit(actName) {
             const body = {
                 cost: parseFloat(costInput.value) || 0,
                 preconditions: sopBuilder.getValue(),
-                effects: effEditor.getValue(),
+                effect_groups: effEditor.getValue(),
             };
 
             const dMin = durMinInput.value.trim();
@@ -462,138 +462,6 @@ function _enterXorEdit(placeId) {
     ));
 }
 
-function _buildEffectEditor(effects, catalog) {
-    const el = document.createElement("div");
-    el.className = "effect-edit-list";
-
-    const builders = [];
-
-    // ── "Add effect" button — created first so insertBefore can reference it ──
-    const addEffectBtn = document.createElement("button");
-    addEffectBtn.type = "button";
-    addEffectBtn.className = "btn-add-effect";
-    addEffectBtn.innerHTML = '<i class="bi bi-plus-circle"></i> Add effect';
-    el.appendChild(addEffectBtn);
-
-    function _addEffectCard(eff) {
-        const isNew = !eff._meta;
-        const card = document.createElement("div");
-        card.className = "effect-edit-card" + (isNew ? " effect-edit-card-new" : "");
-
-        // ── Header: × | attribute ▼ = value ▼ | prob [input] ─────────────────
-        const header = document.createElement("div");
-        header.className = "effect-edit-card-header";
-
-        const removeBtn = document.createElement("button");
-        removeBtn.type = "button";
-        removeBtn.className = "btn-remove-effect";
-        removeBtn.innerHTML = '<i class="bi bi-x-lg"></i>';
-        removeBtn.title = "Remove effect";
-        removeBtn.addEventListener("click", () => {
-            card.remove();
-            const idx = builders.findIndex(b => b.card === card);
-            if (idx !== -1) builders.splice(idx, 1);
-        });
-
-        const attrSel = document.createElement("select");
-        attrSel.className = "sop-attr-sel effect-attr-sel";
-        for (const a of Object.keys(catalog).sort()) {
-            const opt = document.createElement("option");
-            opt.value = a;
-            opt.textContent = a;
-            attrSel.appendChild(opt);
-        }
-        if (eff.attribute) attrSel.value = eff.attribute;
-
-        const eqLabel = document.createElement("span");
-        eqLabel.className = "effect-eq-label";
-        eqLabel.textContent = "=";
-
-        const valSel = document.createElement("select");
-        valSel.className = "sop-val-sel effect-val-sel";
-
-        function rebuildValues() {
-            const info = catalog[attrSel.value] || {};
-            const prev = valSel.value;
-            valSel.innerHTML = "";
-            if (info.type === "boolean") {
-                valSel.innerHTML = `<option value="true">true</option><option value="false">false</option>`;
-            } else {
-                for (const v of (info.possible_values || [])) {
-                    const opt = document.createElement("option");
-                    opt.value = v;
-                    opt.textContent = v;
-                    valSel.appendChild(opt);
-                }
-            }
-            // Restore previous selection when changing attribute; fall back to
-            // the original effect value on first render.
-            if (prev && [...valSel.options].some(o => o.value === prev)) {
-                valSel.value = prev;
-            } else if (eff.value !== undefined && !isNew) {
-                valSel.value = String(eff.value);
-            }
-        }
-        attrSel.addEventListener("change", rebuildValues);
-        rebuildValues();
-
-        const probHint = document.createElement("span");
-        probHint.className = "effect-prob-hint";
-        probHint.textContent = "prob";
-        const probInput = document.createElement("input");
-        probInput.type = "number";
-        probInput.className = "prob-input";
-        probInput.min = "0";
-        probInput.max = "1";
-        probInput.step = "0.01";
-        probInput.value = eff.probability ?? 1;
-
-        header.appendChild(removeBtn);
-        header.appendChild(attrSel);
-        header.appendChild(eqLabel);
-        header.appendChild(valSel);
-        header.appendChild(probHint);
-        header.appendChild(probInput);
-        card.appendChild(header);
-
-        // ── Body: conditions SOP ──────────────────────────────────────────────
-        const body = document.createElement("div");
-        body.className = "effect-edit-body";
-        const condHint = document.createElement("div");
-        condHint.className = "effect-cond-summary";
-        condHint.textContent = "Conditions (when does this value apply)";
-        body.appendChild(condHint);
-        const sopBuilder = createSopBuilder(catalog, eff.preconditions || [], {
-            withPredicate: true,
-            startEmpty: !eff.preconditions?.length,
-        });
-        body.appendChild(sopBuilder.el);
-        card.appendChild(body);
-
-        // Insert before the "Add effect" button so it always stays at the bottom
-        el.insertBefore(card, addEffectBtn);
-        builders.push({ card, attrSel, valSel, probInput, sopBuilder, _meta: eff._meta || null });
-    }
-
-    addEffectBtn.addEventListener("click", () => _addEffectCard({ probability: 1 }));
-
-    // Populate existing effects
-    for (const eff of (effects || [])) {
-        _addEffectCard(eff);
-    }
-
-    function getValue() {
-        return builders.map(b => ({
-            attribute: b.attrSel.value,
-            value: b.valSel.value,
-            probability: parseFloat(b.probInput.value) || 0,
-            preconditions: b.sopBuilder.getValue(),
-            _meta: b._meta,
-        }));
-    }
-
-    return { el, getValue };
-}
 
 function _makeEditSection(title, icon) {
     const section = document.createElement("div");

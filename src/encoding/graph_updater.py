@@ -7,7 +7,8 @@ handle GUI-driven graph edits (node moves, manual arc changes, etc.).
 from typing import Any, Dict, List, Tuple
 
 import core_utils as utils
-from encoding import ActionRegistry, PDDLEffect
+from encoding.action_registry import ActionRegistry
+from encoding.pddl_model import PDDLEffect
 from models import ParseResult
 
 logger = utils.get_logger(__name__)

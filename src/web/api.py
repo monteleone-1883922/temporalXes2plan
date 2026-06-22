@@ -412,6 +412,8 @@ def patch_transition(config_name: str, activity_name: str):
         t["preconditions"] = body["preconditions"]
     if "effects" in body:
         t["effects"] = body["effects"]
+    if "effect_groups" in body:
+        t["effect_groups"] = body["effect_groups"]
     if "duration" in body:
         d = body["duration"]
         eff_min = float(d.get("effective_min", 0))
