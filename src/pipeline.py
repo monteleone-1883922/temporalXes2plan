@@ -16,7 +16,7 @@ import core_utils as utils
 from models import AnalysisConfig
 from parsing.xes_parser import Parser
 from encoding.domain_builder import DomainBuilder
-from encoding.graph_updater import save_original_and_current
+from encoding.graph_updater import save_original_and_current, update_parse_result
 from encoding.pddl_writer import PDDLWriter
 from web.serializer import serialize_parse_result
 
@@ -82,12 +82,13 @@ class Pipeline:
         # 2 — Encode
         logger.info("Step 2/4: Building PDDL domain")
         builder = DomainBuilder()
-        domain = builder.build(
+        domain, registry = builder.build_with_registry(
             parse_result=parse_result,
             domain_name=domain_name,
             use_durative=use_durative,
             config=config,
         )
+        update_parse_result(registry, parse_result)
 
         # 3 — Serialize
         logger.info("Step 3/4: Serializing to UI JSON")

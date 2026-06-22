@@ -111,38 +111,140 @@ def _guards_to_preconditions(
     ]
 
 
-def _build_effect_entry(attr: str, info: EffectInfo) -> List[Dict[str, Any]]:
-    """Build simplified effect entries for one attribute of a transition.
+def _build_effects_lookup(effects: Dict[str, EffectInfo]) -> Dict[str, Any]:
+    """Build a nested dict {attr: {value: {probability, guard}}} for UI lookup.
 
-    Flattens the 2A/2B cascade into per-value entries with:
-      - preconditions (from value guards if available)
-      - attribute, value, probability
-      - _meta with cascade levels and stats
+    This is the read-only view of per-(attribute, value) details.  The frontend
+    uses it to retrieve probability and guard for each assignment in an effect group.
+
+    Args:
+        effects: Per-attribute EffectInfo map from TransitionInfo.
+
+    Returns:
+        Nested dict keyed by attribute then value.
     """
-    effects: List[Dict[str, Any]] = []
+    lookup: Dict[str, Any] = {}
+    for attr, info in effects.items():
+        value_guards_map: Dict[str, List[List[Guard]]] = {}
+        if info.value_guards and info.value_guards.guards:
+            value_guards_map = info.value_guards.guards
 
-    value_guards_map: Dict[str, List[List[Guard]]] = {}
+        attr_entry: Dict[str, Any] = {}
+        for value, probability in info.value_probabilities.items():
+            val_str = str(value)
+            guard = _guards_to_preconditions(value_guards_map.get(val_str))
+            attr_entry[val_str] = {
+                "probability": round(probability, 4),
+                "guard": guard,
+            }
+        lookup[attr] = attr_entry
+    return lookup
+
+
+def _combine_raw_sop(
+    sop_a: List[List[Guard]],
+    sop_b: List[List[Guard]],
+) -> List[List[Guard]]:
+    """Combine two raw SOP guard lists via Cartesian product.
+
+    Each pair (AND-clause from sop_a, AND-clause from sop_b) is merged into a
+    single AND-clause in the result, preserving the OR structure.  This mirrors
+    the logic used by EffectDuplicator when combining guards from independent
+    attributes into a single variant.
+
+    Args:
+        sop_a: First list of AND-clauses (OR of ANDs).
+        sop_b: Second list of AND-clauses (OR of ANDs).
+
+    Returns:
+        Cartesian product SOP: every pair (a, b) merged into one AND-clause.
+        If either list is empty the other is returned unchanged.
+    """
+    if not sop_a:
+        return sop_b
+    if not sop_b:
+        return sop_a
+    result = {frozenset(clause_a + clause_b) for clause_a in sop_a for clause_b in sop_b}
+    return [list(clause) for clause in result]
+
+
+def _raw_sop_for_effect(
+    val_str: str,
+    info: EffectInfo,
+) -> List[List[Guard]]:
+    """Collect the raw SOP guard clauses for one (attribute, value) pair.
+
+    Combines appearance guards (2A) and value guards (2B) via Cartesian product,
+    since both conditions must hold for the effect to fire.
+
+    Args:
+        val_str: Stringified attribute value.
+        info: EffectInfo for the attribute.
+
+    Returns:
+        List of AND-clauses (OR of ANDs) in raw Guard form.
+    """
+    appearance_clauses: List[List[Guard]] = []
+    if info.appearance_guards and info.appearance_guards.guards:
+        appearance_clauses = info.appearance_guards.guards.get("appears", [])
+
+    value_clauses: List[List[Guard]] = []
     if info.value_guards and info.value_guards.guards:
-        value_guards_map = info.value_guards.guards
+        value_clauses = info.value_guards.guards.get(val_str, [])
 
-    for value, probability in info.value_probabilities.items():
-        val_str = str(value)
-        preconditions = _guards_to_preconditions(
-            value_guards_map.get(val_str)
-        )
-        effects.append({
-            "attribute": attr,
-            "preconditions": preconditions,
-            "value": val_str,
+    return _combine_raw_sop(appearance_clauses, value_clauses)
+
+
+def _build_effect_groups(
+    groups: List[List[tuple]],
+    effects_info: Dict[str, EffectInfo],
+) -> List[Dict[str, Any]]:
+    """Serialize effect_groups with per-group guard and probability.
+
+    For each group (a list of (attr, val) pairs that fire together in one
+    action variant), computes:
+
+    - guard: Cartesian-product combination of each attribute's appearance and
+      value guards, converted to the UI SOP format.
+    - probability: product of each attribute's value probability, multiplied
+      by presence_probability when the appearance phase is probabilistic
+      (appearance_level == 2).
+
+    Args:
+        groups: List of groups produced by _extract_effect_groups; each group
+            is a sorted list of (attribute, value) tuples.
+        effects_info: Per-attribute EffectInfo map from TransitionInfo.effects.
+
+    Returns:
+        List of dicts with keys: assignments, guard, probability.
+    """
+    result: List[Dict[str, Any]] = []
+
+    for group in groups:
+        combined_raw: List[List[Guard]] = []
+        probability = 1.0
+
+        for attr, val in group:
+            val_str = str(val)
+            info = effects_info.get(attr)
+            if info is None:
+                continue
+
+            attr_raw = _raw_sop_for_effect(val_str, info)
+            combined_raw = _combine_raw_sop(combined_raw, attr_raw)
+
+            val_prob = info.value_probabilities.get(val, info.value_probabilities.get(val_str, 1.0))
+            if info.appearance_level == 2:
+                val_prob *= info.presence_probability
+            probability *= val_prob
+
+        result.append({
+            "assignments": [{"attribute": attr, "value": str(val)} for attr, val in group],
+            "guard": _guards_to_preconditions(combined_raw),
             "probability": round(probability, 4),
-            "_meta": {
-                "presence_probability": round(info.presence_probability, 4),
-                "appearance_level": info.appearance_level,
-                "value_level": info.value_level,
-            },
         })
 
-    return effects
+    return result
 
 
 def _build_transitions(result: ParseResult) -> Dict[str, Any]:
@@ -154,9 +256,8 @@ def _build_transitions(result: ParseResult) -> Dict[str, Any]:
         if t_info.attribute_preconditions:
             preconditions = [[_guard_to_condition(g) for g in t_info.attribute_preconditions]]
 
-        effects: List[Dict[str, Any]] = []
-        for attr, eff_info in t_info.effects.items():
-            effects.extend(_build_effect_entry(attr, eff_info))
+        effects_lookup = _build_effects_lookup(t_info.effects)
+        effect_groups = _build_effect_groups(t_info.effect_groups, t_info.effects)
 
         duration = None
         if t_info.duration:
@@ -190,7 +291,8 @@ def _build_transitions(result: ParseResult) -> Dict[str, Any]:
             "activity_name": act,
             "input_places": t_info.input_places,
             "preconditions": preconditions,
-            "effects": effects,
+            "effects": effects_lookup,
+            "effect_groups": effect_groups,
             "cost": 0.0,
             "duration": duration,
             "_meta": meta,
@@ -210,7 +312,7 @@ def _build_xor_splits(
     output: Dict[str, Any] = {}
 
     for place, transitions in pnm.xor_splits.items():
-        branches: List[Dict[str, Any]] = []
+        branches: Dict[str, Any] = {}
         for t in transitions:
             if not t.label:
                 continue
@@ -222,7 +324,7 @@ def _build_xor_splits(
             xb = t_info.xor_branch
             conditions = _guards_to_preconditions(xb.guards)
 
-            branches.append({
+            branches[act] = {
                 "activity_name": act,
                 "conditions": conditions,
                 "probability": round(xb.probability, 4),
@@ -230,7 +332,7 @@ def _build_xor_splits(
                     "cascade_level": xb.cascade_level,
                     "total_samples": xb.total_samples,
                 },
-            })
+            }
 
         if branches:
             output[place.name] = {"branches": branches}

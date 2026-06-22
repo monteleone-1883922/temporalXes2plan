@@ -120,7 +120,7 @@ class XorSplitStats:
     total_executions: int
 
 
-@dataclass
+@dataclass(frozen=True)
 class Guard:
     """An atomic condition extracted from a decision tree split.
 
@@ -693,6 +693,7 @@ class TransitionInfo:
     related_effects: Set[FrozenSet[str]] = field(default_factory=set)
     incompatible_effects: Set[FrozenSet[str]] = field(default_factory=set)
     attribute_preconditions: List[Guard] = field(default_factory=list)
+    effect_groups: List[List[Tuple[str, str]]] = field(default_factory=list)
 
 
 @dataclass
