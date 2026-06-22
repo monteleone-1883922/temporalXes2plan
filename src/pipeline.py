@@ -26,6 +26,7 @@ logger = utils.get_logger(__name__)
 class Pipeline:
     """Coordinates the full XES → PDDL + UI JSON pipeline."""
 
+
     def run(
         self,
         log_path: str,

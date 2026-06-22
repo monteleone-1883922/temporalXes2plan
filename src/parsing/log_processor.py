@@ -57,7 +57,7 @@ class LogProcessor:
             try:
                 lifecycle_values = pm4py.get_event_attribute_values(log, 'lifecycle:transition')
                 if 'complete' in lifecycle_values:
-                    #FIXME: is it correct?
+
                     log = pm4py.filter_event_attribute_values(log, 'lifecycle:transition', 'complete')
             except Exception:
                 pass

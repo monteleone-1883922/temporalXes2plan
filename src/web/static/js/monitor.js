@@ -1,6 +1,6 @@
 /**
  * Predictive monitoring panel: loads Petri net data, builds init/goal forms,
- * submits to /solve, and displays the generated problem.pddl.
+ * submits to /build-problem, and displays the generated problem.pddl.
  *
  * Init  — optional starting place (marked) + attribute value assignments.
  * Goal  — SOP conditions: [[{attribute, predicate:"="/"<>", value}], ...]
@@ -120,8 +120,7 @@ async function onSolveSubmit(e) {
     }
 
     try {
-        // TODO change to build button
-        const resp = await fetch(`/api/${document.body.dataset.configName}/solve`, {
+        const resp = await fetch(`/api/${document.body.dataset.configName}/build-problem`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ init_place: _initPlace, init, goal }),
