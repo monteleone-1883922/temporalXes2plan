@@ -1,7 +1,9 @@
 """OPTIC temporal planner — importable wrapper."""
 
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -43,6 +45,16 @@ def build(log_fn: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
     _log("Building OPTIC — this may take several minutes...")
     all_stdout: List[str] = []
 
+    # Ensure the conda env lib dir is on LIBRARY_PATH so the linker can find
+    # libz.so when the system only ships libz.so.1 (no -dev package installed).
+    build_env = os.environ.copy()
+    conda_lib = Path(sys.executable).resolve().parent.parent / "lib"
+    if conda_lib.is_dir():
+        existing = build_env.get("LIBRARY_PATH", "")
+        build_env["LIBRARY_PATH"] = (
+            f"{conda_lib}:{existing}" if existing else str(conda_lib)
+        )
+
     for step, script in enumerate(("run-cmake-release", "build-release"), start=1):
         _log(f"Step {step}/2: {script}")
         try:
@@ -52,6 +64,7 @@ def build(log_fn: Optional[Callable[[str], None]] = None) -> Dict[str, Any]:
                 stderr=subprocess.STDOUT,
                 text=True,
                 cwd=str(OPTIC_DIR),
+                env=build_env,
             )
             assert proc.stdout is not None
             for line in proc.stdout:
