@@ -99,11 +99,12 @@ class TestStatsToDuration:
         )
         assert stats.mean == pytest.approx(expected_mean)
         assert stats.std_dev == pytest.approx(expected_std)
+        # Implementation rounds to 2 decimal places; use abs tolerance accordingly.
         assert stats.effective_min == pytest.approx(
-            max(min(durations), expected_mean - expected_std)
+            max(min(durations), expected_mean - expected_std), abs=0.01
         )
         assert stats.effective_max == pytest.approx(
-            min(max(durations), expected_mean + expected_std)
+            min(max(durations), expected_mean + expected_std), abs=0.01
         )
 
     def test_effective_bounds_never_inverted(self):

@@ -63,10 +63,10 @@ async function rebuildDomain() {
     try {
         const resp = await fetch(apiUrl("/rebuild-domain"), { method: "POST" });
         const data = await resp.json();
-        if (data.status === "not_implemented") {
-            alert("Domain rebuild is not yet implemented. Export the edited Petri net and re-run the pipeline.");
-        } else if (data.status === "ok") {
+        if (data.status === "ok") {
             setDomainStale(false);
+        } else if (data.error) {
+            alert("Rebuild failed: " + data.error);
         }
     } catch (err) {
         alert("Rebuild failed: " + err.message);

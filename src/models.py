@@ -559,8 +559,9 @@ class AnalysisConfig:
     log_removed_effects: bool = True
 
     # --- Snapshot output ---
-    # Directory where pre-pruning snapshots (PNML + JSON) are written.
-    snapshot_dir: str = "output/snapshots"
+    # Directory where pre-pruning analysis debug files are written.
+    # Pipeline.run() overrides this to data/<config>/analysis_debug/.
+    snapshot_dir: str = "analysis_debug"
 
 
 # ---------------------------------------------------------------------------

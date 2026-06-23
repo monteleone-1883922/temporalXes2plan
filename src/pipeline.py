@@ -64,7 +64,11 @@ class Pipeline:
             domain_name = stem
 
         config_dir = os.path.join(data_dir, stem)
-        pddl_path = Path(pddl_output_dir) / f"{stem}_domain.pddl"
+        pddl_path = Path(pddl_output_dir) / "domain.pddl"
+
+        # Route per-config debug output to data/<stem>/analysis_debug/
+        config = config or AnalysisConfig()
+        config.snapshot_dir = os.path.join(config_dir, "analysis_debug")
 
         logger.info("=== Pipeline start: %s ===", stem)
 
