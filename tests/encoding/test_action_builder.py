@@ -11,28 +11,29 @@ from encoding.pddl_model import PDDLCondition, PDDLEffect
 
 class TestPlaceMarkingActions:
 
-    def test_one_action_per_predecessor(self, simple_parse_result):
+    def test_one_action_per_transition(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_place_marking_actions()
         names = {a.name for a in actions}
 
-        assert "mark_p_mid_from_activity_a" in names
-        assert "mark_p_end_from_activity_b" in names
+        assert "mark_places_from_activity_a" in names
+        assert "mark_places_from_activity_b" in names
         assert len(actions) == 2
 
-    def test_precondition_is_predecessor_marked(self, simple_parse_result):
+    def test_precondition_is_transition_marked(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_place_marking_actions()
-        action = next(a for a in actions if a.name == "mark_p_mid_from_activity_a")
+        action = next(a for a in actions if a.name == "mark_places_from_activity_a")
 
         assert action.preconditions == {PDDLCondition.marked("activity_a")}
 
-    def test_effect_is_place_marked(self, simple_parse_result):
+    def test_effect_clears_transition_and_marks_output_place(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_place_marking_actions()
-        action = next(a for a in actions if a.name == "mark_p_mid_from_activity_a")
+        action = next(a for a in actions if a.name == "mark_places_from_activity_a")
 
-        assert action.effects == [PDDLEffect.marking("p_mid")]
+        assert PDDLEffect(kind="marked", attribute="activity_a", clear=True) in action.effects
+        assert PDDLEffect.marking("p_mid") in action.effects
 
     def test_no_parameters(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
@@ -41,7 +42,8 @@ class TestPlaceMarkingActions:
         for a in actions:
             assert a.parameters == []
 
-    def test_multiple_predecessors_generate_multiple_actions(self, xor_net):
+    def test_and_split_marks_all_output_places_in_one_action(self, xor_net):
+        """AND-split: one mark_places_from_T marks all output places atomically."""
         pr = ParseResult(
             petri_net_model=xor_net,
             place_predecessors={
@@ -66,7 +68,23 @@ class TestPlaceMarkingActions:
         builder = ActionBuilder(pr)
         actions = builder._build_place_marking_actions()
 
+        # One action per transition (source, left_branch, right_branch)
         assert len(actions) == 3
+
+    def test_tau_place_marking_action_created(self, tau_parse_result):
+        builder = ActionBuilder(tau_parse_result)
+        actions = builder._build_place_marking_actions()
+        names = {a.name for a in actions}
+
+        assert "mark_places_from_tau_0" in names
+
+    def test_tau_place_marking_clears_tau_and_marks_output(self, tau_parse_result):
+        builder = ActionBuilder(tau_parse_result)
+        actions = builder._build_place_marking_actions()
+        action = next(a for a in actions if a.name == "mark_places_from_tau_0")
+
+        assert PDDLEffect(kind="marked", attribute="tau_0", clear=True) in action.effects
+        assert PDDLEffect.marking("p_mid") in action.effects
 
 
 class TestTransitionActions:
@@ -129,6 +147,50 @@ class TestTransitionActions:
         for action in actions:
             trans_name = action.name.replace("execute_", "")
             assert PDDLEffect.marking(trans_name) in action.effects
+
+    def test_transition_effect_clears_all_input_places(self, simple_parse_result):
+        builder = ActionBuilder(simple_parse_result)
+        actions = builder._build_transition_actions()
+        action = next(a for a in actions if a.name == "execute_activity_a")
+
+        assert PDDLEffect(kind="marked", attribute="p_start", clear=True) in action.effects
+
+    def test_and_join_clears_all_input_places(self):
+        """AND-join: execute_T clears both input places."""
+        from pm4py.objects.petri_net.obj import PetriNet, Marking
+
+        net = PetriNet("and_join")
+        p1 = PetriNet.Place("p1")
+        p2 = PetriNet.Place("p2")
+        p_end = PetriNet.Place("p_end")
+        t_join = PetriNet.Transition("t_join", label="Join")
+        net.places.update([p1, p2, p_end])
+        net.transitions.add(t_join)
+        for src, tgt in [(p1, t_join), (p2, t_join), (t_join, p_end)]:
+            net.arcs.add(PetriNet.Arc(src, tgt))
+
+        from models import PetriNetModel
+        model = PetriNetModel(
+            petrinet=net, initial_marking=Marking(), final_marking=Marking({p_end: 1}),
+            activities={"join"}, silent_transitions={},
+            trans_inputs={t_join: {p1, p2}}, trans_outputs={t_join: {p_end}},
+            xor_splits={}, place_inputs={p_end: [t_join]},
+        )
+        pr = ParseResult(
+            petri_net_model=model,
+            place_predecessors={"p_end": ["join"]},
+            transition_predecessors={"join": ["p1", "p2"]},
+            transitions={"join": TransitionInfo("join", ["p1", "p2"], 50, None, {})},
+            start_place="p1",
+            end_place="p_end",
+            attribute_catalog={},
+        )
+        builder = ActionBuilder(pr)
+        actions = builder._build_transition_actions()
+        action = actions[0]
+
+        assert PDDLEffect(kind="marked", attribute="p1", clear=True) in action.effects
+        assert PDDLEffect(kind="marked", attribute="p2", clear=True) in action.effects
 
 
 class TestDeterministicEffects:
@@ -346,6 +408,12 @@ class TestTauActions:
 
         assert PDDLEffect.marking("tau_0") in actions[0].effects
 
+    def test_tau_action_clears_input_place(self, tau_parse_result):
+        builder = ActionBuilder(tau_parse_result)
+        actions = builder._build_tau_actions()
+
+        assert PDDLEffect(kind="marked", attribute="p_start", clear=True) in actions[0].effects
+
     def test_no_tau_actions_when_none_exist(self, simple_parse_result):
         builder = ActionBuilder(simple_parse_result)
         actions = builder._build_tau_actions()
@@ -360,8 +428,8 @@ class TestBuildAll:
         actions = builder.build_all()
         names = {a.name for a in actions}
 
-        assert "mark_p_mid_from_tau_0" in names
-        assert "mark_p_end_from_activity_a" in names
+        assert "mark_places_from_tau_0" in names
+        assert "mark_places_from_activity_a" in names
         assert "execute_activity_a" in names
         assert "execute_tau_0" in names
 

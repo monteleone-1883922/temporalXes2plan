@@ -99,6 +99,14 @@ class TestActionBuilderDurative:
 
         assert PDDLEffect.marking("activity_a") in action.effects_at_end
 
+    def test_durative_action_clears_input_places(self, durative_parse_result):
+        builder = ActionBuilder(durative_parse_result, use_durative=True)
+        actions = builder._build_transition_actions()
+        action = next(a for a in actions if isinstance(a, PDDLDurativeAction))
+
+        clearing = PDDLEffect(kind="marked", attribute="p_start", clear=True)
+        assert clearing in action.effects_at_end
+
     def test_durative_action_deterministic_effects_in_effects_at_end(self, durative_parse_result):
         builder = ActionBuilder(durative_parse_result, use_durative=True)
         actions = builder._build_transition_actions()
