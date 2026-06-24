@@ -76,6 +76,13 @@ class DomainRebuilder:
         if any(isinstance(a, PDDLDurativeAction) for a in actions):
             requirements.append(":durative-actions")
 
+        has_costs = any(
+            (a.base_cost or 0.0) + (a.additional_cost or 0.0) > 0.0
+            for a in actions
+        )
+        if has_costs:
+            requirements += [":action-costs", ":numeric-fluents"]
+
         return PDDLDomain(
             name=domain_name,
             requirements=requirements,
@@ -83,6 +90,7 @@ class DomainRebuilder:
             constants=constants,
             predicates=predicates,
             actions=actions,
+            has_costs=has_costs,
         )
 
     # ------------------------------------------------------------------

@@ -296,3 +296,4 @@ class PDDLDomain:
     constants: List[PDDLObject] = field(default_factory=list)
     predicates: List[PDDLPredicate] = field(default_factory=list)
     actions: List[PDDLBaseAction] = field(default_factory=list)
+    has_costs: bool = False

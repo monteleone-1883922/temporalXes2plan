@@ -1,6 +1,6 @@
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from encoding.pddl_model import (
     PDDLAction, PDDLBaseAction, PDDLDurativeAction,
@@ -40,11 +40,14 @@ class PDDLWriter:
             self._render_predicates(domain.predicates),
         ]
 
+        if domain.has_costs:
+            sections.append("  (:functions\n    (total-cost)\n  )")
+
         for action in domain.actions:
             if isinstance(action, PDDLDurativeAction):
-                sections.append(self._render_durative_action(action))
+                sections.append(self._render_durative_action(action, domain.has_costs))
             else:
-                sections.append(self._render_action(action))
+                sections.append(self._render_action(action, domain.has_costs))
 
         sections.append(")")
         return "\n\n".join(sections) + "\n"
@@ -96,7 +99,7 @@ class PDDLWriter:
         lines.append("  )")
         return "\n".join(lines)
 
-    def _render_action(self, action: PDDLAction) -> str:
+    def _render_action(self, action: PDDLAction, has_costs: bool = False) -> str:
         lines = [f"  (:action {action.name}"]
 
         if action.parameters:
@@ -110,14 +113,15 @@ class PDDLWriter:
         lines.append(self._render_condition_block(
             ":precondition", action.preconditions, indent="    "
         ))
+        cost = self._total_action_cost(action) if has_costs else None
         lines.append(self._render_effect_block(
-            ":effect", action.effects, indent="    "
+            ":effect", action.effects, indent="    ", cost=cost
         ))
 
         lines.append("  )")
         return "\n".join(lines)
 
-    def _render_durative_action(self, action: PDDLDurativeAction) -> str:
+    def _render_durative_action(self, action: PDDLDurativeAction, has_costs: bool = False) -> str:
         lines = [f"  (:durative-action {action.name}"]
 
         if action.parameters:
@@ -157,14 +161,15 @@ class PDDLWriter:
                 lines.append(f"      {part}")
             lines.append("    )")
 
+        cost = self._total_action_cost(action) if has_costs else None
         effect_parts = []
         if action.effects_at_start:
             effect_parts.append(
                 self._render_timed_effect_block("at start", action.effects_at_start)
             )
-        if action.effects_at_end:
+        if action.effects_at_end or cost is not None:
             effect_parts.append(
-                self._render_timed_effect_block("at end", action.effects_at_end)
+                self._render_timed_effect_block("at end", action.effects_at_end, cost=cost)
             )
 
         if not effect_parts:
@@ -184,6 +189,11 @@ class PDDLWriter:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _total_action_cost(self, action: PDDLBaseAction) -> Optional[float]:
+        """Return total cost if > 0, else None."""
+        total = (action.base_cost or 0.0) + (action.additional_cost or 0.0)
+        return total if total > 0.0 else None
+
     def _render_condition_block(
         self, keyword: str, items, indent: str = "    "
     ) -> str:
@@ -197,10 +207,12 @@ class PDDLWriter:
         return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
 
     def _render_effect_block(
-        self, keyword: str, items, indent: str = "    "
+        self, keyword: str, items, indent: str = "    ", cost: Optional[float] = None
     ) -> str:
-        """Render a :effect block from a collection of PDDLEffect."""
+        """Render a :effect block from a collection of PDDLEffect, with optional cost increase."""
         ordered = sorted(e.to_pddl() for e in items)
+        if cost is not None:
+            ordered.append(f"(increase (total-cost) {cost:.4f})")
         if not ordered:
             return f"{indent}{keyword} ()"
         if len(ordered) == 1:
@@ -216,9 +228,13 @@ class PDDLWriter:
         inner = "\n        ".join(ordered)
         return f"({timing} (and\n        {inner}\n      ))"
 
-    def _render_timed_effect_block(self, timing: str, items) -> str:
-        """Render a timed effect block (at start/at end) from PDDLEffect."""
+    def _render_timed_effect_block(
+        self, timing: str, items, cost: Optional[float] = None
+    ) -> str:
+        """Render a timed effect block (at start/at end) from PDDLEffect, with optional cost."""
         ordered = sorted(e.to_pddl() for e in items)
+        if cost is not None:
+            ordered.append(f"(increase (total-cost) {cost:.4f})")
         if len(ordered) == 1:
             return f"({timing} {ordered[0]})"
         inner = "\n        ".join(ordered)

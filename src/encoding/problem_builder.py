@@ -29,6 +29,8 @@ class ProblemBuilder:
         goal_sop: List[List[Dict[str, Any]]],
         attribute_catalog: Dict[str, Any],
         init_place: Optional[str] = None,
+        metric: Optional[str] = None,
+        has_costs: bool = False,
     ) -> str:
         """Build and return a PDDL problem definition as a string.
 
@@ -44,12 +46,15 @@ class ProblemBuilder:
                 Maps attr name → {"type": "boolean"|"numerical"|"categorical", ...}.
             init_place: Optional place ID to mark as the starting token position.
                 Emitted as (marked <place_id>) as the first :init atom.
+            metric: Optimization metric — "minimize_cost", "minimize_time", or None.
+            has_costs: True if the domain declares action costs (total-cost function).
 
         Returns:
             Complete PDDL problem text.
         """
-        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog)
+        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog, has_costs)
         goal_str = self._build_goal(goal_sop, attribute_catalog)
+        metric_str = self._build_metric(metric, has_costs)
 
         lines = [
             f"(define (problem {problem_name})",
@@ -59,22 +64,36 @@ class ProblemBuilder:
         ]
         if init_atoms:
             lines += [f"    {atom}" for atom in init_atoms]
-        lines += ["  )", "", "  (:goal", f"    {goal_str}", "  )", "", ")"]
+        lines += ["  )", "", "  (:goal", f"    {goal_str}", "  )"]
+        if metric_str:
+            lines += ["", f"  {metric_str}"]
+        lines += ["", ")"]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Init
     # ------------------------------------------------------------------
 
+    def _build_metric(self, metric: Optional[str], has_costs: bool) -> Optional[str]:
+        """Return the (:metric ...) string, or None if not applicable."""
+        if metric == "minimize_cost" and has_costs:
+            return "(:metric minimize (total-cost))"
+        if metric == "minimize_time":
+            return "(:metric minimize (total-time))"
+        return None
+
     def _build_init_atoms(
         self,
         init_place: Optional[str],
         effects: List[Dict[str, Any]],
         catalog: Dict[str, Any],
+        has_costs: bool = False,
     ) -> List[str]:
         atoms = []
         if init_place:
             atoms.append(PDDLEffect.marking(init_place).to_pddl())
+        if has_costs:
+            atoms.append("(= (total-cost) 0)")
         for eff in effects:
             attr = eff["attribute"]
             value = str(eff.get("value", ""))

@@ -91,6 +91,13 @@ class DomainBuilder:
         if any(isinstance(a, PDDLDurativeAction) for a in actions):
             requirements.append(":durative-actions")
 
+        has_costs = any(
+            (a.base_cost or 0.0) + (a.additional_cost or 0.0) > 0.0
+            for a in actions
+        )
+        if has_costs:
+            requirements += [":action-costs", ":numeric-fluents"]
+
         domain = PDDLDomain(
             name=domain_name,
             requirements=requirements,
@@ -98,6 +105,7 @@ class DomainBuilder:
             constants=constants,
             predicates=predicates,
             actions=actions,
+            has_costs=has_costs,
         )
         return domain, registry
 
