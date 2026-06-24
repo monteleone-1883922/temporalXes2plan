@@ -67,26 +67,11 @@
                             Add at least one clause with one condition.
                         </p>
                         <div id="goal-predicates"></div>
-                    </div>
-                </details>
-
-                <!-- Optimization metric -->
-                <details class="setup-section">
-                    <summary class="setup-section-header">
-                        <i class="bi bi-graph-up-arrow"></i>
-                        <span>Optimization metric</span>
-                        <i class="bi bi-chevron-down setup-chevron"></i>
-                    </summary>
-                    <div class="setup-section-body">
-                        <p class="field-hint" style="margin-bottom:12px;">
-                            Choose what the planner should optimize.
-                            <em>Minimize time</em> is only available with OPTIC.
-                        </p>
-                        <select id="metric-select" style="width:100%;padding:6px 8px;border:1px solid var(--slate-300);border-radius:6px;">
-                            <option value="">Plan length (default)</option>
-                            <option value="minimize_cost">Minimize cost</option>
-                            <option value="minimize_time">Minimize time</option>
-                        </select>
+                        <label class="check-label" style="margin-top:12px;">
+                            <input type="checkbox" id="require-completion-checkbox">
+                            Require process completion
+                            <span class="field-hint-inline">(adds <code>marked end_place</code> to goal)</span>
+                        </label>
                     </div>
                 </details>
 
@@ -98,6 +83,14 @@
                         <i class="bi bi-chevron-down setup-chevron"></i>
                     </summary>
                     <div class="setup-section-body">
+                        <div class="form-field" style="margin-bottom:16px;">
+                            <label>Optimization metric</label>
+                            <select id="metric-select" class="form-control">
+                                <option value="">Plan length (default)</option>
+                                <option value="minimize_cost">Minimize cost</option>
+                                <option value="minimize_time">Minimize time</option>
+                            </select>
+                        </div>
                         <div id="planner-inner"></div>
                     </div>
                 </details>

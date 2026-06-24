@@ -114,9 +114,10 @@ async function onSolveSubmit(e) {
     const init = collectInitEffects();
     const goal = collectGoalSop();
     const metric = (document.getElementById("metric-select")?.value) || null;
+    const requireCompletion = document.getElementById("require-completion-checkbox")?.checked ?? false;
 
-    if (goal.length === 0) {
-        showSolveError("Add at least one goal clause with a condition.");
+    if (goal.length === 0 && !requireCompletion) {
+        showSolveError("Add at least one goal clause or enable require completion.");
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-hammer"></i> Build Problem';
         return;
@@ -126,7 +127,7 @@ async function onSolveSubmit(e) {
         const resp = await fetch(`/api/${document.body.dataset.configName}/build-problem`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ init_place: _initPlace, init, goal, metric }),
+            body: JSON.stringify({ init_place: _initPlace, init, goal, metric, require_completion: requireCompletion }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || resp.statusText);
