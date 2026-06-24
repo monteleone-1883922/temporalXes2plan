@@ -287,7 +287,7 @@ def parse_plan_text(plan_text: str) -> List[str]:
         if not m:
             continue
         name = _normalise(m.group(1).split()[0])
-        if name and not name.startswith("tau_"):
+        if name and not name.startswith("tau_") and not name.startswith("mark_places_from_"):
             actions.append(name)
     return actions
 

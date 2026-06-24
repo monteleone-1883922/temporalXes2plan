@@ -243,7 +243,7 @@ def _parse_optic_stdout(stdout: str):
         if m:
             plan_lines.append(line.strip())
             name = _normalise(m.group(2).split()[0])
-            if name and not name.startswith("tau_"):
+            if name and not name.startswith("tau_") and not name.startswith("mark_places_from_"):
                 actions.append(name)
 
     return plan_lines, actions

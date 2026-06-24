@@ -129,6 +129,10 @@ class PDDLEffect:
         return cls(kind="marked", attribute=name)
 
     @classmethod
+    def unmarking(cls, name:str) -> "PDDLEffect":
+        return cls(kind="marked", attribute=name, clear=True)
+
+    @classmethod
     def set_attr_is(cls, attribute: str, value: str) -> "PDDLEffect":
         return cls(kind="attr_is", attribute=attribute, value=str(value))
 
