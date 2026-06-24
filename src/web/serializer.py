@@ -29,6 +29,10 @@ def serialize_parse_result(result: ParseResult) -> Dict[str, Any]:
         "transitions": transitions,
         "xor_splits": xor_splits,
         "attribute_catalog": catalog,
+        "metadata": {
+            "start_place": result.start_place,
+            "end_place": result.end_place,
+        },
     }
 
 

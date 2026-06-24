@@ -31,6 +31,8 @@ class ProblemBuilder:
         init_place: Optional[str] = None,
         metric: Optional[str] = None,
         has_costs: bool = False,
+        require_completion: bool = False,
+        end_place: Optional[str] = None,
     ) -> str:
         """Build and return a PDDL problem definition as a string.
 
@@ -48,12 +50,15 @@ class ProblemBuilder:
                 Emitted as (marked <place_id>) as the first :init atom.
             metric: Optimization metric — "minimize_cost", "minimize_time", or None.
             has_costs: True if the domain declares action costs (total-cost function).
+            require_completion: If True, appends (marked end_place) to every goal clause.
+            end_place: Sanitized name of the Petri net sink place; required when
+                require_completion is True.
 
         Returns:
             Complete PDDL problem text.
         """
         init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog, has_costs)
-        goal_str = self._build_goal(goal_sop, attribute_catalog)
+        goal_str = self._build_goal(goal_sop, attribute_catalog, require_completion, end_place)
         metric_str = self._build_metric(metric, has_costs)
 
         lines = [
@@ -124,12 +129,20 @@ class ProblemBuilder:
         self,
         sop: List[List[Dict[str, Any]]],
         catalog: Dict[str, Any],
+        require_completion: bool = False,
+        end_place: Optional[str] = None,
     ) -> str:
-        non_empty = [clause for clause in sop if clause]
-        if not non_empty:
-            return "(and)"
+        completion_atom = f"(marked {end_place})" if require_completion and end_place else None
 
-        clauses = [self._render_clause(clause, catalog) for clause in non_empty]
+        non_empty = [clause for clause in sop if clause]
+
+        if not non_empty:
+            return completion_atom if completion_atom else "(and)"
+
+        clauses = [
+            self._render_clause(clause, catalog, completion_atom)
+            for clause in non_empty
+        ]
 
         if len(clauses) == 1:
             return clauses[0]
@@ -139,11 +152,11 @@ class ProblemBuilder:
         self,
         conditions: List[Dict[str, Any]],
         catalog: Dict[str, Any],
+        extra_atom: Optional[str] = None,
     ) -> str:
-        atoms = [
-            self._condition_to_pddl(cond, catalog)
-            for cond in conditions
-        ]
+        atoms = [self._condition_to_pddl(cond, catalog) for cond in conditions]
+        if extra_atom:
+            atoms.append(extra_atom)
         if len(atoms) == 1:
             return atoms[0]
         return "(and " + " ".join(atoms) + ")"

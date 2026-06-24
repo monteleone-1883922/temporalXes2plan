@@ -80,6 +80,22 @@ def _read_domain_state(config_name: str) -> Dict[str, Any]:
         return {}
 
 
+def _detect_sink_place(graph: Dict[str, Any]) -> str | None:
+    """Return the unique sink place (no outgoing edges to transitions), or None."""
+    _PLACE_TYPES = {"place", "xor_split"}
+    node_by_id = {n["id"]: n for n in graph.get("nodes", [])}
+    place_labels = {
+        n["label"] for n in graph.get("nodes", []) if n.get("type") in _PLACE_TYPES
+    }
+    has_outgoing: set = set()
+    for e in graph.get("edges", []):
+        src = node_by_id.get(e.get("source"))
+        if src and src.get("type") in _PLACE_TYPES:
+            has_outgoing.add(src.get("label"))
+    sinks = place_labels - has_outgoing
+    return next(iter(sinks)) if len(sinks) == 1 else None
+
+
 def _read_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
@@ -301,9 +317,10 @@ def build_problem(config_name: str):
     init_effects = body.get("init", [])
     goal_sop = body.get("goal", [])
     metric = body.get("metric") or None   # "minimize_cost" | "minimize_time" | None
+    require_completion = bool(body.get("require_completion", False))
 
-    if not goal_sop or not any(goal_sop):
-        return jsonify({"error": "At least one goal clause is required"}), 400
+    if (not goal_sop or not any(goal_sop)) and not require_completion:
+        return jsonify({"error": "At least one goal clause or require_completion is required"}), 400
 
     pddl_out = _pddl_dir(config_name)
     current_path = _current_path(config_name)
@@ -313,6 +330,10 @@ def build_problem(config_name: str):
 
     attribute_catalog = data.get("attribute_catalog", {})
     has_costs = bool(_read_domain_state(config_name).get("has_costs", False))
+    end_place = (
+        data.get("metadata", {}).get("end_place")
+        or _detect_sink_place(data["graph"])
+    )
 
     problem_text = ProblemBuilder().build(
         problem_name=f"{config_name}_prediction",
@@ -323,6 +344,8 @@ def build_problem(config_name: str):
         attribute_catalog=attribute_catalog,
         metric=metric,
         has_costs=has_costs,
+        require_completion=require_completion,
+        end_place=end_place,
     )
 
     os.makedirs(pddl_out, exist_ok=True)
