@@ -70,10 +70,41 @@
                     </div>
                 </details>
 
+                <!-- Optimization metric -->
+                <details class="setup-section">
+                    <summary class="setup-section-header">
+                        <i class="bi bi-graph-up-arrow"></i>
+                        <span>Optimization metric</span>
+                        <i class="bi bi-chevron-down setup-chevron"></i>
+                    </summary>
+                    <div class="setup-section-body">
+                        <p class="field-hint" style="margin-bottom:12px;">
+                            Choose what the planner should optimize.
+                            <em>Minimize time</em> is only available with OPTIC.
+                        </p>
+                        <select id="metric-select" style="width:100%;padding:6px 8px;border:1px solid var(--slate-300);border-radius:6px;">
+                            <option value="">Plan length (default)</option>
+                            <option value="minimize_cost">Minimize cost</option>
+                            <option value="minimize_time">Minimize time</option>
+                        </select>
+                    </div>
+                </details>
+
+                <!-- Planner -->
+                <details class="setup-section" open>
+                    <summary class="setup-section-header">
+                        <i class="bi bi-cpu"></i>
+                        <span>Planner</span>
+                        <i class="bi bi-chevron-down setup-chevron"></i>
+                    </summary>
+                    <div class="setup-section-body">
+                        <div id="planner-inner"></div>
+                    </div>
+                </details>
+
                 <div id="solve-error" class="alert-error js-hidden" style="margin-bottom:12px;"></div>
 
                 <div class="setup-actions">
-<!--                    TODO change to build btn-->
                     <button type="submit" id="solve-btn" class="btn-run">
                         <i class="bi bi-hammer"></i> Build Problem
                     </button>
@@ -83,9 +114,21 @@
 
             <div id="solve-result" class="js-hidden"></div>
 
-            <div id="planner-section" class="js-hidden">
-                <h2>Run Planner</h2>
-                <div id="planner-inner"></div>
+            <div id="run-planner-area">
+                <div id="planner-error" class="alert-error" style="display:none;margin-bottom:12px;"></div>
+                <div class="setup-actions">
+                    <button type="button" id="run-planner-btn" class="btn-run" disabled>
+                        <i class="bi bi-play-fill"></i> Run Planner
+                    </button>
+                </div>
+                <div id="planner-progress" style="display:none;">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                        <i class="bi bi-hourglass-split" id="planner-progress-icon" style="color:var(--indigo-500);"></i>
+                        <span id="planner-progress-title" style="font-weight:600;color:var(--slate-800);">Running planner...</span>
+                    </div>
+                    <div class="progress-log" id="planner-log"></div>
+                </div>
+                <div id="planner-result" style="display:none;"></div>
             </div>
 
         </div>

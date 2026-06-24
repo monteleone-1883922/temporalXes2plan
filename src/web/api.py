@@ -58,12 +58,14 @@ def _compute_current_hash(config_name: str) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def _save_domain_state(pddl_dir: str, hash_str: str, use_durative: bool) -> None:
+def _save_domain_state(
+    pddl_dir: str, hash_str: str, use_durative: bool, has_costs: bool = False
+) -> None:
     """Write domain state to .domain_hash. Usable from background threads (no Flask context)."""
     p = os.path.join(pddl_dir, ".domain_hash")
     os.makedirs(pddl_dir, exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
-        json.dump({"hash": hash_str, "use_durative": use_durative}, fh)
+        json.dump({"hash": hash_str, "use_durative": use_durative, "has_costs": has_costs}, fh)
 
 
 def _read_domain_state(config_name: str) -> Dict[str, Any]:
@@ -262,10 +264,11 @@ def _pipeline_thread(
 
         # Write domain state so build_problem won't overwrite the pipeline-generated domain.
         use_durative = bool(pipeline_params.get("use_durative", False))
+        has_costs = ":action-costs" in pddl_path.read_text(encoding="utf-8")
         current_json = Path(data_dir) / config_name / "current.json"
         if current_json.exists():
             h = hashlib.sha256(current_json.read_bytes()).hexdigest()
-            _save_domain_state(pddl_out, h, use_durative)
+            _save_domain_state(pddl_out, h, use_durative, has_costs)
 
         tracker.append_log(job_id, "Pipeline complete.")
         tracker.complete(job_id, {"config_name": config_name, "pddl_path": str(pddl_path)})
@@ -297,6 +300,7 @@ def build_problem(config_name: str):
     init_place = body.get("init_place") or None
     init_effects = body.get("init", [])
     goal_sop = body.get("goal", [])
+    metric = body.get("metric") or None   # "minimize_cost" | "minimize_time" | None
 
     if not goal_sop or not any(goal_sop):
         return jsonify({"error": "At least one goal clause is required"}), 400
@@ -308,6 +312,7 @@ def build_problem(config_name: str):
     data = _read_json(current_path)
 
     attribute_catalog = data.get("attribute_catalog", {})
+    has_costs = bool(_read_domain_state(config_name).get("has_costs", False))
 
     problem_text = ProblemBuilder().build(
         problem_name=f"{config_name}_prediction",
@@ -316,6 +321,8 @@ def build_problem(config_name: str):
         init_effects=init_effects,
         goal_sop=goal_sop,
         attribute_catalog=attribute_catalog,
+        metric=metric,
+        has_costs=has_costs,
     )
 
     os.makedirs(pddl_out, exist_ok=True)
@@ -333,6 +340,12 @@ def build_problem(config_name: str):
 # ---------------------------------------------------------------------------
 # Planner endpoints
 # ---------------------------------------------------------------------------
+
+@api.route("/planners", methods=["GET"])
+def get_planners():
+    """Return availability status for each supported planner."""
+    from planning.planner_runner import get_planners_status
+    return jsonify(get_planners_status())
 
 
 # ── Planner configuration CRUD ────────────────────────────────────────────────
@@ -408,7 +421,7 @@ def run_planner_endpoint(config_name: str):
         domain = DomainRebuilder().rebuild(data, domain_name=config_name, use_durative=use_durative)
         Path(pddl_out).mkdir(parents=True, exist_ok=True)
         PDDLWriter().write_domain(domain, Path(pddl_out) / "domain.pddl")
-        _save_domain_state(pddl_out, current_hash, use_durative)
+        _save_domain_state(pddl_out, current_hash, use_durative, domain.has_costs)
 
 
     config_dir = Path(_config_dir(config_name))
@@ -524,7 +537,7 @@ def rebuild_domain(config_name: str):
     pddl_dir_path = _pddl_dir(config_name)
     Path(pddl_dir_path).mkdir(parents=True, exist_ok=True)
     PDDLWriter().write_domain(domain, Path(pddl_dir_path) / "domain.pddl")
-    _save_domain_state(pddl_dir_path, current_hash, use_durative)
+    _save_domain_state(pddl_dir_path, current_hash, use_durative, domain.has_costs)
     return jsonify({"status": "ok", "skipped": False})
 
 

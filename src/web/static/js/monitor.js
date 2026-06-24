@@ -14,10 +14,8 @@ let _plannerConfig = null;
 let _goalBuilder = null;
 let _initBuilder = null;
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
     _initPlace = new URLSearchParams(window.location.search).get("init_place");
-    loadPlannersInfo();
-    loadPlannerConfig();
 
     if (_initPlace) {
         const banner = document.getElementById("init-place-banner");
@@ -25,23 +23,24 @@ document.addEventListener("DOMContentLoaded", () => {
         banner.classList.remove("js-hidden");
     }
 
-    loadPetriData();
-    document.getElementById("solve-form").addEventListener("submit", onSolveSubmit);
-});
-
-async function loadPetriData() {
     try {
-        const resp = await fetch(`/api/${document.body.dataset.configName}/petri-net`);
-        if (!resp.ok) throw new Error("Could not load Petri net data");
-        _petriData = await resp.json();
-        _catalog = _petriData.attribute_catalog || {};
+        await Promise.all([loadPlannersInfo(), loadPlannerConfig(), loadPetriData()]);
         buildMonitorForms();
         document.getElementById("monitor-loading").classList.add("js-hidden");
         document.getElementById("monitor-forms").classList.remove("js-hidden");
     } catch (err) {
         document.getElementById("monitor-loading").textContent =
-            "Failed to load Petri net data: " + err.message;
+            "Failed to load data: " + err.message;
     }
+
+    document.getElementById("solve-form").addEventListener("submit", onSolveSubmit);
+});
+
+async function loadPetriData() {
+    const resp = await fetch(`/api/${document.body.dataset.configName}/petri-net`);
+    if (!resp.ok) throw new Error("Could not load Petri net data");
+    _petriData = await resp.json();
+    _catalog = _petriData.attribute_catalog || {};
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +50,7 @@ async function loadPetriData() {
 function buildMonitorForms() {
     buildInitForm();
     buildGoalSopForm();
+    buildPlannerSection();
 }
 
 // ---------------------------------------------------------------------------
@@ -103,14 +103,17 @@ async function onSolveSubmit(e) {
     const btn = document.getElementById("solve-btn");
     const errorEl = document.getElementById("solve-error");
     const resultEl = document.getElementById("solve-result");
+    const runBtn = document.getElementById("run-planner-btn");
 
     errorEl.classList.add("js-hidden");
     resultEl.classList.add("js-hidden");
+    if (runBtn) runBtn.disabled = true;
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Building...';
 
     const init = collectInitEffects();
     const goal = collectGoalSop();
+    const metric = (document.getElementById("metric-select")?.value) || null;
 
     if (goal.length === 0) {
         showSolveError("Add at least one goal clause with a condition.");
@@ -123,7 +126,7 @@ async function onSolveSubmit(e) {
         const resp = await fetch(`/api/${document.body.dataset.configName}/build-problem`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ init_place: _initPlace, init, goal }),
+            body: JSON.stringify({ init_place: _initPlace, init, goal, metric }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || resp.statusText);
@@ -155,8 +158,8 @@ function showSolveResult(data) {
             <pre>${escapeHtml(data.problem_text)}</pre>
         </details>`;
 
-    document.getElementById("planner-section").classList.remove("js-hidden");
-    buildPlannerSection();
+    const runBtn = document.getElementById("run-planner-btn");
+    if (runBtn) runBtn.disabled = false;
 }
 
 function escapeHtml(s) {
@@ -215,42 +218,6 @@ function buildPlannerSection() {
     container.appendChild(panelOp);
     _populateOpticFields(opCfg);
 
-    // ── Error / run button ────────────────────────────────────────────────────
-    const runErr = document.createElement("div");
-    runErr.id = "planner-error";
-    runErr.className = "alert-error";
-    runErr.style.display = "none";
-    container.appendChild(runErr);
-
-    const actions = document.createElement("div");
-    actions.className = "setup-actions";
-    const runBtn = document.createElement("button");
-    runBtn.type = "button";
-    runBtn.id = "run-planner-btn";
-    runBtn.className = "btn-run";
-    runBtn.innerHTML = '<i class="bi bi-play-fill"></i> Run Planner';
-    runBtn.addEventListener("click", onPlannerRun);
-    actions.appendChild(runBtn);
-    container.appendChild(actions);
-
-    // ── Progress panel ────────────────────────────────────────────────────────
-    const progress = document.createElement("div");
-    progress.id = "planner-progress";
-    progress.style.display = "none";
-    progress.innerHTML = `
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-            <i class="bi bi-hourglass-split" id="planner-progress-icon" style="color:var(--indigo-500);"></i>
-            <span id="planner-progress-title" style="font-weight:600;color:var(--slate-800);">Running planner...</span>
-        </div>
-        <div class="progress-log" id="planner-log"></div>`;
-    container.appendChild(progress);
-
-    // ── Plan result ───────────────────────────────────────────────────────────
-    const result = document.createElement("div");
-    result.id = "planner-result";
-    result.style.display = "none";
-    container.appendChild(result);
-
     // Tab switching
     [tabFd, tabOp].forEach(tab => {
         tab.addEventListener("click", () => {
@@ -258,10 +225,29 @@ function buildPlannerSection() {
             tab.classList.add("active");
             panelFd.style.display = tab.dataset.planner === "fast_downward" ? "block" : "none";
             panelOp.style.display = tab.dataset.planner === "optic"          ? "block" : "none";
+            _updateMetricOptions(tab.dataset.planner);
         });
     });
 
     tabFd.click();
+
+    // Wire the static run button (replace to avoid duplicate listeners on re-build)
+    const oldBtn = document.getElementById("run-planner-btn");
+    if (oldBtn) {
+        const newBtn = oldBtn.cloneNode(true);
+        oldBtn.replaceWith(newBtn);
+        newBtn.addEventListener("click", onPlannerRun);
+    }
+}
+
+function _updateMetricOptions(planner) {
+    const sel = document.getElementById("metric-select");
+    if (!sel) return;
+    const timeOpt = sel.querySelector('option[value="minimize_time"]');
+    if (!timeOpt) return;
+    const isFd = planner === "fast_downward";
+    timeOpt.disabled = isFd;
+    if (isFd && sel.value === "minimize_time") sel.value = "";
 }
 
 function _makeTab(label, planner) {
