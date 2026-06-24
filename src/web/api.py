@@ -1,8 +1,8 @@
 """Flask blueprint exposing the REST API for the Petri net web UI."""
 
+import hashlib
 import json
 import os
-import shutil
 import tempfile
 import threading
 import traceback
@@ -13,11 +13,12 @@ from typing import Any, Dict
 from models import AnalysisConfig
 from pipeline import Pipeline
 import core_utils as utils
-from planning.planner_runner import get_planners_status
 from planning.planner_config import (
     load_planner_config, save_planner_config, config_to_dict,
-    FastDownwardConfig, OpticConfig, PlannerConfig, _merge,
+    FastDownwardConfig, OpticConfig, _merge,
 )
+from encoding.domain_rebuilder import DomainRebuilder
+from encoding.pddl_writer import PDDLWriter
 from dataclasses import asdict
 
 from flask import Blueprint, current_app, jsonify, request, send_file
@@ -47,6 +48,34 @@ def _current_path(config_name: str) -> str:
 
 def _pddl_dir(config_name: str) -> str:
     return os.path.join(_config_dir(config_name), "pddl")
+
+
+def _compute_current_hash(config_name: str) -> str:
+    path = _current_path(config_name)
+    if not os.path.isfile(path):
+        return ""
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def _save_domain_state(pddl_dir: str, hash_str: str, use_durative: bool) -> None:
+    """Write domain state to .domain_hash. Usable from background threads (no Flask context)."""
+    p = os.path.join(pddl_dir, ".domain_hash")
+    os.makedirs(pddl_dir, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as fh:
+        json.dump({"hash": hash_str, "use_durative": use_durative}, fh)
+
+
+def _read_domain_state(config_name: str) -> Dict[str, Any]:
+    """Read domain state from .domain_hash. Only call from request handlers (uses Flask context)."""
+    p = os.path.join(_pddl_dir(config_name), ".domain_hash")
+    if not os.path.isfile(p):
+        return {}
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def _read_json(path: str) -> Dict[str, Any]:
@@ -229,12 +258,15 @@ def _pipeline_thread(
             **kwargs,
         )
 
-        domain_copy = Path(pddl_out) / "domain.pddl"
-        if pddl_path.exists() and pddl_path.resolve() != domain_copy.resolve():
-            shutil.copy(pddl_path, domain_copy)
-            tracker.append_log(job_id, "domain.pddl ready.")
-
         config_name = utils.sanitize_name(Path(log_path).stem)
+
+        # Write domain state so build_problem won't overwrite the pipeline-generated domain.
+        use_durative = bool(pipeline_params.get("use_durative", False))
+        current_json = Path(data_dir) / config_name / "current.json"
+        if current_json.exists():
+            h = hashlib.sha256(current_json.read_bytes()).hexdigest()
+            _save_domain_state(pddl_out, h, use_durative)
+
         tracker.append_log(job_id, "Pipeline complete.")
         tracker.complete(job_id, {"config_name": config_name, "pddl_path": str(pddl_path)})
 
@@ -270,17 +302,12 @@ def build_problem(config_name: str):
         return jsonify({"error": "At least one goal clause is required"}), 400
 
     pddl_out = _pddl_dir(config_name)
-    if not os.path.isdir(pddl_out):
-        return jsonify({"error": "No PDDL directory found — run the pipeline first."}), 404
-
-# TODO should build the domain if changes were done by user in petrinet gui should be solved by domain debuild plan
-    if not os.path.isfile(os.path.join(pddl_out, "domain.pddl")):
-        return jsonify({"error": "domain.pddl not found — run the pipeline first."}), 404
-
     current_path = _current_path(config_name)
     if not os.path.isfile(current_path):
         return jsonify({"error": "Configuration not found"}), 404
-    attribute_catalog = _read_json(current_path).get("attribute_catalog", {})
+    data = _read_json(current_path)
+
+    attribute_catalog = data.get("attribute_catalog", {})
 
     problem_text = ProblemBuilder().build(
         problem_name=f"{config_name}_prediction",
@@ -291,6 +318,7 @@ def build_problem(config_name: str):
         attribute_catalog=attribute_catalog,
     )
 
+    os.makedirs(pddl_out, exist_ok=True)
     problem_path = os.path.join(pddl_out, "problem.pddl")
     with open(problem_path, "w", encoding="utf-8") as fh:
         fh.write(problem_text)
@@ -358,11 +386,29 @@ def run_planner_endpoint(config_name: str):
     planner = body.get("planner", "fast_downward")
     body_options = body.get("options", {})
 
+    current_path = _current_path(config_name)
+    if not os.path.isfile(current_path):
+        return jsonify({"error": "Configuration not found"}), 404
+
     pddl_out = _pddl_dir(config_name)
-    if not os.path.isfile(os.path.join(pddl_out, "domain.pddl")):
-        return jsonify({"error": "domain.pddl not found — run the pipeline first."}), 404
     if not os.path.isfile(os.path.join(pddl_out, "problem.pddl")):
         return jsonify({"error": "problem.pddl not found — build the problem first."}), 404
+
+    # Rebuild domain if hash or use_durative flag don't match the chosen planner.
+    use_durative = (planner == "optic")
+    current_hash = _compute_current_hash(config_name)
+    saved_state = _read_domain_state(config_name)
+    domain_is_current = (
+        current_hash
+        and current_hash == saved_state.get("hash")
+        and use_durative == saved_state.get("use_durative")
+    )
+    if not domain_is_current:
+        data = _read_json(current_path)
+        domain = DomainRebuilder().rebuild(data, domain_name=config_name, use_durative=use_durative)
+        Path(pddl_out).mkdir(parents=True, exist_ok=True)
+        PDDLWriter().write_domain(domain, Path(pddl_out) / "domain.pddl")
+        _save_domain_state(pddl_out, current_hash, use_durative)
 
 
     config_dir = Path(_config_dir(config_name))
@@ -450,11 +496,36 @@ def patch_xor_branch(config_name: str, place_name: str, branch_activity: str):
 
 @api.route("/<config_name>/rebuild-domain", methods=["POST"])
 def rebuild_domain(config_name: str):
-    """Stub: rebuild domain.pddl from current.json (not yet implemented)."""
-    return jsonify({
-        "status": "not_implemented",
-        "message": "Domain rebuild from edited JSON is not yet implemented.",
-    })
+    """Rebuild domain.pddl from the current edited current.json.
+
+    Skips the rebuild if current.json hash and use_durative flag have not changed
+    since the last successful build (state stored in pddl/.domain_hash).
+    """
+    current_path = _current_path(config_name)
+    if not os.path.isfile(current_path):
+        return jsonify({"error": "Configuration not found"}), 404
+
+    current_hash = _compute_current_hash(config_name)
+    saved_state = _read_domain_state(config_name)
+
+    body = request.get_json(force=True, silent=True) or {}
+    saved_durative = saved_state.get("use_durative", False)
+    use_durative = bool(body.get("use_durative", saved_durative))
+
+    if (
+        current_hash
+        and current_hash == saved_state.get("hash")
+        and use_durative == saved_durative
+    ):
+        return jsonify({"status": "ok", "skipped": True})
+
+    data = _read_json(current_path)
+    domain = DomainRebuilder().rebuild(data, domain_name=config_name, use_durative=use_durative)
+    pddl_dir_path = _pddl_dir(config_name)
+    Path(pddl_dir_path).mkdir(parents=True, exist_ok=True)
+    PDDLWriter().write_domain(domain, Path(pddl_dir_path) / "domain.pddl")
+    _save_domain_state(pddl_dir_path, current_hash, use_durative)
+    return jsonify({"status": "ok", "skipped": False})
 
 
 def _planner_thread(
