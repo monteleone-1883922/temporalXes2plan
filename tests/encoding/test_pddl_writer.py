@@ -170,3 +170,69 @@ class TestEndToEnd:
         text = PDDLWriter()._render_domain(domain)
 
         assert text.count("(") == text.count(")")
+
+
+class TestActionCosts:
+
+    def _domain_with_costs(self, base_cost=1.5):
+        return PDDLDomain(
+            name="test",
+            requirements=[":strips", ":typing", ":action-costs", ":numeric-fluents"],
+            types=[PDDLType("petri_element"), PDDLType("place", parent="petri_element"),
+                   PDDLType("transition", parent="petri_element")],
+            constants=[PDDLObject("p1", "place"), PDDLObject("t1", "transition")],
+            predicates=[PDDLPredicate("marked", [("?x", "petri_element")])],
+            actions=[
+                PDDLAction(
+                    name="execute_t1",
+                    preconditions={PDDLCondition.marked("p1")},
+                    effects=[PDDLEffect.marking("t1")],
+                    base_cost=base_cost,
+                ),
+            ],
+            has_costs=True,
+        )
+
+    def test_no_functions_section_when_no_costs(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert "(:functions" not in text
+        assert "total-cost" not in text
+
+    def test_functions_section_emitted_when_has_costs(self):
+        domain = self._domain_with_costs()
+        text = PDDLWriter()._render_domain(domain)
+        assert "(:functions" in text
+        assert "(total-cost)" in text
+
+    def test_increase_effect_in_action_when_has_costs(self):
+        domain = self._domain_with_costs(base_cost=1.5)
+        text = PDDLWriter()._render_domain(domain)
+        assert "(increase (total-cost)" in text
+        assert "1.5000" in text
+
+    def test_no_increase_effect_when_no_costs(self, minimal_domain):
+        text = PDDLWriter()._render_domain(minimal_domain)
+        assert "(increase" not in text
+
+    def test_no_increase_when_action_cost_is_zero(self):
+        domain = self._domain_with_costs(base_cost=0.0)
+        domain.actions[0].additional_cost = None
+        text = PDDLWriter()._render_domain(domain)
+        assert "(increase" not in text
+
+    def test_cost_uses_sum_of_base_and_additional(self):
+        domain = self._domain_with_costs(base_cost=1.0)
+        domain.actions[0].additional_cost = 0.5
+        text = PDDLWriter()._render_domain(domain)
+        assert "1.5000" in text
+
+    def test_action_costs_requirement_in_output(self):
+        domain = self._domain_with_costs()
+        text = PDDLWriter()._render_domain(domain)
+        assert ":action-costs" in text
+        assert ":numeric-fluents" in text
+
+    def test_parentheses_balanced_with_costs(self):
+        domain = self._domain_with_costs()
+        text = PDDLWriter()._render_domain(domain)
+        assert text.count("(") == text.count(")")

@@ -202,3 +202,33 @@ class TestBuildDomain:
 
         assert len(mark_actions) == 2
         assert len(exec_actions) == 2
+
+
+class TestHasCosts:
+
+    def test_has_costs_false_when_no_action_has_cost(self, simple_parse_result):
+        domain = DomainBuilder().build(simple_parse_result)
+        assert domain.has_costs is False
+
+    def test_no_action_costs_requirement_when_no_cost(self, simple_parse_result):
+        domain = DomainBuilder().build(simple_parse_result)
+        assert ":action-costs" not in domain.requirements
+        assert ":numeric-fluents" not in domain.requirements
+
+    def test_has_costs_true_with_no_guard_xor_branch(self, xor_parse_result_no_guards):
+        from models import AnalysisConfig
+        # cascade_level=2 with probabilities → EffectDuplicator adds -log(p) costs
+        domain = DomainBuilder().build(
+            xor_parse_result_no_guards,
+            config=AnalysisConfig(effect_appearance_mode="duplicate"),
+        )
+        assert domain.has_costs is True
+
+    def test_action_costs_requirements_added_when_has_costs(self, xor_parse_result_no_guards):
+        from models import AnalysisConfig
+        domain = DomainBuilder().build(
+            xor_parse_result_no_guards,
+            config=AnalysisConfig(effect_appearance_mode="duplicate"),
+        )
+        assert ":action-costs" in domain.requirements
+        assert ":numeric-fluents" in domain.requirements
