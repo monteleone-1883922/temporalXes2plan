@@ -60,7 +60,7 @@ def _compute_current_hash(config_name: str) -> str:
 
 def _save_domain_state(
     pddl_dir: str, hash_str: str, use_durative: bool,
-    has_costs: bool = False, has_deadline: bool = False,
+    use_costs: bool = False, has_deadline: bool = False,
 ) -> None:
     """Write domain state to .domain_hash. Usable from background threads (no Flask context)."""
     p = os.path.join(pddl_dir, ".domain_hash")
@@ -69,7 +69,7 @@ def _save_domain_state(
         json.dump({
             "hash": hash_str,
             "use_durative": use_durative,
-            "has_costs": has_costs,
+            "use_costs": use_costs,
             "has_deadline": has_deadline,
         }, fh)
 
@@ -269,7 +269,7 @@ def _pipeline_thread(
 
         allowed_kwargs = {
             "domain_name", "discovery_algorithm",
-            "coverage_percentage", "use_durative", "use_activity_classifier",
+            "coverage_percentage", "use_durative", "use_costs", "use_activity_classifier",
         }
         kwargs = {k: v for k, v in pipeline_params.items() if k in allowed_kwargs}
 
@@ -286,11 +286,11 @@ def _pipeline_thread(
 
         # Write domain state so build_problem won't overwrite the pipeline-generated domain.
         use_durative = bool(pipeline_params.get("use_durative", False))
-        has_costs = ":action-costs" in pddl_path.read_text(encoding="utf-8")
+        use_costs = bool(pipeline_params.get("use_costs", False))
         current_json = Path(data_dir) / config_name / "current.json"
         if current_json.exists():
             h = hashlib.sha256(current_json.read_bytes()).hexdigest()
-            _save_domain_state(pddl_out, h, use_durative, has_costs)
+            _save_domain_state(pddl_out, h, use_durative, use_costs)
 
         tracker.append_log(job_id, "Pipeline complete.")
         tracker.complete(job_id, {"config_name": config_name, "pddl_path": str(pddl_path)})
@@ -343,6 +343,7 @@ def build_problem(config_name: str):
 
     planner = body.get("planner", "fast_downward")
     use_durative = (planner == "optic")
+    use_costs = (metric == "minimize_cost")
 
     # Parse and validate deadline (positive number, seconds).
     deadline_raw = body.get("deadline", None)
@@ -355,24 +356,25 @@ def build_problem(config_name: str):
 
     has_deadline = deadline is not None
 
-    # Rebuild domain whenever graph, use_durative or has_deadline don't match saved state.
+    # Rebuild domain whenever graph, use_durative, use_costs or has_deadline don't match saved state.
     current_hash = _compute_current_hash(config_name)
     need_rebuild = (
         not current_hash
         or current_hash != saved_state.get("hash")
         or use_durative != bool(saved_state.get("use_durative", False))
+        or use_costs != bool(saved_state.get("use_costs", False))
         or has_deadline != bool(saved_state.get("has_deadline", False))
     )
     if need_rebuild:
         rebuilt = DomainRebuilder().rebuild(
             data, domain_name=config_name,
             use_durative=use_durative,
+            use_costs=use_costs,
             has_deadline=has_deadline,
         )
         Path(pddl_out).mkdir(parents=True, exist_ok=True)
         PDDLWriter().write_domain(rebuilt, Path(pddl_out) / "domain.pddl")
-        _save_domain_state(pddl_out, current_hash, use_durative, rebuilt.has_costs, has_deadline)
-
+        _save_domain_state(pddl_out, current_hash, use_durative, use_costs, has_deadline)
 
     problem_text = ProblemBuilder().build(
         problem_name=f"{config_name}_prediction",
@@ -568,21 +570,26 @@ def rebuild_domain(config_name: str):
 
     body = request.get_json(force=True, silent=True) or {}
     saved_durative = saved_state.get("use_durative", False)
+    saved_costs = saved_state.get("use_costs", False)
     use_durative = bool(body.get("use_durative", saved_durative))
+    use_costs = bool(body.get("use_costs", saved_costs))
 
     if (
         current_hash
         and current_hash == saved_state.get("hash")
         and use_durative == saved_durative
+        and use_costs == saved_costs
     ):
         return jsonify({"status": "ok", "skipped": True})
 
     data = _read_json(current_path)
-    domain = DomainRebuilder().rebuild(data, domain_name=config_name, use_durative=use_durative)
+    domain = DomainRebuilder().rebuild(
+        data, domain_name=config_name, use_durative=use_durative, use_costs=use_costs
+    )
     pddl_dir_path = _pddl_dir(config_name)
     Path(pddl_dir_path).mkdir(parents=True, exist_ok=True)
     PDDLWriter().write_domain(domain, Path(pddl_dir_path) / "domain.pddl")
-    _save_domain_state(pddl_dir_path, current_hash, use_durative, domain.has_costs)
+    _save_domain_state(pddl_dir_path, current_hash, use_durative, use_costs)
     return jsonify({"status": "ok", "skipped": False})
 
 

@@ -36,6 +36,7 @@ class Pipeline:
         discovery_algorithm: str = "inductive",
         coverage_percentage: float = 0.001,
         use_durative: bool = False,
+        use_costs: bool = False,
         use_activity_classifier: bool = False,
         config: Optional[AnalysisConfig] = None,
     ) -> Path:
@@ -52,6 +53,7 @@ class Pipeline:
                                  One of ``alpha``, ``inductive``, ``heuristics``, ``ilp``.
             coverage_percentage: Minimum cumulative variant coverage for log filtering.
             use_durative: Encode durative actions when True.
+            use_costs: Include action cost effects and functions section when True.
             use_activity_classifier: Combine concept:name + lifecycle:transition as label.
             config: Analysis configuration; defaults to AnalysisConfig().
 
@@ -90,6 +92,7 @@ class Pipeline:
             parse_result=parse_result,
             domain_name=domain_name,
             use_durative=use_durative,
+            use_costs=use_costs,
             config=config,
         )
         update_parse_result(registry, parse_result)
