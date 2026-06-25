@@ -49,7 +49,6 @@ class ProblemBuilder:
             init_place: Optional place ID to mark as the starting token position.
                 Emitted as (marked <place_id>) as the first :init atom.
             metric: Optimization metric — "minimize_cost", "minimize_time", or None.
-            has_costs: True if the domain declares action costs (total-cost function).
             require_completion: If True, appends (marked end_place) to every goal clause.
             end_place: Sanitized name of the Petri net sink place; required when
                 require_completion is True.

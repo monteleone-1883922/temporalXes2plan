@@ -19,6 +19,7 @@ class DomainBuilder:
         parse_result: ParseResult,
         domain_name: str = "process",
         use_durative: bool = False,
+        use_costs: bool = False,
         config: Optional[AnalysisConfig] = None,
     ) -> tuple[PDDLDomain, "ActionRegistry"]:
         """Like build(), but also returns the ActionRegistry after EffectDuplicator.
@@ -27,13 +28,14 @@ class DomainBuilder:
             parse_result: Encoder-ready output from the parsing pipeline.
             domain_name: Name for the PDDL domain.
             use_durative: Encode durative actions when True.
+            use_costs: Include action cost effects and functions section when True.
             config: Analysis configuration; defaults to AnalysisConfig().
 
         Returns:
             Tuple of (PDDLDomain, ActionRegistry).
         """
         domain, registry = self._build_internal(
-            parse_result, domain_name, use_durative, config
+            parse_result, domain_name, use_durative, use_costs, config
         )
         return domain, registry
 
@@ -42,6 +44,7 @@ class DomainBuilder:
         parse_result: ParseResult,
         domain_name: str = "process",
         use_durative: bool = False,
+        use_costs: bool = False,
         config: Optional[AnalysisConfig] = None,
     ) -> PDDLDomain:
         """Transform a ParseResult into a complete PDDLDomain.
@@ -52,6 +55,8 @@ class DomainBuilder:
             use_durative: When True, transitions that carry duration data are
                 encoded as durative-action blocks instead of instantaneous
                 actions.  Adds :durative-actions to requirements automatically.
+            use_costs: When True, adds (increase (total-cost) X) to action
+                effects and the (:functions (total-cost)) section.
             config: Analysis configuration controlling effect duplication
                 modes and cost tracking.  Defaults to AnalysisConfig().
 
@@ -59,7 +64,7 @@ class DomainBuilder:
             A fully populated PDDLDomain.
         """
         domain, _ = self._build_internal(
-            parse_result, domain_name, use_durative, config
+            parse_result, domain_name, use_durative, use_costs, config
         )
         return domain
 
@@ -68,6 +73,7 @@ class DomainBuilder:
         parse_result: ParseResult,
         domain_name: str,
         use_durative: bool,
+        use_costs: bool,
         config: Optional[AnalysisConfig],
     ) -> tuple[PDDLDomain, "ActionRegistry"]:
         if config is None:
@@ -91,10 +97,7 @@ class DomainBuilder:
         if any(isinstance(a, PDDLDurativeAction) for a in actions):
             requirements.append(":durative-actions")
 
-        has_costs = any(
-            (a.base_cost or 0.0) + (a.additional_cost or 0.0) > 0.0
-            for a in actions
-        )
+        has_costs = use_costs
         if has_costs:
             requirements += [":action-costs", ":numeric-fluents"]
 

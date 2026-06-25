@@ -196,9 +196,9 @@ class PDDLWriter:
     # ------------------------------------------------------------------
 
     def _total_action_cost(self, action: PDDLBaseAction) -> Optional[float]:
-        """Return total cost if > 0, else None."""
-        total = (action.base_cost or 0.0) + (action.additional_cost or 0.0)
-        return total if total > 0.0 else None
+        """Return total cost, using 1.0 as minimum when has_costs is True."""
+        return (action.base_cost or 1.0) + (action.additional_cost or 0.0)
+
 
     def _render_condition_block(
         self, keyword: str, items, indent: str = "    "

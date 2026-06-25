@@ -30,6 +30,7 @@ class DomainRebuilder:
         data: Dict[str, Any],
         domain_name: str = "process",
         use_durative: bool = False,
+        use_costs: bool = False,
         has_deadline: bool = False,
     ) -> PDDLDomain:
         """Rebuild a PDDLDomain from the web UI's current.json.
@@ -38,6 +39,8 @@ class DomainRebuilder:
             data: Parsed content of current.json.
             domain_name: Name for the PDDL domain.
             use_durative: Encode durative actions when True and duration data is present.
+            use_costs: Include action cost effects and functions section when True.
+            has_deadline: Add deadline_exceeded predicate and over-all condition when True.
 
         Returns:
             A fully populated PDDLDomain.
@@ -77,10 +80,7 @@ class DomainRebuilder:
         if any(isinstance(a, PDDLDurativeAction) for a in actions):
             requirements.append(":durative-actions")
 
-        has_costs = any(
-            (a.base_cost or 0.0) + (a.additional_cost or 0.0) > 0.0
-            for a in actions
-        )
+        has_costs = use_costs
         if has_costs:
             requirements += [":action-costs", ":numeric-fluents"]
 
