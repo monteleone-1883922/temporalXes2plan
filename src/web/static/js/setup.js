@@ -47,6 +47,7 @@ function buildRequestBody(form) {
         discovery_algorithm: form.algorithm.value,
         coverage_percentage: parseFloat(form.coverage_percentage.value),
         use_durative: form["use_durative"].checked,
+        use_costs: form["use_costs"].checked,
         use_activity_classifier: form["use_activity_classifier"].checked,
     };
 
