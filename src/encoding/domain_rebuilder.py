@@ -30,6 +30,7 @@ class DomainRebuilder:
         data: Dict[str, Any],
         domain_name: str = "process",
         use_durative: bool = False,
+        has_deadline: bool = False,
     ) -> PDDLDomain:
         """Rebuild a PDDLDomain from the web UI's current.json.
 
@@ -83,6 +84,7 @@ class DomainRebuilder:
         if has_costs:
             requirements += [":action-costs", ":numeric-fluents"]
 
+        effective_deadline = has_deadline and any(isinstance(a, PDDLDurativeAction) for a in actions)
         return PDDLDomain(
             name=domain_name,
             requirements=requirements,
@@ -91,6 +93,7 @@ class DomainRebuilder:
             predicates=predicates,
             actions=actions,
             has_costs=has_costs,
+            has_deadline=effective_deadline,
         )
 
     # ------------------------------------------------------------------

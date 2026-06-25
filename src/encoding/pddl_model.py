@@ -297,3 +297,5 @@ class PDDLDomain:
     predicates: List[PDDLPredicate] = field(default_factory=list)
     actions: List[PDDLBaseAction] = field(default_factory=list)
     has_costs: bool = False
+    has_deadline: bool = False
+    deadline_predicate: str = "deadline_exceeded"

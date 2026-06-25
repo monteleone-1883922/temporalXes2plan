@@ -32,12 +32,13 @@ class PDDLWriter:
         return text
 
     def _render_domain(self, domain: PDDLDomain) -> str:
+        extra_preds = [domain.deadline_predicate] if domain.has_deadline else []
         sections = [
             f"(define (domain {domain.name})",
             self._render_requirements(domain.requirements),
             self._render_types(domain.types),
             self._render_constants(domain.constants),
-            self._render_predicates(domain.predicates),
+            self._render_predicates(domain.predicates, extra_preds),
         ]
 
         if domain.has_costs:
@@ -45,7 +46,7 @@ class PDDLWriter:
 
         for action in domain.actions:
             if isinstance(action, PDDLDurativeAction):
-                sections.append(self._render_durative_action(action, domain.has_costs))
+                sections.append(self._render_durative_action(action, domain.has_costs, domain.has_deadline, domain.deadline_predicate))
             else:
                 sections.append(self._render_action(action, domain.has_costs))
 
@@ -84,7 +85,7 @@ class PDDLWriter:
         lines.append("  )")
         return "\n".join(lines)
 
-    def _render_predicates(self, predicates: List[PDDLPredicate]) -> str:
+    def _render_predicates(self, predicates: List[PDDLPredicate], extra_names: Optional[List[str]] = None) -> str:
         lines = ["  (:predicates"]
 
         for pred in predicates:
@@ -95,6 +96,9 @@ class PDDLWriter:
                 lines.append(f"    ({pred.name} {params})")
             else:
                 lines.append(f"    ({pred.name})")
+
+        for name in (extra_names or []):
+            lines.append(f"    ({name})")
 
         lines.append("  )")
         return "\n".join(lines)
@@ -121,7 +125,7 @@ class PDDLWriter:
         lines.append("  )")
         return "\n".join(lines)
 
-    def _render_durative_action(self, action: PDDLDurativeAction, has_costs: bool = False) -> str:
+    def _render_durative_action(self, action: PDDLDurativeAction, has_costs: bool = False, has_deadline: bool = False, deadline_predicate: str = "deadline_exceeded") -> str:
         lines = [f"  (:durative-action {action.name}"]
 
         if action.parameters:
@@ -146,6 +150,8 @@ class PDDLWriter:
             condition_parts.append(
                 self._render_timed_block("over all", action.conditions_over_all)
             )
+        if has_deadline:
+            condition_parts.append(f"(over all (not ({deadline_predicate})))")
         if action.conditions_at_end:
             condition_parts.append(
                 self._render_timed_block("at end", action.conditions_at_end)

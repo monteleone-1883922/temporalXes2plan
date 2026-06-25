@@ -33,6 +33,7 @@ class ProblemBuilder:
         has_costs: bool = False,
         require_completion: bool = False,
         end_place: Optional[str] = None,
+        deadline: Optional[float] = None,
     ) -> str:
         """Build and return a PDDL problem definition as a string.
 
@@ -57,7 +58,7 @@ class ProblemBuilder:
         Returns:
             Complete PDDL problem text.
         """
-        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog, has_costs)
+        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog, has_costs, deadline)
         goal_str = self._build_goal(goal_sop, attribute_catalog, require_completion, end_place)
         metric_str = self._build_metric(metric, has_costs)
 
@@ -93,12 +94,15 @@ class ProblemBuilder:
         effects: List[Dict[str, Any]],
         catalog: Dict[str, Any],
         has_costs: bool = False,
+        deadline: Optional[float] = None,
     ) -> List[str]:
         atoms = []
         if init_place:
             atoms.append(PDDLEffect.marking(init_place).to_pddl())
         if has_costs:
             atoms.append("(= (total-cost) 0)")
+        if deadline is not None and deadline > 0:
+            atoms.append(f"(at {deadline:.1f} (deadline_exceeded))")
         for eff in effects:
             attr = eff["attribute"]
             value = str(eff.get("value", ""))
