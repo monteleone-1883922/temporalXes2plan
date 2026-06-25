@@ -30,7 +30,6 @@ class ProblemBuilder:
         attribute_catalog: Dict[str, Any],
         init_place: Optional[str] = None,
         metric: Optional[str] = None,
-        has_costs: bool = False,
         require_completion: bool = False,
         end_place: Optional[str] = None,
         deadline: Optional[float] = None,
@@ -58,9 +57,9 @@ class ProblemBuilder:
         Returns:
             Complete PDDL problem text.
         """
-        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog, has_costs, deadline)
+        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog, metric == "minimize_cost", deadline)
         goal_str = self._build_goal(goal_sop, attribute_catalog, require_completion, end_place)
-        metric_str = self._build_metric(metric, has_costs)
+        metric_str = self._build_metric(metric)
 
         lines = [
             f"(define (problem {problem_name})",
@@ -80,9 +79,9 @@ class ProblemBuilder:
     # Init
     # ------------------------------------------------------------------
 
-    def _build_metric(self, metric: Optional[str], has_costs: bool) -> Optional[str]:
+    def _build_metric(self, metric: Optional[str]) -> Optional[str]:
         """Return the (:metric ...) string, or None if not applicable."""
-        if metric == "minimize_cost" and has_costs:
+        if metric == "minimize_cost":
             return "(:metric minimize (total-cost))"
         if metric == "minimize_time":
             return "(:metric minimize (total-time))"

@@ -9,7 +9,7 @@ import traceback
 from dataclasses import fields as dc_fields
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from models import AnalysisConfig
 from pipeline import Pipeline
 import core_utils as utils
@@ -59,13 +59,19 @@ def _compute_current_hash(config_name: str) -> str:
 
 
 def _save_domain_state(
-    pddl_dir: str, hash_str: str, use_durative: bool, has_costs: bool = False
+    pddl_dir: str, hash_str: str, use_durative: bool,
+    has_costs: bool = False, has_deadline: bool = False,
 ) -> None:
     """Write domain state to .domain_hash. Usable from background threads (no Flask context)."""
     p = os.path.join(pddl_dir, ".domain_hash")
     os.makedirs(pddl_dir, exist_ok=True)
     with open(p, "w", encoding="utf-8") as fh:
-        json.dump({"hash": hash_str, "use_durative": use_durative, "has_costs": has_costs}, fh)
+        json.dump({
+            "hash": hash_str,
+            "use_durative": use_durative,
+            "has_costs": has_costs,
+            "has_deadline": has_deadline,
+        }, fh)
 
 
 def _read_domain_state(config_name: str) -> Dict[str, Any]:
@@ -329,11 +335,44 @@ def build_problem(config_name: str):
     data = _read_json(current_path)
 
     attribute_catalog = data.get("attribute_catalog", {})
-    has_costs = bool(_read_domain_state(config_name).get("has_costs", False))
+    saved_state = _read_domain_state(config_name)
     end_place = (
         data.get("metadata", {}).get("end_place")
         or _detect_sink_place(data["graph"])
     )
+
+    planner = body.get("planner", "fast_downward")
+    use_durative = (planner == "optic")
+
+    # Parse and validate deadline (positive number, seconds).
+    deadline_raw = body.get("deadline", None)
+    try:
+        deadline: Optional[float] = float(deadline_raw) if deadline_raw is not None else None
+        if deadline is not None and deadline <= 0:
+            deadline = None
+    except (TypeError, ValueError):
+        deadline = None
+
+    has_deadline = deadline is not None
+
+    # Rebuild domain whenever graph, use_durative or has_deadline don't match saved state.
+    current_hash = _compute_current_hash(config_name)
+    need_rebuild = (
+        not current_hash
+        or current_hash != saved_state.get("hash")
+        or use_durative != bool(saved_state.get("use_durative", False))
+        or has_deadline != bool(saved_state.get("has_deadline", False))
+    )
+    if need_rebuild:
+        rebuilt = DomainRebuilder().rebuild(
+            data, domain_name=config_name,
+            use_durative=use_durative,
+            has_deadline=has_deadline,
+        )
+        Path(pddl_out).mkdir(parents=True, exist_ok=True)
+        PDDLWriter().write_domain(rebuilt, Path(pddl_out) / "domain.pddl")
+        _save_domain_state(pddl_out, current_hash, use_durative, rebuilt.has_costs, has_deadline)
+
 
     problem_text = ProblemBuilder().build(
         problem_name=f"{config_name}_prediction",
@@ -343,9 +382,9 @@ def build_problem(config_name: str):
         goal_sop=goal_sop,
         attribute_catalog=attribute_catalog,
         metric=metric,
-        has_costs=has_costs,
         require_completion=require_completion,
         end_place=end_place,
+        deadline=deadline,
     )
 
     os.makedirs(pddl_out, exist_ok=True)
@@ -429,23 +468,6 @@ def run_planner_endpoint(config_name: str):
     pddl_out = _pddl_dir(config_name)
     if not os.path.isfile(os.path.join(pddl_out, "problem.pddl")):
         return jsonify({"error": "problem.pddl not found — build the problem first."}), 404
-
-    # Rebuild domain if hash or use_durative flag don't match the chosen planner.
-    use_durative = (planner == "optic")
-    current_hash = _compute_current_hash(config_name)
-    saved_state = _read_domain_state(config_name)
-    domain_is_current = (
-        current_hash
-        and current_hash == saved_state.get("hash")
-        and use_durative == saved_state.get("use_durative")
-    )
-    if not domain_is_current:
-        data = _read_json(current_path)
-        domain = DomainRebuilder().rebuild(data, domain_name=config_name, use_durative=use_durative)
-        Path(pddl_out).mkdir(parents=True, exist_ok=True)
-        PDDLWriter().write_domain(domain, Path(pddl_out) / "domain.pddl")
-        _save_domain_state(pddl_out, current_hash, use_durative, domain.has_costs)
-
 
     config_dir = Path(_config_dir(config_name))
     saved = load_planner_config(config_dir)
