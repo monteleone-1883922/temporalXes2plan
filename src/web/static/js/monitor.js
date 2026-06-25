@@ -115,6 +115,10 @@ async function onSolveSubmit(e) {
     const goal = collectGoalSop();
     const metric = (document.getElementById("metric-select")?.value) || null;
     const requireCompletion = document.getElementById("require-completion-checkbox")?.checked ?? false;
+    const deadlineRaw = _activePlanner() === "optic"
+        ? (document.getElementById("optic-deadline")?.value?.trim() || null)
+        : null;
+    const deadline = deadlineRaw ? parseFloat(deadlineRaw) : null;
 
     if (goal.length === 0 && !requireCompletion) {
         showSolveError("Add at least one goal clause or enable require completion.");
@@ -127,7 +131,7 @@ async function onSolveSubmit(e) {
         const resp = await fetch(`/api/${document.body.dataset.configName}/build-problem`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ init_place: _initPlace, init, goal, metric, require_completion: requireCompletion }),
+            body: JSON.stringify({ init_place: _initPlace, init, goal, metric, require_completion: requireCompletion, deadline, planner: _activePlanner() }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || resp.statusText);
@@ -161,6 +165,37 @@ function showSolveResult(data) {
 
     const runBtn = document.getElementById("run-planner-btn");
     if (runBtn) runBtn.disabled = false;
+    _attachRebuildGuard();
+}
+
+function _attachRebuildGuard() {
+    const runBtn = document.getElementById("run-planner-btn");
+    if (!runBtn) return;
+
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    function invalidate() {
+        controller.abort();
+        runBtn.disabled = true;
+        const resultEl = document.getElementById("solve-result");
+        if (resultEl && !resultEl.classList.contains("js-hidden")) {
+            if (!resultEl.querySelector(".rebuild-hint")) {
+                const hint = document.createElement("p");
+                hint.className = "rebuild-hint field-hint";
+                hint.style.marginTop = "8px";
+                hint.innerHTML = '<i class="bi bi-exclamation-triangle"></i> Settings changed — rebuild required';
+                resultEl.appendChild(hint);
+            }
+        }
+    }
+
+    const forms = document.getElementById("monitor-forms");
+    forms.addEventListener("change", invalidate, { signal });
+    forms.addEventListener("input", invalidate, { signal });
+    document.querySelectorAll(".planner-tab").forEach(tab => {
+        tab.addEventListener("click", invalidate, { signal });
+    });
 }
 
 function escapeHtml(s) {
@@ -357,6 +392,15 @@ function _buildOpticPanel(op, opCfg) {
             Ignore action costs <span class="field-hint-inline">(-c, treat all actions as unit cost)</span>
         </label>`;
     panel.appendChild(checks);
+
+    const deadlineField = document.createElement("div");
+    deadlineField.className = "form-field";
+    deadlineField.style.marginTop = "12px";
+    deadlineField.innerHTML = `
+        <label>Maximum plan duration (s) <span class="field-hint-inline">optional — adds TIL deadline</span></label>
+        <input id="optic-deadline" type="number" class="form-control" min="1" step="1" placeholder="no limit">`;
+    panel.appendChild(deadlineField);
+
     return panel;
 }
 
