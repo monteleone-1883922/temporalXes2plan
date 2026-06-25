@@ -220,6 +220,7 @@ class TestHasCosts:
         # cascade_level=2 with probabilities → EffectDuplicator adds -log(p) costs
         domain = DomainBuilder().build(
             xor_parse_result_no_guards,
+            use_costs=True,
             config=AnalysisConfig(effect_appearance_mode="duplicate"),
         )
         assert domain.has_costs is True
@@ -228,6 +229,7 @@ class TestHasCosts:
         from models import AnalysisConfig
         domain = DomainBuilder().build(
             xor_parse_result_no_guards,
+            use_costs=True,
             config=AnalysisConfig(effect_appearance_mode="duplicate"),
         )
         assert ":action-costs" in domain.requirements

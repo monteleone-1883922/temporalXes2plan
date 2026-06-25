@@ -1,0 +1,4 @@
+; cost = 2 (unit cost)
+(exec_register_patient)
+(exec_triage_v1)
+(tau_place_sink)

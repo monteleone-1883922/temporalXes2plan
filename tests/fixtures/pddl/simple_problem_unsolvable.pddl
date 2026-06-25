@@ -1,0 +1,5 @@
+(define (problem simple-unsolvable)
+  (:domain simple-test)
+  (:init (at-c))
+  (:goal (at-a))
+)

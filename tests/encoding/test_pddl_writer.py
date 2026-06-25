@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 
 from encoding.pddl_model import (
-    PDDLAction, PDDLCondition, PDDLDomain, PDDLEffect, PDDLObject,
+    PDDLAction, PDDLCondition, PDDLDomain, PDDLDurativeAction, PDDLEffect, PDDLObject,
     PDDLPredicate, PDDLType,
 )
 from encoding.pddl_writer import PDDLWriter
@@ -214,11 +214,11 @@ class TestActionCosts:
         text = PDDLWriter()._render_domain(minimal_domain)
         assert "(increase" not in text
 
-    def test_no_increase_when_action_cost_is_zero(self):
+    def test_default_cost_one_when_action_cost_is_zero(self):
         domain = self._domain_with_costs(base_cost=0.0)
         domain.actions[0].additional_cost = None
         text = PDDLWriter()._render_domain(domain)
-        assert "(increase" not in text
+        assert "(increase (total-cost) 1.0000)" in text
 
     def test_cost_uses_sum_of_base_and_additional(self):
         domain = self._domain_with_costs(base_cost=1.0)
@@ -235,4 +235,89 @@ class TestActionCosts:
     def test_parentheses_balanced_with_costs(self):
         domain = self._domain_with_costs()
         text = PDDLWriter()._render_domain(domain)
+        assert text.count("(") == text.count(")")
+
+    def test_place_marking_actions_get_default_cost_one(self):
+        domain = PDDLDomain(
+            name="test",
+            requirements=[":strips", ":typing", ":action-costs", ":numeric-fluents"],
+            types=[PDDLType("petri_element"), PDDLType("place", parent="petri_element"),
+                   PDDLType("transition", parent="petri_element")],
+            constants=[PDDLObject("p1", "place"), PDDLObject("t1", "transition")],
+            predicates=[PDDLPredicate("marked", [("?x", "petri_element")])],
+            actions=[
+                PDDLAction(
+                    name="execute_t1",
+                    preconditions={PDDLCondition.marked("p1")},
+                    effects=[PDDLEffect.marking("t1")],
+                ),
+            ],
+            has_costs=True,
+        )
+        text = PDDLWriter()._render_domain(domain)
+        assert "(increase (total-cost) 1.0000)" in text
+
+
+# ---------------------------------------------------------------------------
+# Deadline
+# ---------------------------------------------------------------------------
+
+class TestDeadline:
+
+    def _durative_domain(self, has_deadline: bool = False) -> PDDLDomain:
+        action = PDDLDurativeAction(
+            name="execute_register",
+            conditions_at_start=[PDDLCondition.marked("p_start")],
+            conditions_over_all=[],
+            conditions_at_end=[],
+            effects_at_start=[PDDLEffect(kind="marked", attribute="p_start", clear=True)],
+            effects_at_end=[PDDLEffect.marking("register")],
+            duration_min=10.0,
+            duration_max=30.0,
+        )
+        return PDDLDomain(
+            name="test",
+            requirements=[":strips", ":typing", ":durative-actions"],
+            types=[PDDLType("petri_element")],
+            constants=[],
+            predicates=[PDDLPredicate("marked", [("?x", "petri_element")])],
+            actions=[action],
+            has_deadline=has_deadline,
+        )
+
+    def test_no_deadline_predicate_by_default(self):
+        text = PDDLWriter()._render_domain(self._durative_domain(has_deadline=False))
+        assert "deadline_exceeded" not in text
+
+    def test_deadline_predicate_added_when_has_deadline(self):
+        text = PDDLWriter()._render_domain(self._durative_domain(has_deadline=True))
+        assert "(deadline_exceeded)" in text
+
+    def test_durative_action_has_over_all_deadline_condition(self):
+        text = PDDLWriter()._render_domain(self._durative_domain(has_deadline=True))
+        assert "(over all (not (deadline_exceeded)))" in text
+
+    def test_no_over_all_deadline_without_flag(self):
+        text = PDDLWriter()._render_domain(self._durative_domain(has_deadline=False))
+        assert "(over all (not (deadline_exceeded)))" not in text
+
+    def test_instantaneous_action_no_over_all(self):
+        domain = PDDLDomain(
+            name="test",
+            requirements=[":strips", ":typing"],
+            types=[PDDLType("petri_element")],
+            constants=[],
+            predicates=[PDDLPredicate("marked", [("?x", "petri_element")])],
+            actions=[PDDLAction(
+                name="exec",
+                preconditions={PDDLCondition.marked("p1")},
+                effects=[PDDLEffect.marking("t1")],
+            )],
+            has_deadline=True,
+        )
+        text = PDDLWriter()._render_domain(domain)
+        assert "(over all" not in text
+
+    def test_parentheses_balanced_with_deadline(self):
+        text = PDDLWriter()._render_domain(self._durative_domain(has_deadline=True))
         assert text.count("(") == text.count(")")

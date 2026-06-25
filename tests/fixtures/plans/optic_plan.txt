@@ -1,0 +1,5 @@
+; Solution Found
+; States evaluated: 12
+0.000: (exec_admit_patient)  [3.000]
+3.000: (exec_run_lab_tests_DETDUP_v2)  [5.000]
+8.000: (tau_place_end)  [0.001]

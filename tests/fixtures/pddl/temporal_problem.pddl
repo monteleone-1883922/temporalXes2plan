@@ -1,0 +1,5 @@
+(define (problem temporal-test-problem)
+  (:domain temporal-test)
+  (:init)
+  (:goal (done))
+)
