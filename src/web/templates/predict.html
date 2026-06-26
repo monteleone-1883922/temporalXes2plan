@@ -31,6 +31,22 @@
 
         <div id="monitor-forms" class="js-hidden">
 
+            <!-- Partial trace banners (shown when init is derived from XES) -->
+            <div id="partial-trace-banner" class="partial-trace-banner js-hidden">
+                <i class="bi bi-signpost-split"></i>
+                <div>
+                    <strong>Initial state derived from partial XES trace</strong>
+                    — <span id="partial-trace-summary"></span>
+                </div>
+            </div>
+            <div id="partial-trace-warnings" class="partial-trace-warnings js-hidden">
+                <i class="bi bi-exclamation-triangle"></i>
+                <div>
+                    <strong>Warnings during trace pre-processing:</strong>
+                    <ul id="partial-trace-warning-list"></ul>
+                </div>
+            </div>
+
             <div id="init-place-banner" class="init-place-banner js-hidden">
                 <i class="bi bi-geo-alt-fill"></i>
                 Starting from place: <code id="init-place-label"></code>
@@ -43,6 +59,7 @@
                     <summary class="setup-section-header">
                         <i class="bi bi-hourglass-split"></i>
                         <span>Initial attribute values</span>
+                        <i id="init-lock-icon" class="bi bi-lock-fill js-hidden" title="Locked — derived from partial XES trace" style="color:var(--slate-400);margin-left:auto;margin-right:4px;font-size:0.85rem;"></i>
                         <i class="bi bi-chevron-down setup-chevron"></i>
                     </summary>
                     <div class="setup-section-body">

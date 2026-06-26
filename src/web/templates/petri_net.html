@@ -49,9 +49,30 @@
 
     <div class="toolbar-sep"></div>
 
+    <label class="btn-toolbar btn-import-trace" id="btn-predict-trace" title="Predict from partial XES trace">
+        <i class="bi bi-filetype-xml"></i> Predict from trace
+        <input type="file" accept=".xes" hidden id="partial-trace-input">
+    </label>
+
     <a id="btn-predict" class="btn-toolbar btn-predict disabled">
         <i class="bi bi-bullseye"></i> Predict
     </a>
+</div>
+
+<!-- Trace error modal -->
+<div id="trace-error-modal" class="modal-overlay js-hidden">
+    <div class="modal-box">
+        <div class="modal-header">
+            <i class="bi bi-exclamation-triangle-fill" style="color:var(--red-500);"></i>
+            <span>Trace import failed</span>
+        </div>
+        <p id="trace-error-msg" class="modal-body"></p>
+        <div class="modal-footer">
+            <button class="btn-toolbar" onclick="document.getElementById('trace-error-modal').classList.add('js-hidden')">
+                Close
+            </button>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -96,4 +117,5 @@
 <script src="{{ url_for('static', filename='js/components.js') }}"></script>
 <script src="{{ url_for('static', filename='js/panels.js') }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/partial_trace.js') }}"></script>
 {% endblock %}
