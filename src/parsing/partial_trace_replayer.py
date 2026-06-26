@@ -1,0 +1,260 @@
+"""Replay a partial XES trace against a serialized Petri net to derive init state."""
+
+import tempfile
+from typing import Any, Dict, List, Optional, Tuple, Set
+
+from pm4py.objects.log.importer.xes import importer as _xes_importer
+
+import core_utils as utils
+
+logger = utils.get_logger(__name__)
+
+# pm4py event attributes that are not case data
+_PM4PY_META_KEYS = frozenset({
+    "concept:name",
+    "time:timestamp",
+    "lifecycle:transition",
+    "org:resource",
+    "org:group",
+    "org:role",
+    "@@index",
+    "@@classifier",
+})
+
+
+class PartialTraceError(Exception):
+    """Raised when the partial trace cannot be replayed (blocking error)."""
+
+
+class PartialTraceReplayer:
+    """Replay a single-trace XES file against a serialized Petri net.
+
+    Two phases:
+    1. Pre-process each event: filter to catalog attributes, discretize
+       numerical values using stored bin_boundaries, normalize booleans.
+    2. Token replay: simulate marking from start_place through each activity.
+
+    Returns the current marking (init_places — a list because AND-splits can
+    place tokens in multiple places simultaneously) and the last-seen value of
+    every catalog attribute encountered (init_effects), plus non-blocking warnings.
+    """
+
+    def replay(
+        self,
+        xes_bytes: bytes,
+        current_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Replay a partial trace and return the derived init state.
+
+        Args:
+            xes_bytes: Raw bytes of the XES file.
+            current_data: Parsed current.json dict (graph, transitions,
+                attribute_catalog, metadata).
+
+        Returns:
+            Dict with keys: init_places, init_effects, replayed_activities,
+            n_events, warnings.
+
+        Raises:
+            PartialTraceError: On any blocking validation or replay error.
+        """
+        catalog: Dict[str, Any] = current_data.get("attribute_catalog", {})
+        transitions: Dict[str, Any] = current_data.get("transitions", {})
+        graph: Dict[str, Any] = current_data.get("graph", {})
+        metadata: Dict[str, Any] = current_data.get("metadata", {})
+        start_place: str = metadata.get("start_place", "")
+
+        warnings: List[str] = []
+
+        trace = self._parse_xes(xes_bytes, warnings)
+        events = list(trace)
+
+        if not events:
+            warnings.append("Trace has 0 events: using start place as initial state.")
+            logger.warning("PartialTraceReplayer: empty trace, returning start place.")
+            return {
+                "init_places": [start_place],
+                "init_effects": [],
+                "replayed_activities": [],
+                "n_events": 0,
+                "warnings": warnings,
+            }
+
+        # Build graph lookups
+        activity_to_node, trans_outputs = self._build_graph_lookups(graph)
+
+        # Phase 1: pre-process events
+        accumulated_attrs: Dict[str, str] = {}
+        for event in events:
+            self._process_event_attributes(event, catalog, accumulated_attrs, warnings)
+
+        # Phase 2: token replay — marking is a multiset (list) to support AND-splits
+        marking: Set[str] = {start_place}
+        replayed: List[str] = []
+
+        for event in events:
+            activity = utils.sanitize_name(str(event.get("concept:name", "")))
+            if not activity:
+                continue
+
+            if activity not in activity_to_node:
+                raise PartialTraceError(
+                    f"Activity '{activity}' not found in the Petri net."
+                )
+
+            node_id = activity_to_node[activity]
+            trans_info = transitions.get(activity, {})
+            input_places: List[str] = trans_info.get("input_places", [])
+
+            # Verify every required input token is present in the current marking
+            missing = [p for p in input_places if p not in marking]
+            if missing:
+                raise PartialTraceError(
+                    f"Replay stuck at '{activity}': marking {marking} "
+                    f"does not contain required places {input_places}."
+                )
+
+            # Consume one token per input place, then produce one per output place
+
+            for p in input_places:
+                marking.remove(p)
+            for p in trans_outputs.get(node_id, []):
+                marking.add(p)
+            replayed.append(activity)
+
+        init_effects = [
+            {"attribute": attr, "value": value}
+            for attr, value in accumulated_attrs.items()
+        ]
+
+        return {
+            "init_places": list(marking),
+            "init_effects": init_effects,
+            "replayed_activities": replayed,
+            "n_events": len(events),
+            "warnings": warnings,
+        }
+
+    # ------------------------------------------------------------------
+    # XES parsing
+    # ------------------------------------------------------------------
+
+    def _parse_xes(self, xes_bytes: bytes, warnings: List[str]):
+        """Parse XES bytes and return the single trace."""
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".xes", delete=True) as tmp:
+                tmp.write(xes_bytes)
+                tmp.flush()
+                log = _xes_importer.apply(tmp.name)
+        except PartialTraceError:
+            raise
+        except Exception as exc:
+            raise PartialTraceError(f"Invalid XES file: {exc}") from exc
+
+        if len(log) == 0:
+            raise PartialTraceError("XES file contains no traces.")
+        if len(log) > 1:
+            raise PartialTraceError(
+                f"Expected a single-trace XES file, found {len(log)} traces."
+            )
+
+        return log[0]
+
+    # ------------------------------------------------------------------
+    # Graph lookups
+    # ------------------------------------------------------------------
+
+    def _build_graph_lookups(
+        self, graph: Dict[str, Any]
+    ) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
+        """Build activity→node_id and node_id→output_places from graph."""
+        nodes = graph.get("nodes", [])
+        edges = graph.get("edges", [])
+
+        activity_to_node: Dict[str, str] = {}
+        for node in nodes:
+            if node.get("type") == "transition":
+                label = node.get("label", "")
+                activity_to_node[utils.sanitize_name(label)] = node["id"]
+
+        trans_outputs: Dict[str, List[str]] = {}
+        for edge in edges:
+            src = edge.get("source")
+            tgt = edge.get("target")
+            if src in {n["id"] for n in nodes if n.get("type") == "transition"}:
+                trans_outputs.setdefault(src, []).append(tgt)
+
+        return activity_to_node, trans_outputs
+
+    # ------------------------------------------------------------------
+    # Attribute pre-processing
+    # ------------------------------------------------------------------
+
+    def _process_event_attributes(
+        self,
+        event: Any,
+        catalog: Dict[str, Any],
+        accumulated: Dict[str, str],
+        warnings: List[str],
+    ) -> None:
+        """Extract and normalize attributes from one event into accumulated."""
+        for raw_key, raw_value in event.items():
+            if raw_key in _PM4PY_META_KEYS or raw_value is None:
+                continue
+
+            attr = utils.sanitize_name(raw_key)
+            if attr not in catalog:
+                msg = f"Attribute '{raw_key}' ignored: not in attribute catalog."
+                warnings.append(msg)
+                logger.warning("PartialTraceReplayer: %s", msg)
+                continue
+
+            entry = catalog[attr]
+            attr_type = entry.get("type", "categorical")
+            possible_values: List[str] = entry.get("possible_values", [])
+            bin_boundaries: List[float] = entry.get("bin_boundaries", [])
+
+            value = self._normalize_value(
+                attr, raw_value, attr_type, possible_values, bin_boundaries, warnings
+            )
+            if value is not None:
+                accumulated[attr] = value
+
+    def _normalize_value(
+        self,
+        attr: str,
+        raw_value: Any,
+        attr_type: str,
+        possible_values: List[str],
+        bin_boundaries: List[float],
+        warnings: List[str],
+    ) -> Optional[str]:
+        """Convert a raw event attribute value to the catalog representation."""
+        if attr_type == "boolean":
+            return "true" if str(raw_value).lower() in ("true", "1", "yes") else "false"
+
+        if attr_type == "numerical":
+            if not bin_boundaries:
+                msg = f"Attribute '{attr}' ignored: no bin boundaries available."
+                warnings.append(msg)
+                logger.warning("PartialTraceReplayer: %s", msg)
+                return None
+            try:
+                label = utils.discretize_value(
+                    attr, float(raw_value), {attr: bin_boundaries}
+                )
+            except (TypeError, ValueError):
+                msg = f"Value '{raw_value}' for '{attr}' ignored: cannot convert to float."
+                warnings.append(msg)
+                logger.warning("PartialTraceReplayer: %s", msg)
+                return None
+            return label
+
+        # categorical
+        value = str(raw_value)
+        if possible_values and value not in possible_values:
+            msg = f"Value '{value}' for '{attr}' ignored: not a known category."
+            warnings.append(msg)
+            logger.warning("PartialTraceReplayer: %s", msg)
+            return None
+        return value
