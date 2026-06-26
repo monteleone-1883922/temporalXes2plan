@@ -9,7 +9,7 @@ import traceback
 from dataclasses import fields as dc_fields
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from models import AnalysisConfig
 from pipeline import Pipeline
 import core_utils as utils
@@ -321,7 +321,15 @@ def get_job(job_id: str):
 @api.route("/<config_name>/build-problem", methods=["POST"])
 def build_problem(config_name: str):
     body = request.get_json(force=True) or {}
-    init_place = body.get("init_place") or None
+    # Accept init_places (list, from partial trace) or init_place (str, from URL param click)
+    _raw_places = body.get("init_places")
+    _raw_place = body.get("init_place") or None
+    if _raw_places:
+        init_places: Optional[List[str]] = [p for p in _raw_places if p]
+    elif _raw_place:
+        init_places = [_raw_place]
+    else:
+        init_places = []
     init_effects = body.get("init", [])
     goal_sop = body.get("goal", [])
     metric = body.get("metric") or None   # "minimize_cost" | "minimize_time" | None
@@ -381,7 +389,7 @@ def build_problem(config_name: str):
     problem_text = ProblemBuilder().build(
         problem_name=f"{config_name}_prediction",
         domain_name=config_name,
-        init_place=init_place,
+        init_places=init_places,
         init_effects=init_effects,
         goal_sop=goal_sop,
         attribute_catalog=attribute_catalog,

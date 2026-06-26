@@ -28,7 +28,7 @@ class ProblemBuilder:
         init_effects: List[Dict[str, Any]],
         goal_sop: List[List[Dict[str, Any]]],
         attribute_catalog: Dict[str, Any],
-        init_place: Optional[str] = None,
+        init_places: Optional[List[str]] = None,
         metric: Optional[str] = None,
         require_completion: bool = False,
         end_place: Optional[str] = None,
@@ -46,8 +46,8 @@ class ProblemBuilder:
                 Each condition: {"attribute": str, "predicate": "="|"<>", "value": str}.
             attribute_catalog: Serialized catalog from current.json.
                 Maps attr name → {"type": "boolean"|"numerical"|"categorical", ...}.
-            init_place: Optional place ID to mark as the starting token position.
-                Emitted as (marked <place_id>) as the first :init atom.
+            init_places: Optional list of place IDs to mark as starting tokens.
+                Each is emitted as (marked <place_id>) in :init; supports AND-splits.
             metric: Optimization metric — "minimize_cost", "minimize_time", or None.
             require_completion: If True, appends (marked end_place) to every goal clause.
             end_place: Sanitized name of the Petri net sink place; required when
@@ -56,7 +56,7 @@ class ProblemBuilder:
         Returns:
             Complete PDDL problem text.
         """
-        init_atoms = self._build_init_atoms(init_place, init_effects, attribute_catalog, metric == "minimize_cost", deadline)
+        init_atoms = self._build_init_atoms(init_places, init_effects, attribute_catalog, metric == "minimize_cost", deadline)
         goal_str = self._build_goal(goal_sop, attribute_catalog, require_completion, end_place)
         metric_str = self._build_metric(metric)
 
@@ -88,15 +88,15 @@ class ProblemBuilder:
 
     def _build_init_atoms(
         self,
-        init_place: Optional[str],
+        init_places: Optional[List[str]],
         effects: List[Dict[str, Any]],
         catalog: Dict[str, Any],
         has_costs: bool = False,
         deadline: Optional[float] = None,
     ) -> List[str]:
         atoms = []
-        if init_place:
-            atoms.append(PDDLEffect.marking(init_place).to_pddl())
+        for place in (init_places or []):
+            atoms.append(PDDLEffect.marking(place).to_pddl())
         if has_costs:
             atoms.append("(= (total-cost) 0)")
         if deadline is not None and deadline > 0:
