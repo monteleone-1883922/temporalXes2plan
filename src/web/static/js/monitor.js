@@ -8,24 +8,36 @@
 
 let _petriData = null;
 let _catalog = {};
-let _initPlace = null;
+let _initPlaces = null;   // List<string> | null — supports AND-split markings
 let _plannersInfo = null;
 let _plannerConfig = null;
 let _goalBuilder = null;
 let _initBuilder = null;
 
-document.addEventListener("DOMContentLoaded", async () => {
-    _initPlace = new URLSearchParams(window.location.search).get("init_place");
+// Partial-trace init (one-shot read from sessionStorage)
+const _partialTrace = (() => {
+    const raw = sessionStorage.getItem("partialTraceInit");
+    if (!raw) return null;
+    sessionStorage.removeItem("partialTraceInit");
+    try { return JSON.parse(raw); } catch (_) { return null; }
+})();
 
-    if (_initPlace) {
+document.addEventListener("DOMContentLoaded", async () => {
+    const urlParam = new URLSearchParams(window.location.search).get("init_place");
+    _initPlaces = _partialTrace
+        ? (_partialTrace.init_places || [])
+        : (urlParam ? [urlParam] : null);
+
+    if (_initPlaces && _initPlaces.length > 0) {
         const banner = document.getElementById("init-place-banner");
-        document.getElementById("init-place-label").textContent = _initPlace;
+        document.getElementById("init-place-label").textContent = _initPlaces.join(", ");
         banner.classList.remove("js-hidden");
     }
 
     try {
         await Promise.all([loadPlannersInfo(), loadPlannerConfig(), loadPetriData()]);
         buildMonitorForms();
+        if (_partialTrace) _applyPartialTraceInit();
         document.getElementById("monitor-loading").classList.add("js-hidden");
         document.getElementById("monitor-forms").classList.remove("js-hidden");
     } catch (err) {
@@ -71,6 +83,64 @@ function buildInitForm() {
 }
 
 // ---------------------------------------------------------------------------
+// Partial trace init — pre-fill and lock the init section
+// ---------------------------------------------------------------------------
+
+function _applyPartialTraceInit() {
+    const data = _partialTrace;
+    if (!data) return;
+
+    // Banner
+    const banner = document.getElementById("partial-trace-banner");
+    const summary = document.getElementById("partial-trace-summary");
+    if (banner && summary) {
+        const activities = (data.replayed_activities || []).join(" → ") || "(none)";
+        summary.textContent = `${data.n_events} event(s) replayed: ${activities}`;
+        banner.classList.remove("js-hidden");
+    }
+
+    // Warnings
+    const warnings = data.warnings || [];
+    if (warnings.length > 0) {
+        const warnBox = document.getElementById("partial-trace-warnings");
+        const warnList = document.getElementById("partial-trace-warning-list");
+        if (warnBox && warnList) {
+            warnList.innerHTML = "";
+            warnings.forEach(w => {
+                const li = document.createElement("li");
+                li.textContent = w;
+                warnList.appendChild(li);
+            });
+            warnBox.classList.remove("js-hidden");
+        }
+    }
+
+    // Pre-fill init builder with effects from trace
+    const initEffects = data.init_effects || [];
+    if (_initBuilder && initEffects.length > 0) {
+        const container = document.getElementById("init-predicates");
+        container.innerHTML = "";
+        _initBuilder = createAssignmentList(_catalog, initEffects);
+        container.appendChild(_initBuilder.el);
+    }
+
+    // Lock init section (disable all selects inside)
+    const initSection = document.getElementById("init-predicates");
+    if (initSection) {
+        initSection.querySelectorAll("select, input").forEach(el => {
+            el.disabled = true;
+        });
+        // Disable the "Add condition" button inside the assignment list
+        initSection.closest(".setup-section-body")
+            ?.querySelectorAll(".btn-add-clause")
+            .forEach(btn => { btn.disabled = true; btn.style.opacity = "0.4"; });
+    }
+
+    // Show lock icon in section header
+    document.getElementById("init-lock-icon")?.classList.remove("js-hidden");
+}
+
+// ---------------------------------------------------------------------------
 // Goal form — SOP builder
 // ---------------------------------------------------------------------------
 
@@ -86,6 +156,9 @@ function buildGoalSopForm() {
 // ---------------------------------------------------------------------------
 
 function collectInitEffects() {
+    // When init is locked from a partial trace, read from the stored data
+    // (disabled selects are excluded from DOM reads).
+    if (_partialTrace) return _partialTrace.init_effects || [];
     return _initBuilder ? _initBuilder.getValue() : [];
 }
 
@@ -131,7 +204,7 @@ async function onSolveSubmit(e) {
         const resp = await fetch(`/api/${document.body.dataset.configName}/build-problem`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ init_place: _initPlace, init, goal, metric, require_completion: requireCompletion, deadline, planner: _activePlanner() }),
+            body: JSON.stringify({ init_places: _initPlaces, init, goal, metric, require_completion: requireCompletion, deadline, planner: _activePlanner() }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || resp.statusText);
