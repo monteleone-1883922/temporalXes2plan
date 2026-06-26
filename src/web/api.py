@@ -104,6 +104,23 @@ def _detect_sink_place(graph: Dict[str, Any]) -> str | None:
     return next(iter(sinks)) if len(sinks) == 1 else None
 
 
+def _detect_source_place(graph: Dict[str, Any]) -> str | None:
+    """Return the unique source place (no incoming edges from transitions), or None."""
+    _PLACE_TYPES = {"place", "xor_split"}
+    node_by_id = {n["id"]: n for n in graph.get("nodes", [])}
+    place_labels = {
+        n["label"] for n in graph.get("nodes", []) if n.get("type") in _PLACE_TYPES
+    }
+    has_incoming: set = set()
+    for e in graph.get("edges", []):
+        src = node_by_id.get(e.get("source"))
+        tgt = node_by_id.get(e.get("target"))
+        if src and src.get("type") not in _PLACE_TYPES and tgt and tgt.get("type") in _PLACE_TYPES:
+            has_incoming.add(tgt.get("label"))
+    sources = place_labels - has_incoming
+    return next(iter(sources)) if len(sources) == 1 else None
+
+
 def _read_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
@@ -431,6 +448,12 @@ def replay_partial_trace(config_name: str):
         return jsonify({"error": "File must be a .xes file"}), 400
 
     current_data = _read_json(current_path)
+    # Backfill metadata for configs generated before the metadata key was added.
+    if "metadata" not in current_data:
+        current_data["metadata"] = {
+            "start_place": _detect_source_place(current_data.get("graph", {})) or "",
+            "end_place": _detect_sink_place(current_data.get("graph", {})) or "",
+        }
     xes_bytes = f.read()
 
     try:
