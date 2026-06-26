@@ -28,7 +28,7 @@ def _build(**kwargs) -> str:
         init_effects=[],
         goal_sop=[[{"attribute": "status", "predicate": "=", "value": "discharged"}]],
         attribute_catalog=CATALOG_MIXED,
-        init_place=None,
+        init_places=None,
     )
     defaults.update(kwargs)
     return ProblemBuilder().build(**defaults)
@@ -73,9 +73,14 @@ class TestProblemBuilderInit:
         init_body = lines[init_idx + 1: end_idx]
         assert all(l == "" for l in init_body)
 
-    def test_init_place_adds_marked_atom(self):
-        result = _build(init_place="place_start")
+    def test_init_places_adds_marked_atoms(self):
+        result = _build(init_places=["place_start"])
         assert "(marked place_start)" in result
+
+    def test_multiple_init_places_add_multiple_marked_atoms(self):
+        result = _build(init_places=["p_A", "p_B"])
+        assert "(marked p_A)" in result
+        assert "(marked p_B)" in result
 
     def test_categorical_init_effect(self):
         result = _build(
@@ -116,9 +121,9 @@ class TestProblemBuilderInit:
         assert "(status_is admitted)" in result
         assert "(critical_true)" in result
 
-    def test_init_place_before_effects(self):
+    def test_init_places_before_effects(self):
         result = _build(
-            init_place="p_start",
+            init_places=["p_start"],
             init_effects=[{"attribute": "status", "value": "admitted"}],
             attribute_catalog=CATALOG_MIXED,
         )
