@@ -615,9 +615,14 @@ class AttributeCatalogEntry:
     Attributes:
         attribute_type: One of 'boolean', 'numerical', 'categorical'.
         possible_values: Set of values that appear in effects or guard conditions.
+        bin_boundaries: Sorted split-point floats for numerical attributes
+            (e.g. [10.0, 97.5] → 3 bins).  None for boolean/categorical.
+            Persisted so that partial-trace replay can discretize raw values
+            without access to the original Discretizer instance.
     """
     attribute_type: str
     possible_values: Set[Any]
+    bin_boundaries: Optional[List[float]] = None
 
 
 @dataclass

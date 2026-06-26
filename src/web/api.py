@@ -21,6 +21,8 @@ from encoding.domain_rebuilder import DomainRebuilder
 from encoding.pddl_writer import PDDLWriter
 from dataclasses import asdict
 
+from parsing.partial_trace_replayer import PartialTraceError, PartialTraceReplayer
+
 from flask import Blueprint, current_app, jsonify, request, send_file
 
 from web.jobs import tracker
@@ -399,6 +401,36 @@ def build_problem(config_name: str):
         "problem_path": problem_path,
         "problem_text": problem_text,
     })
+
+
+# ---------------------------------------------------------------------------
+# Partial trace replay
+# ---------------------------------------------------------------------------
+
+@api.route("/<config_name>/replay-partial-trace", methods=["POST"])
+def replay_partial_trace(config_name: str):
+    """Replay a single-trace XES file and return the derived init state."""
+
+    current_path = _current_path(config_name)
+    if not os.path.isfile(current_path):
+        return jsonify({"error": "Configuration not found"}), 404
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    f = request.files["file"]
+    if not f.filename or not f.filename.lower().endswith(".xes"):
+        return jsonify({"error": "File must be a .xes file"}), 400
+
+    current_data = _read_json(current_path)
+    xes_bytes = f.read()
+
+    try:
+        result = PartialTraceReplayer().replay(xes_bytes, current_data)
+    except PartialTraceError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

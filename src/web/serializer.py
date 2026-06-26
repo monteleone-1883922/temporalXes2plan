@@ -356,6 +356,7 @@ def _build_attribute_catalog(
         attr: {
             "type": entry.attribute_type,
             "possible_values": sorted(str(v) for v in entry.possible_values),
+            "bin_boundaries": entry.bin_boundaries or [],
         }
         for attr, entry in catalog.items()
     }

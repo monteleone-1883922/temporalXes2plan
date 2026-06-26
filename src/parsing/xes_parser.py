@@ -710,6 +710,11 @@ class Parser:
             attr: AttributeCatalogEntry(
                 attribute_type=self.attribute_categories.get(attr, 'categorical'),
                 possible_values=values,
+                bin_boundaries=(
+                    self.discretizer.boundaries.get(attr)
+                    if self.attribute_categories.get(attr) == 'numerical'
+                    else None
+                ),
             )
             for attr, values in attr_values.items()
         }
