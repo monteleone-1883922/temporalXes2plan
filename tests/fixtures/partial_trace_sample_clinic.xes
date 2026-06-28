@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="case_partial_01"/>
+    <event>
+      <string key="concept:name" value="register"/>
+      <date key="time:timestamp" value="2024-03-01T08:00:00.000+00:00"/>
+      <string key="dept" value="er"/>
+    </event>
+    <event>
+      <string key="concept:name" value="triage"/>
+      <date key="time:timestamp" value="2024-03-01T08:15:00.000+00:00"/>
+      <string key="triage_level" value="yellow"/>
+    </event>
+    <event>
+      <string key="concept:name" value="standard_care"/>
+      <date key="time:timestamp" value="2024-03-01T09:00:00.000+00:00"/>
+    </event>
+  </trace>
+</log>

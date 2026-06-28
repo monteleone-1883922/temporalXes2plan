@@ -41,7 +41,7 @@ class TestModelDiscovererInit:
             ModelDiscoverer("nonexistent")
 
     def test_all_valid_algorithms_are_accepted(self):
-        for algo in ["alpha", "inductive", "heuristics", "ilp"]:
+        for algo in ["alpha", "inductive", "heuristics", "ilp", "powl"]:
             assert ModelDiscoverer(algo).discovery_algorithm == algo
 
 
