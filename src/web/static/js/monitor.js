@@ -209,6 +209,9 @@ async function onSolveSubmit(e) {
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || resp.statusText);
         showSolveResult(data);
+        if (data.warnings?.length) {
+            _showPlannerWarnings(data.warnings);
+        }
     } catch (err) {
         showSolveError(err.message);
     } finally {
@@ -221,6 +224,20 @@ function showSolveError(msg) {
     const el = document.getElementById("solve-error");
     el.textContent = msg;
     el.classList.remove("js-hidden");
+}
+
+function _showPlannerWarnings(warnings) {
+    let el = document.getElementById("planner-warnings");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "planner-warnings";
+        el.className = "alert-warning";
+        el.style.cssText = "margin-top:10px;padding:10px 14px;border-radius:6px;background:var(--yellow-50,#fefce8);border:1px solid var(--yellow-300,#fde047);color:var(--yellow-900,#713f12);font-size:0.875rem;";
+        const solveResult = document.getElementById("solve-result");
+        solveResult?.parentNode?.insertBefore(el, solveResult.nextSibling);
+    }
+    el.innerHTML = warnings.map(w => `<p style="margin:0 0 4px;">⚠ ${escapeHtml(w)}</p>`).join("");
+    el.style.display = "block";
 }
 
 function showSolveResult(data) {
@@ -309,16 +326,8 @@ function buildPlannerSection() {
     const tabs = document.createElement("div");
     tabs.className = "planner-tabs";
 
-    const hasTimestamps = document.body.dataset.hasTimestamps !== "false";
-
     const tabFd = _makeTab("Fast Downward", "fast_downward");
     const tabOp = _makeTab("OPTIC", "optic");
-    if (!hasTimestamps) {
-        tabOp.disabled = true;
-        tabOp.title = "Temporal planning requires timestamps — not available for this log";
-        tabOp.style.opacity = "0.45";
-        tabOp.style.cursor = "not-allowed";
-    }
     tabs.appendChild(tabFd);
     tabs.appendChild(tabOp);
     container.appendChild(tabs);
@@ -338,7 +347,6 @@ function buildPlannerSection() {
     // Tab switching
     [tabFd, tabOp].forEach(tab => {
         tab.addEventListener("click", () => {
-            if (tab.disabled) return;
             [tabFd, tabOp].forEach(t => t.classList.remove("active"));
             tab.classList.add("active");
             panelFd.style.display = tab.dataset.planner === "fast_downward" ? "block" : "none";

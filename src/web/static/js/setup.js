@@ -54,32 +54,16 @@ async function startPipeline() {
         return;
     }
 
-    if (validation.infos?.length) {
-        const infoEl = document.getElementById("setup-info");
-        document.getElementById("setup-info-text").textContent = validation.infos.join(" | ");
-        infoEl.classList.remove("js-hidden");
-    }
-
-    let allowMissingTimestamp = false;
-    if (validation.missing_timestamp) {
-        const confirmed = await _showTimestampModal(validation.warnings?.[0] || "");
-        if (!confirmed) {
-            _resetRunBtn(btn);
-            return;
-        }
-        allowMissingTimestamp = true;
-        // Disable durative checkbox — temporal planning requires timestamps.
-        const durativeBox = document.getElementById("p-durative");
-        if (durativeBox) {
-            durativeBox.checked = false;
-            durativeBox.disabled = true;
-        }
+    const infoMessages = [...(validation.infos || []), ...(validation.warnings || [])];
+    if (infoMessages.length) {
+        document.getElementById("setup-info-text").textContent = infoMessages.join(" | ");
+        document.getElementById("setup-info").classList.remove("js-hidden");
     }
 
     // Step 2: run pipeline
     btn.innerHTML = '<span class="spinner"></span> Starting...';
     const body = buildRequestBody(form);
-    body.allow_missing_timestamp = allowMissingTimestamp;
+    body.allow_missing_timestamp = !!validation.missing_timestamp;
 
     let jobId;
     try {
@@ -109,26 +93,6 @@ function _resetRunBtn(btn) {
     btn.innerHTML = '<i class="bi bi-play-fill"></i> Run Analysis';
 }
 
-function _showTimestampModal(message) {
-    return new Promise((resolve) => {
-        const modal = document.getElementById("timestamp-warning-modal");
-        document.getElementById("ts-modal-msg").textContent =
-            message || "The log has no valid timestamps. Durative actions and the temporal planner (Optic) will not be available.";
-        modal.classList.remove("js-hidden");
-
-        const onConfirm = () => { cleanup(); resolve(true); };
-        const onCancel  = () => { cleanup(); resolve(false); };
-
-        function cleanup() {
-            modal.classList.add("js-hidden");
-            document.getElementById("ts-modal-confirm").removeEventListener("click", onConfirm);
-            document.getElementById("ts-modal-cancel").removeEventListener("click", onCancel);
-        }
-
-        document.getElementById("ts-modal-confirm").addEventListener("click", onConfirm);
-        document.getElementById("ts-modal-cancel").addEventListener("click", onCancel);
-    });
-}
 
 function buildRequestBody(form) {
     const pipeline = {

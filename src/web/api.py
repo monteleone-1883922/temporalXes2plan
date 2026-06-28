@@ -374,10 +374,6 @@ def _pipeline_thread(
         tracker.append_log(job_id, "Initializing configuration...")
         config = _build_analysis_config(config_dict)
 
-        # Temporal planning requires timestamps — disable durative if user confirmed proceeding without.
-        if allow_missing_timestamp:
-            pipeline_params = {**pipeline_params, "use_durative": False}
-
         allowed_kwargs = {
             "domain_name", "discovery_algorithm",
             "coverage_percentage", "use_durative", "use_costs", "use_activity_classifier",
@@ -403,8 +399,7 @@ def _pipeline_thread(
             h = hashlib.sha256(current_json.read_bytes()).hexdigest()
             _save_domain_state(pddl_out, h, use_durative, use_costs)
 
-            # Persist has_timestamps in current.json metadata so the UI can
-            # disable the temporal planner when timestamps are absent.
+            # Persist has_timestamps in current.json metadata for informational warnings.
             if allow_missing_timestamp:
                 data = json.loads(current_json.read_text(encoding="utf-8"))
                 data.setdefault("metadata", {})["has_timestamps"] = False
@@ -470,11 +465,6 @@ def build_problem(config_name: str):
     )
 
     planner = body.get("planner", "fast_downward")
-
-    # Block temporal planning when the log has no timestamps.
-    if planner == "optic" and data.get("metadata", {}).get("has_timestamps") is False:
-        return jsonify({"error": "Temporal planning (OPTIC) is not available: the log has no timestamps."}), 400
-
     use_durative = (planner == "optic")
     use_costs = (metric == "minimize_cost")
 
@@ -527,10 +517,25 @@ def build_problem(config_name: str):
     with open(problem_path, "w", encoding="utf-8") as fh:
         fh.write(problem_text)
 
+    warnings: List[str] = []
+    if use_durative:
+        transitions = data.get("transitions", {})
+        no_duration = all(
+            t.get("duration", {}).get("effective_max", 0) == 0
+            for t in transitions.values()
+        )
+        if no_duration:
+            warnings.append(
+                "No action has a duration set. The temporal planner will receive "
+                "zero-duration actions and results may be meaningless. "
+                "Set action durations in the Petri net editor before running OPTIC."
+            )
+
     return jsonify({
         "status": "built",
         "problem_path": problem_path,
         "problem_text": problem_text,
+        "warnings": warnings,
     })
 
 
@@ -715,6 +720,13 @@ def patch_transition(config_name: str, activity_name: str):
         if eff_min < 0 or eff_max < eff_min:
             return jsonify({"error": "Invalid duration: min must be >= 0 and max must be >= min"}), 400
         t["duration"] = {"effective_min": eff_min, "effective_max": eff_max, "source": "external"}
+
+        # If the log had no timestamps, check whether every transition now has a
+        # valid duration — if so, temporal planning becomes available.
+        if data.get("metadata", {}).get("has_timestamps") is False:
+            if all("duration" in tr for tr in data["transitions"].values()):
+                data.setdefault("metadata", {})["has_timestamps"] = True
+
     _write_json(data, current_path)
     return jsonify({"status": "ok"})
 
@@ -762,10 +774,6 @@ def rebuild_domain(config_name: str):
     use_durative = bool(body.get("use_durative", saved_durative))
     use_costs = bool(body.get("use_costs", saved_costs))
 
-    data = _read_json(current_path)
-    if use_durative and data.get("metadata", {}).get("has_timestamps") is False:
-        return jsonify({"error": "Durative actions require timestamps. The log has no timestamps."}), 400
-
     if (
         current_hash
         and current_hash == saved_state.get("hash")
@@ -774,6 +782,7 @@ def rebuild_domain(config_name: str):
     ):
         return jsonify({"status": "ok", "skipped": True})
 
+    data = _read_json(current_path)
     domain = DomainRebuilder().rebuild(
         data, domain_name=config_name, use_durative=use_durative, use_costs=use_costs
     )

@@ -62,20 +62,10 @@ def create_app(data_dir: str) -> Flask:
         xes_path = os.path.join(logs_dir, f"{log_name}.xes")
         csv_path = os.path.join(logs_dir, f"{log_name}.csv")
 
-        # Read has_timestamps from an existing config (rebuild scenario).
-        config_name = log_name  # sanitized name matches log stem
-        current_path = os.path.join(app.config["DATA_DIR"], config_name, "current.json")
-        has_timestamps = True
-        if os.path.isfile(current_path):
-            with open(current_path, "r", encoding="utf-8") as fh:
-                existing = json.load(fh)
-            has_timestamps = existing.get("metadata", {}).get("has_timestamps", True)
-
         if os.path.isfile(xes_path):
             return render_template(
                 "setup.html", log_name=log_name, log_type="xes",
                 csv_columns=[], csv_detected_mapping={}, csv_saved_mapping=None,
-                has_timestamps=has_timestamps,
             )
 
         if os.path.isfile(csv_path):
@@ -97,7 +87,6 @@ def create_app(data_dir: str) -> Flask:
                 "setup.html", log_name=log_name, log_type="csv",
                 csv_columns=columns, csv_detected_mapping=detected,
                 csv_saved_mapping=saved_mapping,
-                has_timestamps=has_timestamps,
             )
 
         return render_template(

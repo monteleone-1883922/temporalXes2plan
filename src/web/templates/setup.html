@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/setup.css') }}">
 {% endblock %}
 
-{% block body_data %} data-log-name="{{ log_name }}" data-log-type="{{ log_type }}" data-has-timestamps="{{ has_timestamps | lower }}"{% endblock %}
+{% block body_data %} data-log-name="{{ log_name }}" data-log-type="{{ log_type }}"{% endblock %}
 
 {% block nav_back %}
 <a href="/" class="btn-toolbar btn-home">
@@ -34,21 +34,6 @@
             <span id="setup-info-text"></span>
             <button type="button" onclick="document.getElementById('setup-info').classList.add('js-hidden')"
                     style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;">✕</button>
-        </div>
-
-        <!-- Timestamp warning modal -->
-        <div id="timestamp-warning-modal" class="modal-overlay js-hidden">
-            <div class="modal-box">
-                <div class="modal-header">
-                    <i class="bi bi-exclamation-triangle-fill" style="color:var(--yellow-500,#eab308);"></i>
-                    <span>Timestamps unavailable</span>
-                </div>
-                <p id="ts-modal-msg" class="modal-body"></p>
-                <div class="modal-footer">
-                    <button type="button" id="ts-modal-cancel" class="btn-toolbar">Cancel</button>
-                    <button type="button" id="ts-modal-confirm" class="btn-toolbar btn-run">Proceed</button>
-                </div>
-            </div>
         </div>
 
         <!-- Form -->
@@ -150,11 +135,9 @@
                             <span class="field-hint">Min cumulative variant coverage</span>
                         </div>
                         <div class="form-field form-field-check">
-                            <label title="{% if not has_timestamps %}Requires timestamps — not available for this log{% endif %}">
-                                <input type="checkbox" id="p-durative" name="use_durative"
-                                       {% if not has_timestamps %}disabled{% endif %}>
+                            <label>
+                                <input type="checkbox" id="p-durative" name="use_durative">
                                 Encode durative actions
-                                {% if not has_timestamps %}<span class="field-hint" style="color:var(--yellow-600,#ca8a04);">(no timestamps)</span>{% endif %}
                             </label>
                         </div>
                         <div class="form-field form-field-check">
