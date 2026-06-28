@@ -309,8 +309,16 @@ function buildPlannerSection() {
     const tabs = document.createElement("div");
     tabs.className = "planner-tabs";
 
+    const hasTimestamps = document.body.dataset.hasTimestamps !== "false";
+
     const tabFd = _makeTab("Fast Downward", "fast_downward");
     const tabOp = _makeTab("OPTIC", "optic");
+    if (!hasTimestamps) {
+        tabOp.disabled = true;
+        tabOp.title = "Temporal planning requires timestamps — not available for this log";
+        tabOp.style.opacity = "0.45";
+        tabOp.style.cursor = "not-allowed";
+    }
     tabs.appendChild(tabFd);
     tabs.appendChild(tabOp);
     container.appendChild(tabs);
@@ -330,6 +338,7 @@ function buildPlannerSection() {
     // Tab switching
     [tabFd, tabOp].forEach(tab => {
         tab.addEventListener("click", () => {
+            if (tab.disabled) return;
             [tabFd, tabOp].forEach(t => t.classList.remove("active"));
             tab.classList.add("active");
             panelFd.style.display = tab.dataset.planner === "fast_downward" ? "block" : "none";

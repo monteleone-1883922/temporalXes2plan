@@ -68,6 +68,12 @@ async function startPipeline() {
             return;
         }
         allowMissingTimestamp = true;
+        // Disable durative checkbox — temporal planning requires timestamps.
+        const durativeBox = document.getElementById("p-durative");
+        if (durativeBox) {
+            durativeBox.checked = false;
+            durativeBox.disabled = true;
+        }
     }
 
     // Step 2: run pipeline
