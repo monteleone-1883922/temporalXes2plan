@@ -89,7 +89,7 @@ class Parser:
             coverage_percentage: Minimum cumulative variant coverage for
                 log filtering (e.g. 0.8 keeps traces covering 80% of cases).
             discovery_algorithm: Petri net discovery algorithm name.
-                One of 'alpha', 'inductive', 'heuristics', 'ilp'.
+                One of 'alpha', 'inductive', 'heuristics', 'ilp', 'powl'.
             use_activity_classifier: Combine concept:name + lifecycle:transition
                 as activity label when True.
             config: Analysis configuration; defaults to AnalysisConfig() if None.

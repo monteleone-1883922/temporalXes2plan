@@ -25,6 +25,7 @@ class ModelDiscoverer:
         'inductive': pm4py.discovery.discover_petri_net_inductive,
         'heuristics': pm4py.discovery.discover_petri_net_heuristics,
         'ilp': pm4py.discovery.discover_petri_net_ilp,
+        'powl': pm4py.discover_powl
     }
 
     def __init__(self, discovery_algorithm: str = 'inductive') -> None:
@@ -60,7 +61,11 @@ class ModelDiscoverer:
         """
         discovery_function = self.DISCOVERY_ALGORITHMS[self.discovery_algorithm]
         try:
-            petrinet, initial_marking, final_marking = discovery_function(train_log)
+            if self.discovery_algorithm == 'powl':
+                powl_model = discovery_function(train_log)
+                petrinet, initial_marking, final_marking = pm4py.convert_to_petri_net(powl_model)
+            else:
+                petrinet, initial_marking, final_marking = discovery_function(train_log)
             if not initial_marking:
                 logger.warning("Discovered Petri net has an empty initial marking")
             if not final_marking:

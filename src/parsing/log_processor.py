@@ -4,6 +4,7 @@ from tqdm import tqdm
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 import pm4py
 import core_utils as utils
+from parsing.csv_loader import csv_to_event_log, load_mapping_file
 
 logger = utils.get_logger(__name__)
 
@@ -27,7 +28,7 @@ class LogProcessor:
 
     def load_and_filter_log(self, coverage_percentage: float) -> Tuple[Any, Any, Any]:
         """
-        Load the XES log, apply classifiers, and filter by coverage.
+        Load the event log (XES or CSV), apply classifiers, and filter by coverage.
 
         Args:
             coverage_percentage: Minimum cumulative coverage for variant filtering.
@@ -38,7 +39,10 @@ class LogProcessor:
             - full_log: The full event log (pre-filtering, after classifiers).
             - full_lifecycle_log: Original event log (before filtering for complete events).
         """
-        log = pm4py.objects.log.importer.xes.importer.apply(self.log_path)
+        if self.log_path.lower().endswith(".csv"):
+            log = self._load_csv_log()
+        else:
+            log = pm4py.objects.log.importer.xes.importer.apply(self.log_path)
         full_lifecycle_log = copy.deepcopy(log)
 
         if self.use_activity_classifier:
@@ -74,6 +78,11 @@ class LogProcessor:
             logger.warning(f"Warning: Coverage filtering failed: {e}, using full log")
             
         return log, full_log, full_lifecycle_log
+
+    def _load_csv_log(self) -> Any:
+        """Load a CSV event log using the companion .mapping.json file."""
+        mapping = load_mapping_file(self.log_path)
+        return csv_to_event_log(self.log_path, mapping)
 
     def split_train_test(self, log: Any) -> Tuple[Any, Any]:
         """

@@ -48,7 +48,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--algorithm",
         default="inductive",
-        choices=["alpha", "inductive", "heuristics", "ilp"],
+        choices=["alpha", "inductive", "heuristics", "ilp", "powl"],
         help="Petri net discovery algorithm (default: inductive).",
     )
     parser.add_argument(

@@ -4,6 +4,8 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from pm4py.objects.log.importer.xes import importer as _xes_importer
+from parsing.csv_loader import csv_to_event_log
+from parsing.log_validator import validate_partial_trace
 
 import core_utils as utils
 
@@ -41,15 +43,20 @@ class PartialTraceReplayer:
 
     def replay(
         self,
-        xes_bytes: bytes,
+        file_bytes: bytes,
         current_data: Dict[str, Any],
+        fmt: str = "xes",
+        mapping: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         """Replay a partial trace and return the derived init state.
 
         Args:
-            xes_bytes: Raw bytes of the XES file.
+            file_bytes: Raw bytes of the XES or CSV file.
             current_data: Parsed current.json dict (graph, transitions,
                 attribute_catalog, metadata).
+            fmt: File format — "xes" (default) or "csv".
+            mapping: Column mapping required when fmt="csv". Dict with keys
+                case_id, activity, timestamp, lifecycle (optional).
 
         Returns:
             Dict with keys: init_places, init_effects, replayed_activities,
@@ -66,7 +73,14 @@ class PartialTraceReplayer:
 
         warnings: List[str] = []
 
-        trace = self._parse_xes(xes_bytes, warnings)
+        if fmt == "csv":
+            if mapping is None:
+                raise PartialTraceError(
+                    "Column mapping is required for CSV partial traces."
+                )
+            trace = self._parse_csv(file_bytes, mapping)
+        else:
+            trace = self._parse_xes(file_bytes, warnings)
         events = list(trace)
 
         if not events:
@@ -136,8 +150,33 @@ class PartialTraceReplayer:
         }
 
     # ------------------------------------------------------------------
-    # XES parsing
+    # Parsing helpers
     # ------------------------------------------------------------------
+
+    def _parse_csv(self, csv_bytes: bytes, mapping: Dict[str, Optional[str]]):
+        """Parse CSV bytes and return the single trace."""
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
+                tmp.write(csv_bytes)
+                tmp.flush()
+                log = csv_to_event_log(tmp.name, mapping)
+        except PartialTraceError:
+            raise
+        except Exception as exc:
+            raise PartialTraceError(f"Invalid CSV file: {exc}") from exc
+
+        if len(log) == 0:
+            raise PartialTraceError("CSV file contains no traces.")
+        if len(log) > 1:
+            raise PartialTraceError(
+                f"Expected a single-trace CSV file, found {len(log)} traces."
+            )
+        trace = log[0]
+        errors = validate_partial_trace(trace)
+        if errors:
+            raise PartialTraceError("; ".join(errors))
+        return trace
 
     def _parse_xes(self, xes_bytes: bytes, warnings: List[str]):
         """Parse XES bytes and return the single trace."""
@@ -157,8 +196,11 @@ class PartialTraceReplayer:
             raise PartialTraceError(
                 f"Expected a single-trace XES file, found {len(log)} traces."
             )
-
-        return log[0]
+        trace = log[0]
+        errors = validate_partial_trace(trace)
+        if errors:
+            raise PartialTraceError("; ".join(errors))
+        return trace
 
     # ------------------------------------------------------------------
     # Graph lookups
