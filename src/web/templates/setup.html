@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='css/setup.css') }}">
 {% endblock %}
 
-{% block body_data %} data-log-name="{{ log_name }}"{% endblock %}
+{% block body_data %} data-log-name="{{ log_name }}" data-log-type="{{ log_type }}"{% endblock %}
 
 {% block nav_back %}
 <a href="/" class="btn-toolbar btn-home">
@@ -28,8 +28,102 @@
         <!-- Error banner -->
         <div id="setup-error" class="alert-error js-hidden"></div>
 
+        <!-- Info banner (lifecycle warnings etc.) — dismissible -->
+        <div id="setup-info" class="alert-info js-hidden" style="margin-bottom:16px;display:flex;align-items:flex-start;gap:10px;">
+            <i class="bi bi-info-circle-fill" style="flex-shrink:0;margin-top:2px;"></i>
+            <span id="setup-info-text"></span>
+            <button type="button" onclick="document.getElementById('setup-info').classList.add('js-hidden')"
+                    style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:16px;line-height:1;">✕</button>
+        </div>
+
+        <!-- Timestamp warning modal -->
+        <div id="timestamp-warning-modal" class="modal-overlay js-hidden">
+            <div class="modal-box">
+                <div class="modal-header">
+                    <i class="bi bi-exclamation-triangle-fill" style="color:var(--yellow-500,#eab308);"></i>
+                    <span>Timestamps unavailable</span>
+                </div>
+                <p id="ts-modal-msg" class="modal-body"></p>
+                <div class="modal-footer">
+                    <button type="button" id="ts-modal-cancel" class="btn-toolbar">Cancel</button>
+                    <button type="button" id="ts-modal-confirm" class="btn-toolbar btn-run">Proceed</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Form -->
         <form id="setup-form">
+
+            {% if log_type == "csv" %}
+            <!-- CSV Column Mapping — only shown for CSV logs, required before run -->
+            <div class="setup-section setup-section-open" id="csv-mapping-section">
+                <div class="setup-section-header">
+                    <i class="bi bi-table"></i>
+                    <span>CSV Column Mapping</span>
+                    <span class="badge-pill" style="margin-left:8px;background:var(--red-100,#fee2e2);color:var(--red-700,#b91c1c);font-size:11px;">required</span>
+                </div>
+                <div class="setup-section-body">
+                    <p class="field-hint" style="margin-bottom:16px;">
+                        Select which CSV column corresponds to each standard field.
+                        The three required fields must be set before running the analysis.
+                    </p>
+                    <div class="form-grid">
+                        <div class="form-field">
+                            <label for="csv-case_id">Case ID <span style="color:var(--red-600,#dc2626)">*</span></label>
+                            <select id="csv-case_id" name="csv_case_id" class="csv-required-field">
+                                <option value="">— select column —</option>
+                                {% for col in csv_columns %}
+                                <option value="{{ col }}"
+                                    {% if csv_saved_mapping and csv_saved_mapping.case_id == col %}selected
+                                    {% elif not csv_saved_mapping and csv_detected_mapping.case_id == col %}selected
+                                    {% endif %}>{{ col }}</option>
+                                {% endfor %}
+                            </select>
+                            <span class="field-hint">Identifies each process instance (trace)</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="csv-activity">Activity <span style="color:var(--red-600,#dc2626)">*</span></label>
+                            <select id="csv-activity" name="csv_activity" class="csv-required-field">
+                                <option value="">— select column —</option>
+                                {% for col in csv_columns %}
+                                <option value="{{ col }}"
+                                    {% if csv_saved_mapping and csv_saved_mapping.activity == col %}selected
+                                    {% elif not csv_saved_mapping and csv_detected_mapping.activity == col %}selected
+                                    {% endif %}>{{ col }}</option>
+                                {% endfor %}
+                            </select>
+                            <span class="field-hint">Name of the executed activity</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="csv-timestamp">Timestamp</label>
+                            <select id="csv-timestamp" name="csv_timestamp">
+                                <option value="">— none —</option>
+                                {% for col in csv_columns %}
+                                <option value="{{ col }}"
+                                    {% if csv_saved_mapping and csv_saved_mapping.timestamp == col %}selected
+                                    {% elif not csv_saved_mapping and csv_detected_mapping.timestamp == col %}selected
+                                    {% endif %}>{{ col }}</option>
+                                {% endfor %}
+                            </select>
+                            <span class="field-hint">Event timestamp — optional, required for temporal planning</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="csv-lifecycle">Lifecycle</label>
+                            <select id="csv-lifecycle" name="csv_lifecycle">
+                                <option value="">— none —</option>
+                                {% for col in csv_columns %}
+                                <option value="{{ col }}"
+                                    {% if csv_saved_mapping and csv_saved_mapping.lifecycle == col %}selected
+                                    {% elif not csv_saved_mapping and csv_detected_mapping.lifecycle == col %}selected
+                                    {% endif %}>{{ col }}</option>
+                                {% endfor %}
+                            </select>
+                            <span class="field-hint">Event lifecycle phase (e.g. start/complete) — optional</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
 
             <!-- Pipeline params -->
             <div class="setup-section setup-section-open">
@@ -46,6 +140,7 @@
                                 <option value="inductive" selected>inductive</option>
                                 <option value="heuristics">heuristics</option>
                                 <option value="ilp">ilp</option>
+                                <option value="powl">powl</option>
                             </select>
                         </div>
                         <div class="form-field">

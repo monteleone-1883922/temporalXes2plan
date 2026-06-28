@@ -21,17 +21,17 @@
         </div>
         {% endif %}
 
-        <!-- Import XES -->
+        <!-- Import log -->
         <h2>Import New Log</h2>
         <div class="import-area" id="import-area">
             <div class="import-icon"><i class="bi bi-file-earmark-arrow-up"></i></div>
             <div class="import-body">
-                <div class="import-title">Upload a XES event log</div>
-                <div class="import-desc">The log will be saved and ready for pipeline configuration.</div>
+                <div class="import-title">Upload an event log</div>
+                <div class="import-desc">Supported formats: XES (.xes) and CSV (.csv). The log will be saved and ready for pipeline configuration.</div>
             </div>
             <label class="btn-toolbar btn-upload">
-                <i class="bi bi-upload"></i> Choose .xes file
-                <input type="file" id="xes-upload" accept=".xes" hidden>
+                <i class="bi bi-upload"></i> Choose file
+                <input type="file" id="xes-upload" accept=".xes,.csv" hidden>
             </label>
         </div>
         <div id="import-error" class="alert-error js-hidden" style="margin-bottom:16px;"></div>
@@ -59,7 +59,7 @@
         <div class="home-empty" style="margin-top:16px;">
             <div><i class="bi bi-inbox"></i></div>
             <h3>No configurations found</h3>
-            <p>Upload a XES log above or place a <code>current.json</code> inside a subdirectory of <code>data/</code>.</p>
+            <p>Upload a XES or CSV log above or place a <code>current.json</code> inside a subdirectory of <code>data/</code>.</p>
         </div>
         {% endif %}
 
