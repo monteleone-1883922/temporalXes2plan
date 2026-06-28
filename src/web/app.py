@@ -13,6 +13,9 @@ import os
 import sys
 import webbrowser
 from threading import Timer
+import json
+import pandas as pd
+from parsing.csv_loader import detect_mapping
 
 from flask import Flask, render_template
 
@@ -55,14 +58,42 @@ def create_app(data_dir: str) -> Flask:
 
     @app.route("/setup/<log_name>")
     def setup(log_name: str):
-        log_path = os.path.join(PROJECT_ROOT, "logs", f"{log_name}.xes")
-        if not os.path.isfile(log_path):
+        logs_dir = os.path.join(PROJECT_ROOT, "logs")
+        xes_path = os.path.join(logs_dir, f"{log_name}.xes")
+        csv_path = os.path.join(logs_dir, f"{log_name}.csv")
+
+        if os.path.isfile(xes_path):
             return render_template(
-                "home.html",
-                configs=_list_configurations(app.config["DATA_DIR"]),
-                error=f"Log file '{log_name}.xes' not found in logs/.",
-            ), 404
-        return render_template("setup.html", log_name=log_name)
+                "setup.html", log_name=log_name, log_type="xes",
+                csv_columns=[], csv_detected_mapping={}, csv_saved_mapping=None,
+            )
+
+        if os.path.isfile(csv_path):
+
+            try:
+                columns = list(pd.read_csv(csv_path, nrows=0).columns)
+                detected = detect_mapping(columns)
+            except Exception:
+                columns = []
+                detected = {}
+
+            mapping_path = os.path.join(logs_dir, f"{log_name}.mapping.json")
+            saved_mapping = None
+            if os.path.isfile(mapping_path):
+                with open(mapping_path, "r", encoding="utf-8") as fh:
+                    saved_mapping = json.load(fh)
+
+            return render_template(
+                "setup.html", log_name=log_name, log_type="csv",
+                csv_columns=columns, csv_detected_mapping=detected,
+                csv_saved_mapping=saved_mapping,
+            )
+
+        return render_template(
+            "home.html",
+            configs=_list_configurations(app.config["DATA_DIR"]),
+            error=f"Log file '{log_name}' not found in logs/.",
+        ), 404
 
     @app.route("/predict/<config_name>")
     def predict(config_name: str):

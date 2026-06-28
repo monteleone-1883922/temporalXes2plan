@@ -3,6 +3,22 @@
  */
 
 const POLL_INTERVAL_MS = 2000;
+const LOG_TYPE = document.body.dataset.logType || "xes";
+
+// For CSV logs: disable Run Analysis until required mapping fields are selected.
+if (LOG_TYPE === "csv") {
+    const requiredSelects = document.querySelectorAll(".csv-required-field");
+    const runBtn = document.getElementById("run-btn");
+
+    function _updateRunBtn() {
+        const allFilled = Array.from(requiredSelects).every(s => s.value !== "");
+        runBtn.disabled = !allFilled;
+        runBtn.title = allFilled ? "" : "Complete the CSV Column Mapping above to enable analysis";
+    }
+
+    _updateRunBtn();
+    requiredSelects.forEach(s => s.addEventListener("change", _updateRunBtn));
+}
 
 document.getElementById("setup-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -13,16 +29,55 @@ async function startPipeline() {
     const form = document.getElementById("setup-form");
     const btn = document.getElementById("run-btn");
     const errorEl = document.getElementById("setup-error");
+    const logName = document.body.dataset.logName;
 
     errorEl.classList.add("js-hidden");
+    document.getElementById("setup-info").classList.add("js-hidden");
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Starting...';
+    btn.innerHTML = '<span class="spinner"></span> Validating...';
 
+    // Step 1: validate log fields before starting the pipeline thread
+    let validation;
+    try {
+        const vResp = await fetch(`/api/${logName}/validate-log`, { method: "POST" });
+        validation = await vResp.json();
+        if (!vResp.ok) throw new Error(validation.error || vResp.statusText);
+    } catch (err) {
+        showError("Validation failed: " + err.message);
+        _resetRunBtn(btn);
+        return;
+    }
+
+    if (validation.errors?.length) {
+        showError(validation.errors.join(" — "));
+        _resetRunBtn(btn);
+        return;
+    }
+
+    if (validation.infos?.length) {
+        const infoEl = document.getElementById("setup-info");
+        document.getElementById("setup-info-text").textContent = validation.infos.join(" | ");
+        infoEl.classList.remove("js-hidden");
+    }
+
+    let allowMissingTimestamp = false;
+    if (validation.missing_timestamp) {
+        const confirmed = await _showTimestampModal(validation.warnings?.[0] || "");
+        if (!confirmed) {
+            _resetRunBtn(btn);
+            return;
+        }
+        allowMissingTimestamp = true;
+    }
+
+    // Step 2: run pipeline
+    btn.innerHTML = '<span class="spinner"></span> Starting...';
     const body = buildRequestBody(form);
+    body.allow_missing_timestamp = allowMissingTimestamp;
 
     let jobId;
     try {
-        const resp = await fetch(`/api/${document.body.dataset.logName}/run-pipeline`, {
+        const resp = await fetch(`/api/${logName}/run-pipeline`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
@@ -32,14 +87,41 @@ async function startPipeline() {
         jobId = data.job_id;
     } catch (err) {
         showError(err.message);
-        btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-play-fill"></i> Run Analysis';
+        _resetRunBtn(btn);
         return;
     }
 
     form.classList.add("js-hidden");
     document.getElementById("progress-panel").classList.remove("js-hidden");
     pollJob(jobId);
+}
+
+function _resetRunBtn(btn) {
+    btn.disabled = LOG_TYPE === "csv"
+        ? !Array.from(document.querySelectorAll(".csv-required-field")).every(s => s.value !== "")
+        : false;
+    btn.innerHTML = '<i class="bi bi-play-fill"></i> Run Analysis';
+}
+
+function _showTimestampModal(message) {
+    return new Promise((resolve) => {
+        const modal = document.getElementById("timestamp-warning-modal");
+        document.getElementById("ts-modal-msg").textContent =
+            message || "The log has no valid timestamps. Durative actions and the temporal planner (Optic) will not be available.";
+        modal.classList.remove("js-hidden");
+
+        const onConfirm = () => { cleanup(); resolve(true); };
+        const onCancel  = () => { cleanup(); resolve(false); };
+
+        function cleanup() {
+            modal.classList.add("js-hidden");
+            document.getElementById("ts-modal-confirm").removeEventListener("click", onConfirm);
+            document.getElementById("ts-modal-cancel").removeEventListener("click", onCancel);
+        }
+
+        document.getElementById("ts-modal-confirm").addEventListener("click", onConfirm);
+        document.getElementById("ts-modal-cancel").addEventListener("click", onCancel);
+    });
 }
 
 function buildRequestBody(form) {
@@ -89,7 +171,18 @@ function buildRequestBody(form) {
         .map(s => s.trim())
         .filter(Boolean);
 
-    return { pipeline, config };
+    const body = { pipeline, config };
+
+    if (LOG_TYPE === "csv") {
+        body.csv_mapping = {
+            case_id:   document.getElementById("csv-case_id")?.value  || null,
+            activity:  document.getElementById("csv-activity")?.value  || null,
+            timestamp: document.getElementById("csv-timestamp")?.value || null,
+            lifecycle: document.getElementById("csv-lifecycle")?.value || null,
+        };
+    }
+
+    return body;
 }
 
 function pollJob(jobId) {
