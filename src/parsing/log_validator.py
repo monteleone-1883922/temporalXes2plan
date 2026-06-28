@@ -69,19 +69,19 @@ def validate_partial_trace(trace: Any) -> List[str]:
 
     # case:concept:name — stored as trace attribute "concept:name"
     case_id = trace.attributes.get("concept:name")
-    misleading_type = None
     if case_id is None or (isinstance(case_id, str) and not case_id.strip()):
         errors.append(
             "Trace is missing a case identifier (case:concept:name). "
             "Every trace must have a non-empty case ID."
         )
-    elif isinstance(case_id, float):
-        misleading_type = 'float'
     elif isinstance(case_id, bool):
-        misleading_type = 'bool'
-    if misleading_type:
         errors.append(
-            f"case:concept:name is a {misleading_type} ({case_id!r}). "
+            f"case:concept:name is a boolean ({case_id!r}). "
+            "Case IDs must be strings or integers."
+        )
+    elif isinstance(case_id, float):
+        errors.append(
+            f"case:concept:name is a float ({case_id!r}). "
             "Case IDs must be strings or integers, not floats."
         )
 
