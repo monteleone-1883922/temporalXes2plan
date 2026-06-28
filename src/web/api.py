@@ -6,6 +6,11 @@ import os
 import tempfile
 import threading
 import traceback
+import pandas as pd
+from parsing.csv_loader import detect_mapping
+from parsing.log_processor import LogProcessor
+from parsing.csv_loader import REQUIRED_FIELDS
+from parsing.log_validator import validate_event_log
 from dataclasses import fields as dc_fields
 from datetime import datetime
 from pathlib import Path
@@ -222,42 +227,125 @@ def analysis_config_defaults():
 
 
 # ---------------------------------------------------------------------------
-# Feature 1 — XES log upload
+# Feature 1 — Log upload (XES or CSV)
 # ---------------------------------------------------------------------------
+
+def _logs_dir() -> str:
+    return os.path.join(current_app.config["PROJECT_ROOT"], "logs")
+
+
+def _find_log_path(log_name: str) -> Optional[str]:
+    """Return path to the log file (.xes preferred, then .csv), or None."""
+    base = _logs_dir()
+    for ext in (".xes", ".csv"):
+        p = os.path.join(base, f"{log_name}{ext}")
+        if os.path.isfile(p):
+            return p
+    return None
+
 
 @api.route("/upload-log", methods=["POST"])
 def upload_log():
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
     file = request.files["file"]
-    if not file.filename or not file.filename.lower().endswith(".xes"):
-        return jsonify({"error": "File must be a .xes event log"}), 400
+    if not file.filename:
+        return jsonify({"error": "No file provided"}), 400
+
+    filename_lower = file.filename.lower()
+    if filename_lower.endswith(".xes"):
+        file_type = "xes"
+    elif filename_lower.endswith(".csv"):
+        file_type = "csv"
+    else:
+        return jsonify({"error": "File must be a .xes or .csv event log"}), 400
 
     config_name = utils.sanitize_name(Path(file.filename).stem)
-    logs_dir = os.path.join(current_app.config["PROJECT_ROOT"], "logs")
+    logs_dir = _logs_dir()
     os.makedirs(logs_dir, exist_ok=True)
 
-    save_path = os.path.join(logs_dir, f"{config_name}.xes")
+    ext = f".{file_type}"
+    save_path = os.path.join(logs_dir, f"{config_name}{ext}")
     file.save(save_path)
 
-    return jsonify({"config_name": config_name, "log_path": save_path})
+    if file_type == "csv":
+
+        try:
+            columns = list(pd.read_csv(save_path, nrows=0).columns)
+            detected_mapping = detect_mapping(columns)
+        except Exception as exc:
+            os.unlink(save_path)
+            return jsonify({"error": f"Cannot read CSV headers: {exc}"}), 400
+        return jsonify({
+            "config_name": config_name,
+            "log_path": save_path,
+            "file_type": "csv",
+            "columns": columns,
+            "detected_mapping": detected_mapping,
+        })
+
+    return jsonify({"config_name": config_name, "log_path": save_path, "file_type": "xes"})
 
 
 # ---------------------------------------------------------------------------
-# Feature 2 — Pipeline execution
+# Feature 2 — Log validation + pipeline execution
 # ---------------------------------------------------------------------------
+
+@api.route("/<log_name>/validate-log", methods=["POST"])
+def validate_log(log_name: str):
+    """Synchronously validate a log's standard fields and return categorised results.
+
+    No pipeline thread is started. Used by the setup page before run-pipeline
+    to surface blocking errors and ask user confirmation for warnings.
+    """
+    log_path = _find_log_path(log_name)
+    if log_path is None:
+        return jsonify({"error": f"Log file not found: {log_name}.xes or {log_name}.csv"}), 404
+
+    if log_path.endswith(".csv"):
+        mapping_path = os.path.join(_logs_dir(), f"{log_name}.mapping.json")
+        if not os.path.isfile(mapping_path):
+            return jsonify({"error": "CSV column mapping not found. Complete the setup form first."}), 400
+
+    try:
+        processor = LogProcessor(log_path)
+        log, _, _ = processor.load_and_filter_log(coverage_percentage=1.0)
+        result = validate_event_log(log)
+    except Exception as exc:
+        return jsonify({"error": f"Could not load log for validation: {exc}"}), 400
+
+    return jsonify({
+        "errors": result.errors,
+        "warnings": result.warnings,
+        "infos": result.infos,
+        "missing_timestamp": result.missing_timestamp,
+        "missing_lifecycle": result.missing_lifecycle,
+    })
+
 
 @api.route("/<log_name>/run-pipeline", methods=["POST"])
 def run_pipeline(log_name: str):
     body = request.get_json(force=True) or {}
     pipeline_params = body.get("pipeline", {})
     config_dict = body.get("config", {})
+    csv_mapping_body: Optional[Dict[str, Any]] = body.get("csv_mapping")
 
-    log_path = os.path.join(
-        current_app.config["PROJECT_ROOT"], "logs", f"{log_name}.xes"
-    )
-    if not os.path.isfile(log_path):
-        return jsonify({"error": f"Log file not found: {log_name}.xes"}), 404
+    log_path = _find_log_path(log_name)
+    if log_path is None:
+        return jsonify({"error": f"Log file not found: {log_name}.xes or {log_name}.csv"}), 404
+
+    allow_missing_timestamp: bool = bool(body.get("allow_missing_timestamp", False))
+
+    if log_path.endswith(".csv"):
+        if not csv_mapping_body:
+            return jsonify({"error": "CSV log requires column mapping. Provide 'csv_mapping' in the request body."}), 400
+
+        missing = [f for f in REQUIRED_FIELDS if not csv_mapping_body.get(f)]
+        if missing:
+            return jsonify({"error": f"Missing required column mappings: {missing}"}), 400
+        mapping_path = os.path.join(_logs_dir(), f"{log_name}.mapping.json")
+        with open(mapping_path, "w", encoding="utf-8") as fh:
+            json.dump(csv_mapping_body, fh, indent=2)
 
     data_dir = current_app.config["DATA_DIR"]
     pddl_out = os.path.join(data_dir, log_name, "pddl")
@@ -265,7 +353,8 @@ def run_pipeline(log_name: str):
     job_id = tracker.create()
     threading.Thread(
         target=_pipeline_thread,
-        args=(job_id, log_path, data_dir, pddl_out, pipeline_params, config_dict),
+        args=(job_id, log_path, data_dir, pddl_out, pipeline_params, config_dict,
+              allow_missing_timestamp),
         daemon=True,
     ).start()
 
@@ -279,10 +368,9 @@ def _pipeline_thread(
     pddl_out: str,
     pipeline_params: Dict[str, Any],
     config_dict: Dict[str, Any],
+    allow_missing_timestamp: bool = False,
 ) -> None:
     try:
-
-
         tracker.append_log(job_id, "Initializing configuration...")
         config = _build_analysis_config(config_dict)
 
@@ -310,6 +398,15 @@ def _pipeline_thread(
         if current_json.exists():
             h = hashlib.sha256(current_json.read_bytes()).hexdigest()
             _save_domain_state(pddl_out, h, use_durative, use_costs)
+
+            # Persist has_timestamps in current.json metadata so the UI can
+            # disable the temporal planner when timestamps are absent.
+            if allow_missing_timestamp:
+                data = json.loads(current_json.read_text(encoding="utf-8"))
+                data.setdefault("metadata", {})["has_timestamps"] = False
+                current_json.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
 
         tracker.append_log(job_id, "Pipeline complete.")
         tracker.complete(job_id, {"config_name": config_name, "pddl_path": str(pddl_path)})
@@ -434,7 +531,7 @@ def build_problem(config_name: str):
 
 @api.route("/<config_name>/replay-partial-trace", methods=["POST"])
 def replay_partial_trace(config_name: str):
-    """Replay a single-trace XES file and return the derived init state."""
+    """Replay a single-trace XES or CSV file and return the derived init state."""
 
     current_path = _current_path(config_name)
     if not os.path.isfile(current_path):
@@ -444,8 +541,28 @@ def replay_partial_trace(config_name: str):
         return jsonify({"error": "No file uploaded"}), 400
 
     f = request.files["file"]
-    if not f.filename or not f.filename.lower().endswith(".xes"):
-        return jsonify({"error": "File must be a .xes file"}), 400
+    if not f.filename:
+        return jsonify({"error": "No file provided"}), 400
+
+    filename_lower = f.filename.lower()
+    if filename_lower.endswith(".xes"):
+        file_type = "xes"
+        mapping = None
+    elif filename_lower.endswith(".csv"):
+        file_type = "csv"
+        mapping_path = os.path.join(_logs_dir(), f"{config_name}.mapping.json")
+        if not os.path.isfile(mapping_path):
+            return jsonify({
+                "error": (
+                    "No column mapping found for this configuration. "
+                    "To use a CSV partial trace, first run the pipeline from a CSV log "
+                    "and complete the column mapping on the setup page."
+                )
+            }), 400
+        with open(mapping_path, "r", encoding="utf-8") as fh:
+            mapping = json.load(fh)
+    else:
+        return jsonify({"error": "File must be a .xes or .csv file"}), 400
 
     current_data = _read_json(current_path)
     # Backfill metadata for configs generated before the metadata key was added.
@@ -454,10 +571,9 @@ def replay_partial_trace(config_name: str):
             "start_place": _detect_source_place(current_data.get("graph", {})) or "",
             "end_place": _detect_sink_place(current_data.get("graph", {})) or "",
         }
-    xes_bytes = f.read()
 
     try:
-        result = PartialTraceReplayer().replay(xes_bytes, current_data)
+        result = PartialTraceReplayer().replay(f.read(), current_data, fmt=file_type, mapping=mapping)
     except PartialTraceError as exc:
         return jsonify({"error": str(exc)}), 400
 
