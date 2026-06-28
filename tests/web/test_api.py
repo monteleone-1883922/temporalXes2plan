@@ -14,6 +14,38 @@ from web.app import create_app
 # Fixtures
 # ---------------------------------------------------------------------------
 
+MINIMAL_DATA_NO_DURATION = {
+    "graph": {
+        "nodes": [
+            {"id": "p_start", "type": "place", "label": "p_start"},
+            {"id": "t1", "type": "transition", "label": "register", "is_silent": False},
+            {"id": "p_end", "type": "place", "label": "p_end"},
+        ],
+        "edges": [
+            {"source": "p_start", "target": "t1"},
+            {"source": "t1", "target": "p_end"},
+        ],
+    },
+    "metadata": {
+        "start_place": "p_start",
+        "end_place": "p_end",
+        "has_timestamps": False,
+    },
+    "transitions": {
+        "register": {
+            "activity_name": "register",
+            "input_places": ["p_start"],
+            "preconditions": [],
+            "effects": [],
+            "effect_groups": [],
+            "cost": 0.0,
+            "_meta": {"total_firings": 5, "related_effects": [], "incompatible_effects": []},
+        }
+    },
+    "xor_splits": {},
+    "attribute_catalog": {},
+}
+
 MINIMAL_DATA = {
     "graph": {
         "nodes": [
@@ -76,6 +108,28 @@ def data_dir(tmp_path):
     current.write_text(json.dumps(MINIMAL_DATA), encoding="utf-8")
     original.write_text(json.dumps(MINIMAL_DATA), encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture()
+def data_dir_no_duration(tmp_path):
+    """DATA_DIR with a config that has has_timestamps=False and no durations set."""
+    cfg_dir = tmp_path / "test_cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "current.json").write_text(json.dumps(MINIMAL_DATA_NO_DURATION), encoding="utf-8")
+    (cfg_dir / "original.json").write_text(json.dumps(MINIMAL_DATA_NO_DURATION), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.fixture()
+def app_no_duration(data_dir_no_duration):
+    flask_app = create_app(data_dir=str(data_dir_no_duration))
+    flask_app.config["TESTING"] = True
+    return flask_app
+
+
+@pytest.fixture()
+def client_no_duration(app_no_duration):
+    return app_no_duration.test_client()
 
 
 @pytest.fixture()
@@ -338,6 +392,45 @@ class TestPatchTransition:
         resp = client.patch("/api/test_cfg/transition/nonexistent_activity", json={"cost": 1.0})
         assert resp.status_code == 404
 
+    def test_duration_flips_has_timestamps_when_all_covered(self, client_no_duration, data_dir_no_duration):
+        # has_timestamps starts False, single transition gets a duration → should flip to True
+        client_no_duration.patch(
+            "/api/test_cfg/transition/register",
+            json={"duration": {"effective_min": 5.0, "effective_max": 20.0}},
+        )
+        data = json.loads((data_dir_no_duration / "test_cfg" / "current.json").read_text())
+        assert data["metadata"]["has_timestamps"] is True
+
+    def test_duration_does_not_flip_has_timestamps_when_partial(self, data_dir_no_duration):
+        # Two transitions, only one gets a duration → has_timestamps stays False
+        two_trans = json.loads(json.dumps(MINIMAL_DATA_NO_DURATION))
+        two_trans["transitions"]["discharge"] = {
+            "activity_name": "discharge",
+            "input_places": ["p_end"],
+            "preconditions": [], "effects": [], "effect_groups": [], "cost": 0.0,
+            "_meta": {"total_firings": 3, "related_effects": [], "incompatible_effects": []},
+        }
+        (data_dir_no_duration / "test_cfg" / "current.json").write_text(
+            json.dumps(two_trans), encoding="utf-8"
+        )
+        flask_app = create_app(data_dir=str(data_dir_no_duration))
+        flask_app.config["TESTING"] = True
+        c = flask_app.test_client()
+        c.patch("/api/test_cfg/transition/register",
+                json={"duration": {"effective_min": 5.0, "effective_max": 20.0}})
+        data = json.loads((data_dir_no_duration / "test_cfg" / "current.json").read_text())
+        assert data["metadata"]["has_timestamps"] is False
+
+    def test_duration_does_not_change_has_timestamps_when_already_true(self, client, data_dir):
+        # has_timestamps is True (default) → patching duration leaves it unchanged
+        client.patch(
+            "/api/test_cfg/transition/register",
+            json={"duration": {"effective_min": 1.0, "effective_max": 5.0}},
+        )
+        data = json.loads((data_dir / "test_cfg" / "current.json").read_text())
+        # has_timestamps absent means True by default — key must not be set to False
+        assert data.get("metadata", {}).get("has_timestamps", True) is not False
+
 
 # ---------------------------------------------------------------------------
 # PATCH /api/<config_name>/xor-split/<place_name>/<branch_activity>
@@ -444,6 +537,35 @@ class TestBuildProblem:
         assert data["status"] == "built"
         assert "problem_text" in data
         assert (data_dir / "test_cfg" / "pddl" / "problem.pddl").exists()
+
+    def test_optic_with_durations_no_warnings(self, client):
+        # MINIMAL_DATA has effective_max=30 on register → no warning expected
+        resp = client.post(
+            "/api/test_cfg/build-problem",
+            json={"goal": [[{"attribute": "status", "predicate": "=", "value": "discharged"}]],
+                  "planner": "optic"},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json().get("warnings", []) == []
+
+    def test_optic_without_durations_returns_warning(self, client_no_duration):
+        # MINIMAL_DATA_NO_DURATION has no duration on register → warning expected
+        resp = client_no_duration.post(
+            "/api/test_cfg/build-problem",
+            json={"goal": [], "require_completion": True, "planner": "optic"},
+        )
+        assert resp.status_code == 200
+        warnings = resp.get_json().get("warnings", [])
+        assert len(warnings) > 0
+        assert any("duration" in w.lower() for w in warnings)
+
+    def test_fast_downward_never_warns_about_durations(self, client_no_duration):
+        resp = client_no_duration.post(
+            "/api/test_cfg/build-problem",
+            json={"goal": [], "require_completion": True, "planner": "fast_downward"},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json().get("warnings", []) == []
 
 
 # ---------------------------------------------------------------------------
