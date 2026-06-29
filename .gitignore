@@ -183,7 +183,7 @@ pddl/output.sas
 pddl/elapsed.time
 pddl/plan_numbers_and_cost
 src/*.png
-evaluation/
+
 logs/
 # Z3 build artifacts
 src/z3/build/
