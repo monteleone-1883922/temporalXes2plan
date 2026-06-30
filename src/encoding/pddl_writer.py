@@ -48,7 +48,7 @@ class PDDLWriter:
             if isinstance(action, PDDLDurativeAction):
                 sections.append(self._render_durative_action(action, domain.has_costs, domain.has_deadline, domain.deadline_predicate))
             else:
-                sections.append(self._render_action(action, domain.has_costs))
+                sections.append(self._render_action(action, domain.has_costs, domain.has_deadline, domain.deadline_predicate))
 
         sections.append(")")
         return "\n\n".join(sections) + "\n"
@@ -103,7 +103,13 @@ class PDDLWriter:
         lines.append("  )")
         return "\n".join(lines)
 
-    def _render_action(self, action: PDDLAction, has_costs: bool = False) -> str:
+    def _render_action(
+        self,
+        action: PDDLAction,
+        has_costs: bool = False,
+        has_deadline: bool = False,
+        deadline_predicate: str = "deadline_exceeded",
+    ) -> str:
         lines = [f"  (:action {action.name}"]
 
         if action.parameters:
@@ -114,8 +120,10 @@ class PDDLWriter:
         else:
             lines.append("    :parameters ()")
 
+        deadline_atoms = [f"(not ({deadline_predicate}))"] if has_deadline else []
         lines.append(self._render_condition_block(
-            ":precondition", action.preconditions, indent="    "
+            ":precondition", action.preconditions, indent="    ",
+            extra_atoms=deadline_atoms,
         ))
         cost = self._total_action_cost(action) if has_costs else None
         lines.append(self._render_effect_block(
@@ -201,10 +209,16 @@ class PDDLWriter:
 
 
     def _render_condition_block(
-        self, keyword: str, items, indent: str = "    "
+        self,
+        keyword: str,
+        items,
+        indent: str = "    ",
+        extra_atoms: Optional[List[str]] = None,
     ) -> str:
         """Render a :precondition block from a collection of PDDLCondition."""
         ordered = sorted(c.to_pddl() for c in items)
+        if extra_atoms:
+            ordered = sorted(ordered + extra_atoms)
         if not ordered:
             return f"{indent}{keyword} ()"
         if len(ordered) == 1:

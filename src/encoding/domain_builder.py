@@ -101,6 +101,9 @@ class DomainBuilder:
         if has_costs:
             requirements += [":action-costs", ":numeric-fluents"]
 
+        effective_deadline = use_durative and any(
+            isinstance(a, PDDLDurativeAction) for a in actions
+        )
         domain = PDDLDomain(
             name=domain_name,
             requirements=requirements,
@@ -109,6 +112,7 @@ class DomainBuilder:
             predicates=predicates,
             actions=actions,
             has_costs=has_costs,
+            has_deadline=effective_deadline,
         )
         return domain, registry
 

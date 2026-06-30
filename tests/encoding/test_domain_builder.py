@@ -2,6 +2,8 @@
 import pytest
 
 from encoding.domain_builder import DomainBuilder
+from encoding.pddl_model import PDDLDurativeAction
+from encoding.pddl_writer import PDDLWriter
 
 
 class TestBuildTypes:
@@ -234,3 +236,51 @@ class TestHasCosts:
         )
         assert ":action-costs" in domain.requirements
         assert ":numeric-fluents" in domain.requirements
+
+
+class TestDeadline:
+
+    def test_no_deadline_when_not_durative(self, simple_parse_result):
+        domain = DomainBuilder().build(simple_parse_result, use_durative=False)
+        assert domain.has_deadline is False
+
+    def test_no_deadline_when_durative_but_no_durations(self, simple_parse_result):
+        # simple_parse_result has no duration data — all actions stay instantaneous
+        domain = DomainBuilder().build(simple_parse_result, use_durative=True)
+        assert domain.has_deadline is False
+
+    def test_has_deadline_when_durative_with_durations(self, durative_parse_result):
+        # activity_a has duration data → at least one PDDLDurativeAction produced
+        domain = DomainBuilder().build(durative_parse_result, use_durative=True)
+        assert domain.has_deadline is True
+
+    def test_deadline_predicate_in_rendered_predicates(self, durative_parse_result):
+        domain = DomainBuilder().build(durative_parse_result, use_durative=True)
+        text = PDDLWriter()._render_domain(domain)
+        assert "(deadline_exceeded)" in text
+
+    def test_durative_action_has_over_all_deadline(self, durative_parse_result):
+        domain = DomainBuilder().build(durative_parse_result, use_durative=True)
+        text = PDDLWriter()._render_domain(domain)
+        assert "(over all (not (deadline_exceeded)))" in text
+
+    def test_instantaneous_action_in_durative_domain_has_deadline_precondition(self, durative_parse_result):
+        # activity_b has no duration → rendered as PDDLAction, not PDDLDurativeAction
+        domain = DomainBuilder().build(durative_parse_result, use_durative=True)
+        assert domain.has_deadline is True
+
+        durative_names = {a.name for a in domain.actions if isinstance(a, PDDLDurativeAction)}
+        instant_names = {a.name for a in domain.actions if not isinstance(a, PDDLDurativeAction)}
+        assert any("activity_b" in n for n in instant_names), "activity_b should be instantaneous"
+
+        text = PDDLWriter()._render_domain(domain)
+        # Find the execute_activity_b action block and check it has the deadline precondition
+        action_blocks = text.split("(:action ")
+        activity_b_block = next((b for b in action_blocks if b.startswith("execute_activity_b")), None)
+        assert activity_b_block is not None
+        assert "(not (deadline_exceeded))" in activity_b_block
+
+    def test_deadline_predicate_absent_without_durative(self, simple_parse_result):
+        domain = DomainBuilder().build(simple_parse_result, use_durative=False)
+        text = PDDLWriter()._render_domain(domain)
+        assert "deadline_exceeded" not in text
