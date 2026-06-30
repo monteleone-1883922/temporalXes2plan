@@ -352,3 +352,42 @@ class TestProblemBuilderDeadline:
     def test_deadline_negative_not_emitted(self):
         result = _build(deadline=-10.0)
         assert "(at " not in result
+
+
+# ---------------------------------------------------------------------------
+# minimize_weighted metric (Step 0b)
+# ---------------------------------------------------------------------------
+
+class TestProblemBuilderMinimizeWeighted:
+
+    def test_minimize_weighted_emits_combined_expression(self):
+        result = _build(metric="minimize_weighted")
+        assert "(+ (total-time) (* " in result
+        assert "(total-cost)" in result
+
+    def test_minimize_weighted_default_cost_weight(self):
+        result = _build(metric="minimize_weighted")
+        assert "0.001" in result
+
+    def test_minimize_weighted_custom_cost_weight(self):
+        result = _build(metric="minimize_weighted", cost_weight=0.5)
+        assert "0.5" in result
+        assert "(+ (total-time) (* 0.5 (total-cost)))" in result
+
+    def test_minimize_weighted_includes_total_cost_init(self):
+        result = _build(metric="minimize_weighted")
+        assert "(= (total-cost) 0)" in result
+
+    def test_minimize_cost_unchanged(self):
+        result = _build(metric="minimize_cost")
+        assert "(:metric minimize (total-cost))" in result
+        assert "(+ (total-time)" not in result
+
+    def test_minimize_time_unchanged(self):
+        result = _build(metric="minimize_time")
+        assert "(:metric minimize (total-time))" in result
+        assert "(+ (total-time)" not in result
+
+    def test_minimize_weighted_parentheses_balanced(self):
+        result = _build(metric="minimize_weighted")
+        assert result.count("(") == result.count(")")

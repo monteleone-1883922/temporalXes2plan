@@ -162,7 +162,7 @@ def run(
     except subprocess.TimeoutExpired:
         _log("Timeout expired.")
         return {**_empty,
-                "solvability": "unsolvable_resource",
+                "solvability": "timeout",
                 "message": f"Planner timed out after {timeout}s"}
     except Exception as exc:
         return {**_empty, "solvability": "error",

@@ -30,6 +30,7 @@ class ProblemBuilder:
         attribute_catalog: Dict[str, Any],
         init_places: Optional[List[str]] = None,
         metric: Optional[str] = None,
+        cost_weight: float = 0.001,
         require_completion: bool = False,
         end_place: Optional[str] = None,
         deadline: Optional[float] = None,
@@ -48,7 +49,11 @@ class ProblemBuilder:
                 Maps attr name → {"type": "boolean"|"numerical"|"categorical", ...}.
             init_places: Optional list of place IDs to mark as starting tokens.
                 Each is emitted as (marked <place_id>) in :init; supports AND-splits.
-            metric: Optimization metric — "minimize_cost", "minimize_time", or None.
+            metric: Optimization metric — "minimize_cost", "minimize_time",
+                "minimize_weighted", or None.
+            cost_weight: Scaling factor α for "minimize_weighted" metric.
+                Emits ``(:metric minimize (+ (total-time) (* α (total-cost))))``.
+                Ignored for other metric values.
             require_completion: If True, appends (marked end_place) to every goal clause.
             end_place: Sanitized name of the Petri net sink place; required when
                 require_completion is True.
@@ -56,9 +61,9 @@ class ProblemBuilder:
         Returns:
             Complete PDDL problem text.
         """
-        init_atoms = self._build_init_atoms(init_places, init_effects, attribute_catalog, metric == "minimize_cost", deadline)
+        init_atoms = self._build_init_atoms(init_places, init_effects, attribute_catalog, metric in ("minimize_cost", "minimize_weighted"), deadline)
         goal_str = self._build_goal(goal_sop, attribute_catalog, require_completion, end_place)
-        metric_str = self._build_metric(metric)
+        metric_str = self._build_metric(metric, cost_weight)
 
         lines = [
             f"(define (problem {problem_name})",
@@ -78,12 +83,14 @@ class ProblemBuilder:
     # Init
     # ------------------------------------------------------------------
 
-    def _build_metric(self, metric: Optional[str]) -> Optional[str]:
+    def _build_metric(self, metric: Optional[str], cost_weight: float = 0.001) -> Optional[str]:
         """Return the (:metric ...) string, or None if not applicable."""
         if metric == "minimize_cost":
             return "(:metric minimize (total-cost))"
         if metric == "minimize_time":
             return "(:metric minimize (total-time))"
+        if metric == "minimize_weighted":
+            return f"(:metric minimize (+ (total-time) (* {cost_weight} (total-cost))))"
         return None
 
     def _build_init_atoms(

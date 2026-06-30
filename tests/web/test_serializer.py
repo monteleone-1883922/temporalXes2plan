@@ -1,7 +1,9 @@
 """Tests for web.serializer.serialize_parse_result."""
 from unittest.mock import MagicMock
 
-from models import AttributeCatalogEntry
+import pytest
+
+from models import AttributeCatalogEntry, EffectInfo
 from web.serializer import serialize_parse_result
 
 
@@ -84,3 +86,94 @@ class TestSerializeAttributeCatalog:
         )
         out = serialize_parse_result(self._result_with_catalog({"score": entry}))
         assert "bin_boundaries" in out["attribute_catalog"]["score"]
+
+
+# ---------------------------------------------------------------------------
+# Transitions — output_places field (Step 0c)
+# ---------------------------------------------------------------------------
+
+def _make_transition_info(input_places=None, output_label=None):
+    """Return a minimal TransitionInfo mock."""
+    t_info = MagicMock()
+    t_info.input_places = input_places or []
+    t_info.attribute_preconditions = []
+    t_info.effects = {}
+    t_info.effect_groups = []
+    t_info.duration = None
+    t_info.total_firings = 0
+    t_info.related_effects = []
+    t_info.incompatible_effects = []
+    t_info.xor_branch = None
+    return t_info
+
+
+def _make_transition(label: str, name: str):
+    t = MagicMock()
+    t.label = label
+    t.name = name
+    return t
+
+
+def _make_place(name: str):
+    p = MagicMock()
+    p.name = name
+    return p
+
+
+class TestTransitionOutputPlaces:
+    """Verify that serialize_parse_result includes output_places for each transition."""
+
+    def _make_result_with_transition(self, act_name: str, output_place_names):
+        pnm = MagicMock()
+        pnm.xor_splits = {}
+        pnm.petrinet.places = []
+        pnm.petrinet.arcs = []
+        pnm.trans_inputs = {}
+        pnm.silent_transitions = {}
+
+        t = _make_transition(label=act_name, name=f"t_{act_name}")
+        places = [_make_place(n) for n in output_place_names]
+
+        pnm.petrinet.transitions = [t]
+        pnm.trans_outputs = {t: set(places)}
+
+        result = MagicMock()
+        result.petri_net_model = pnm
+        result.start_place = "p_start"
+        result.end_place = "p_end"
+        result.attribute_catalog = {}
+        result.transitions = {act_name: _make_transition_info()}
+        return result
+
+    def test_output_places_key_present(self):
+        r = self._make_result_with_transition("act_a", ["p1"])
+        out = serialize_parse_result(r)
+        assert "output_places" in out["transitions"]["act_a"]
+
+    def test_output_places_is_list(self):
+        r = self._make_result_with_transition("act_a", ["p1"])
+        out = serialize_parse_result(r)
+        assert isinstance(out["transitions"]["act_a"]["output_places"], list)
+
+    def test_output_places_contains_correct_place(self):
+        r = self._make_result_with_transition("act_a", ["p1"])
+        out = serialize_parse_result(r)
+        assert "p1" in out["transitions"]["act_a"]["output_places"]
+
+    def test_output_places_sorted(self):
+        r = self._make_result_with_transition("act_a", ["p_z", "p_a", "p_m"])
+        out = serialize_parse_result(r)
+        places = out["transitions"]["act_a"]["output_places"]
+        assert places == sorted(places)
+
+    def test_output_places_empty_when_no_outputs(self):
+        result = _make_parse_result()
+        t_info = _make_transition_info()
+        result.transitions = {"act_b": t_info}
+        out = serialize_parse_result(result)
+        assert out["transitions"]["act_b"]["output_places"] == []
+
+    def test_input_places_still_present(self):
+        r = self._make_result_with_transition("act_a", ["p_out"])
+        out = serialize_parse_result(r)
+        assert "input_places" in out["transitions"]["act_a"]

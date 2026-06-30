@@ -253,6 +253,15 @@ def _build_effect_groups(
 
 def _build_transitions(result: ParseResult) -> Dict[str, Any]:
     """Build the transitions section of the UI JSON."""
+    pnm = result.petri_net_model
+    output_places_by_label: Dict[str, List[str]] = {}
+    for t, places in pnm.trans_outputs.items():
+        label = utils.sanitize_name(t.label) if t.label else None
+        if label:
+            output_places_by_label[label] = sorted(
+                utils.sanitize_name(p.name) for p in places
+            )
+
     output: Dict[str, Any] = {}
 
     for act, t_info in result.transitions.items():
@@ -294,6 +303,7 @@ def _build_transitions(result: ParseResult) -> Dict[str, Any]:
         output[act] = {
             "activity_name": act,
             "input_places": t_info.input_places,
+            "output_places": output_places_by_label.get(act, []),
             "preconditions": preconditions,
             "effects": effects_lookup,
             "effect_groups": effect_groups,
