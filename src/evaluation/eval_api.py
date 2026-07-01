@@ -38,7 +38,7 @@ from encoding.pddl_writer import PDDLWriter
 from encoding.problem_builder import ProblemBuilder
 from planning.planner_runner import PlannerResult, run_planner as _run_planner
 from web.serializer import serialize_parse_result
-
+import pm4py
 
 # ---------------------------------------------------------------------------
 # Result dataclasses
@@ -163,11 +163,10 @@ class EvalAPI:
         if log_path.lower().endswith(".csv"):
             if mapping is None:
                 raise ValueError("Column mapping is required for CSV logs.")
-            import pm4py
             log = csv_to_event_log(log_path, mapping)
         else:
-            import pm4py
-            log = pm4py.read_xes(log_path)
+
+            log = pm4py.objects.log.importer.xes.importer.apply(log_path)
         return validate_event_log(log)
 
     def parse(

@@ -2,25 +2,16 @@ import logging
 import re
 from typing import List, Dict, Optional, Any, Tuple, Set, Union
 
-def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
-    """
-    Get a configured logger with the specified name and level.
+def get_logger(name: str) -> logging.Logger:
+    """Return a logger that inherits its level and handlers from the root logger.
 
     Args:
-        name: Name of the logger (typically __name__).
-        level: Logging level (defaults to logging.INFO).
+        name: Logger name (typically __name__).
 
     Returns:
-        A configured logging.Logger instance.
+        logging.Logger instance with propagation enabled.
     """
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        logger.setLevel(level)
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-    return logger
+    return logging.getLogger(name)
 
 
 def sanitize_name(name: str) -> str:

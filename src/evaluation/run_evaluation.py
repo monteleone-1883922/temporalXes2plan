@@ -94,10 +94,14 @@ def evaluate_log(
     failures_dir = log_out_dir / "failures"
 
     # 1. Validate timestamps
+    logger.debug("[%s] Validating log: path=%s fmt=%s", log_id, log_path, log_fmt)
     try:
         vr = api.validate_log(str(log_path), mapping=cfg.csv_mapping)
     except Exception as exc:
-        logger.error("[%s] validate_log failed: %s", log_id, exc)
+        logger.error(
+            "[%s] validate_log failed (path=%s, fmt=%s): %s",
+            log_id, log_path, log_fmt, exc, exc_info=True,
+        )
         return LogResult(
             log_id=log_id, log_name=log_name, log_fmt=log_fmt,
             n_train_cases=0, n_test_cases=0, n_activities=0,
@@ -113,6 +117,7 @@ def evaluate_log(
         )
 
     # 2. Train/test split
+    logger.debug("[%s] Splitting log (test_pct=%.2f, max_test=%d)", log_id, cfg.test_pct, cfg.max_test_cases)
     tts = _split_log(
         str(log_path), log_fmt,
         test_pct=cfg.test_pct,
@@ -123,7 +128,10 @@ def evaluate_log(
     )
 
     with tts:
+        logger.info("[%s] Split done — train=%d test=%d", log_id, tts.n_train, tts.n_test)
+
         # 3. Parse on training data
+        logger.debug("[%s] Running discovery (algorithm=%s, coverage=%.4f)", log_id, cfg.algorithm, cfg.coverage)
         try:
             parse_result = api.parse(
                 str(tts.train_path),
@@ -131,7 +139,10 @@ def evaluate_log(
                 discovery_algorithm=cfg.algorithm,
             )
         except Exception as exc:
-            logger.error("[%s] parse failed: %s", log_id, exc)
+            logger.error(
+                "[%s] parse failed (algorithm=%s, train_path=%s): %s",
+                log_id, cfg.algorithm, tts.train_path, exc, exc_info=True,
+            )
             return LogResult(
                 log_id=log_id, log_name=log_name, log_fmt=log_fmt,
                 n_train_cases=tts.n_train, n_test_cases=tts.n_test, n_activities=0,
@@ -146,7 +157,7 @@ def evaluate_log(
                 parse_result, use_durative=True, use_costs=True
             )
         except Exception as exc:
-            logger.error("[%s] build_domain failed: %s", log_id, exc)
+            logger.error("[%s] build_domain failed: %s", log_id, exc, exc_info=True)
             return LogResult(
                 log_id=log_id, log_name=log_name, log_fmt=log_fmt,
                 n_train_cases=tts.n_train, n_test_cases=tts.n_test,

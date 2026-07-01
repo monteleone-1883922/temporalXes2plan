@@ -469,11 +469,12 @@ class AnalysisConfig:
     and statistical fallback modes for XOR splits and conditional effects.
     """
 
-    # --- Pre-discretization (k-means++) ---
+    # --- Pre-discretization (3-stage pipeline) ---
     kmeans_max_k: int = 5
-    kmeans_min_cluster_fraction: float = 0.05
     kmeans_silhouette_threshold: float = 0.10
-    kmeans_n_init: int = 10
+    kmeans_n_init: int = 3
+    dominance_threshold: float = 0.30
+    min_residual_points: int = 50
 
     # --- Decision tree cascade (shared for XOR splits and conditional effects) ---
     dt_min_samples: int = 30
