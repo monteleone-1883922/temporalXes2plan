@@ -1,6 +1,0 @@
-jellyfish==1.2.0
-matplotlib==3.10.6
-numpy==2.2.6
-pandas==2.3.2
-pm4py==2.7.17
-scikit_learn==1.7.2

@@ -3,7 +3,9 @@ Tests for parsing.discretizer.Discretizer — pure unit tests.
 
 All tests build synthetic pm4py EventLogs in-memory; no XES files are read.
 """
+import numpy as np
 import pytest
+from unittest.mock import patch
 
 import core_utils as utils
 from models import AnalysisConfig
@@ -85,6 +87,48 @@ class TestDiscretizerFit:
         d = Discretizer()
         d.fit(_bimodal_log(), numeric_attributes=[])
         assert d.boundaries == {}
+
+
+class TestClusterResiduals:
+    def test_always_returns_at_least_one_center_for_valid_input(self):
+        """k=1 baseline ensures _cluster_residuals never returns [] for sufficient input."""
+        d = Discretizer(AnalysisConfig(min_residual_points=10))
+        rng = np.random.default_rng(0)
+        residuals = rng.uniform(0, 100, 200)
+        centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
+        assert len(centers) >= 1
+
+    def test_bimodal_residuals_return_multiple_centers(self):
+        """Clearly bimodal residuals should produce at least 2 centers."""
+        d = Discretizer(AnalysisConfig(kmeans_max_k=5, kmeans_n_init=3, min_residual_points=10))
+        rng = np.random.default_rng(42)
+        residuals = np.concatenate([rng.normal(10, 0.3, 100), rng.normal(90, 0.3, 100)])
+        centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
+        assert len(centers) >= 2
+        assert centers == sorted(centers)
+
+    def test_too_few_residuals_returns_single_center(self):
+        """When residuals fall below min_residual_points, a single mean center is returned."""
+        d = Discretizer(AnalysisConfig(min_residual_points=50))
+        residuals = np.array([1.0, 2.0, 3.0, 4.0, 5.0])  # 5 < 50
+        centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
+        assert centers == [pytest.approx(3.0)]
+
+
+class TestKDEFallback:
+    def test_kde_failure_returns_equal_frequency_boundaries(self):
+        """When KDE raises LinAlgError, _find_best_boundaries must use equal-frequency fallback."""
+        d = Discretizer(AnalysisConfig(kmeans_max_k=3))
+        rng = np.random.default_rng(0)
+        values = rng.uniform(0, 100, 500)
+        n_unique = len(np.unique(values))
+
+        with patch("parsing.discretizer.gaussian_kde", side_effect=np.linalg.LinAlgError):
+            boundaries = d._find_best_boundaries("x", values, n_unique)
+
+        # equal-frequency with max_k=3 → 2 quantile split points
+        assert len(boundaries) == 2
+        assert boundaries == sorted(boundaries)
 
 
 class TestDiscretizerTransformValue:
