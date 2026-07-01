@@ -3,10 +3,10 @@
 Reads CLI arguments, downloads logs, runs the evaluation pipeline for each log,
 and writes per-log results plus a rolling cross-log summary.
 
-Usage::
+Usage (from project root)::
 
-    conda run -n temporalXes2Plan --cwd src python -m evaluation.run_evaluation \\
-        --output-dir results/ --n-test-cases 50 --planner-timeout 60
+    conda run -n temporalXes2Plan python -m src.evaluation.run_evaluation \\
+        --planner-timeout 60
 """
 
 from __future__ import annotations
@@ -359,15 +359,16 @@ def _prompt_csv_mapping(log_path: Path) -> Dict[str, Optional[str]]:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the evaluation CLI."""
+    _here = Path(__file__).parent
     p = argparse.ArgumentParser(
-        prog="python -m evaluation.run_evaluation",
+        prog="python -m src.evaluation.run_evaluation",
         description="Evaluate the XES→PDDL pipeline against a set of event logs.",
     )
-    p.add_argument("--metadata", type=Path, default=Path("evaluation/data/Metadata.csv"),
+    p.add_argument("--metadata", type=Path, default=_here / "data" / "Metadata.csv",
                    help="Path to Metadata.csv (downloaded from Zenodo if absent).")
-    p.add_argument("--cache-dir", dest="cache_dir", type=Path, default=Path("evaluation/data/cache"),
+    p.add_argument("--cache-dir", dest="cache_dir", type=Path, default=_here / "data" / "cache",
                    help="Directory for downloaded log files.")
-    p.add_argument("--output-dir", dest="output_dir", type=Path, default=Path("evaluation/results"),
+    p.add_argument("--output-dir", dest="output_dir", type=Path, default=_here / "results",
                    help="Directory for results.")
     p.add_argument("--log-ids", dest="log_ids", type=int,  nargs="+", default=None,
                     help="Event Log IDs to include, e.g. --log-ids LOG_001 LOG_005")
@@ -500,3 +501,7 @@ def _setup_logging(log_file: Path, level: str) -> None:
 
 if __name__ == "__main__":
     main(build_parser().parse_args())
+
+#conda run -n temporalXes2Plan --cwd src python -m evaluation.run_evaluation  \
+# --log-ids 55 --min-prefix-pct 0.5 --algorithm powl --planner-timeout 1800 \
+# --planner-memory-mb 16000 --cost-weight 0.05 --log-level DEBUG

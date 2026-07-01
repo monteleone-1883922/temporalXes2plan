@@ -16,3 +16,4 @@ dependencies:
     - scikit-learn==1.7.2
     - tqdm
     - requests
+    - beautifulsoup4

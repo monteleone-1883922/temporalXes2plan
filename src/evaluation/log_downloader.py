@@ -13,14 +13,17 @@ Typical usage::
 
 from __future__ import annotations
 
-import re
+import logging
 from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 
 from evaluation.analysis_logs import clean_columns
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -76,16 +79,21 @@ def download_if_needed(
         requests.HTTPError: If the HTTP request fails.
     """
     log_id = str(metadata_row["Event Log ID"])
-    filename = str(metadata_row["Event Log Dataset File Name"])
+    filename = str(
+        metadata_row["Event Log Dataset File Name"]
+        if pd.notna(metadata_row["Event Log Dataset File Name"])
+        else metadata_row["Event Log Name"]
+    )
     doi = str(metadata_row["DOI Number"])
     fmt = _fmt_from_dataset_format(str(metadata_row.get("Dataset Format", "")))
 
-    dest = Path(cache_dir) / log_id / filename
+    dest = Path(cache_dir) / log_id / filename.replace(" ", "_")
 
     if dest.exists() and not force:
         return dest, fmt
 
-    url = _zenodo_download_url(doi, filename)
+    url = _resolve_download_url(doi, filename)
+    logger.debug("[%s] Downloading from URL: %s", log_id, url)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     response = requests.get(url, timeout=120)
@@ -111,17 +119,72 @@ def _fmt_from_dataset_format(dataset_format: str) -> str:
     return dataset_format.strip().lower()
 
 
-def _zenodo_download_url(doi: str, filename: str) -> str:
-    """Build a Zenodo direct-download URL from a DOI and filename.
+def _resolve_download_url(doi: str, filename: str) -> str:
+    """Resolve a direct download URL from a DOI by following the redirect and
+    scraping the landing page for a link matching *filename*.
+
+    On 4TU pages the file links live inside ``<div id="files">`` and the
+    filename appears as the link **text**, not in the href (which is a UUID
+    path). The search order is:
+    1. Exact text match (or with an added ``.gz`` suffix) inside ``div#files``.
+    2. Any link whose text contains the target extension inside ``div#files``.
+    3. Generic full-page fallback for ``.xes``/``.csv`` link text.
 
     Args:
-        doi: DOI string of the form "10.5281/zenodo.<record_id>" or a plain
-            record ID.
-        filename: Filename within the Zenodo record.
+        doi: DOI string (e.g. "10.4121/uuid:..." or "10.5281/zenodo.<id>").
+        filename: Filename from the metadata (e.g. "MyLog.xes").
 
     Returns:
-        Direct download URL.
+        Direct download URL for the file.
+
+    Raises:
+        requests.HTTPError: If the DOI resolution request fails.
+        ValueError: If no matching download link is found on the page.
     """
-    m = re.search(r"zenodo\.(\d+)", doi, re.IGNORECASE)
-    record_id = m.group(1) if m else doi.strip()
-    return f"https://zenodo.org/records/{record_id}/files/{filename}?download=1"
+    doi_url = f"https://doi.org/{doi}"
+    response = requests.get(doi_url, allow_redirects=True, timeout=30)
+    response.raise_for_status()
+
+    page = BeautifulSoup(response.text, "html.parser")
+    ext = Path(filename).suffix.lower()
+    stem = Path(filename).stem
+
+    def _to_absolute(href: str) -> str:
+        if href.startswith("http"):
+            return href
+        pieces = response.url.split("/")
+        return f"{pieces[0]}//{pieces[2]}/{href.lstrip('/')}"
+
+    def _is_file_link(a_tag) -> bool:
+        return "download-all-files" not in a_tag.get("id", "")
+
+    # --- Primary: <div id="files"> on 4TU pages ---
+    files_div = page.find("div", id="files")
+    if files_div:
+        for a in files_div.find_all("a", href=True):
+            if not _is_file_link(a):
+                continue
+            text = a.get_text(strip=True)
+            if _find_filename(text, filename):
+                return _to_absolute(a["href"])
+
+        # Extension-level fallback within files section
+        for a in files_div.find_all("a", href=True):
+            if not _is_file_link(a):
+                continue
+            if ext in a.get_text(strip=True):
+                return _to_absolute(a["href"])
+
+    # --- Generic fallback: any page link whose text contains the filename ---
+    for a in page.find_all("a", href=True):
+        text = a.get_text(strip=True)
+        if filename in text or (ext in (".xes", ".csv") and ext in text):
+            return _to_absolute(a["href"])
+
+    raise ValueError(
+        f"File '{filename}' not found on landing page for DOI {doi} (resolved to {response.url})"
+    )
+
+
+def _find_filename(link_text: str, filename: str) -> bool:
+    return filename.lower() in link_text.lower() or filename.lower().replace(" ", "_") in link_text.lower()
