@@ -33,7 +33,7 @@ def _make_log(lengths: list[int]) -> pm4py.objects.log.obj.EventLog:
     return log
 
 
-def _run_split(lengths, n_test, seed=0, min_len=1):
+def _run_split(lengths, test_pct=0.2, min_test=1, max_test=1000, seed=0, min_len=1):
     """Helper: run split() with a synthetic in-memory log via mocks."""
     log = _make_log(lengths)
     with patch("evaluation.test_case_selector._load_log", return_value=log), \
@@ -42,8 +42,8 @@ def _run_split(lengths, n_test, seed=0, min_len=1):
             tmp = Path(f.name)
         with patch("evaluation.test_case_selector.tempfile.NamedTemporaryFile") as mock_ntf:
             mock_ntf.return_value.name = str(tmp)
-            s = split("fake.xes", n_test_cases=n_test, seed=seed,
-                      min_test_trace_length=min_len)
+            s = split("fake.xes", test_pct=test_pct, min_test_cases=min_test,
+                      max_test_cases=max_test, seed=seed, min_test_trace_length=min_len)
             s.train_path = tmp
     tmp.touch()
     return s, log
@@ -107,23 +107,38 @@ class TestStratifiedSampleIndices:
 
 class TestSplitSizes:
     def test_split_sizes_sum_to_total(self):
-        lengths = list(range(3, 33))  # 30 traces, all >= min_len=3
-        s, log = _run_split(lengths, n_test=10, min_len=3)
+        # 30 traces, 20% = 6 test cases
+        lengths = list(range(3, 33))
+        s, log = _run_split(lengths, test_pct=0.2, min_test=1, max_test=1000, min_len=3)
         assert s.n_train + s.n_test == 30
 
-    def test_n_test_cases_respected(self):
-        lengths = list(range(3, 33))
-        s, _ = _run_split(lengths, n_test=10, min_len=3)
+    def test_test_pct_respected(self):
+        # 100 traces, 10% = 10 test cases
+        lengths = [3] * 100
+        s, _ = _run_split(lengths, test_pct=0.1, min_test=1, max_test=1000, min_len=3)
         assert s.n_test == 10
 
+    def test_min_test_cases_clamping(self):
+        # 10 traces, 5% = 0 rounded → clamped to min=3
+        lengths = [3] * 10
+        s, _ = _run_split(lengths, test_pct=0.05, min_test=3, max_test=1000, min_len=3)
+        assert s.n_test == 3
+
+    def test_max_test_cases_clamping(self):
+        # 1000 traces, 50% = 500 → clamped to max=20
+        lengths = [3] * 1000
+        s, _ = _run_split(lengths, test_pct=0.5, min_test=1, max_test=20, min_len=3)
+        assert s.n_test == 20
+
     def test_n_test_capped_when_log_too_small(self):
-        lengths = [3, 4, 5]  # only 3 eligible traces
-        s, _ = _run_split(lengths, n_test=20, min_len=3)
+        # only 3 eligible traces, min=5 → capped to eligible pool size
+        lengths = [3, 4, 5]
+        s, _ = _run_split(lengths, test_pct=0.5, min_test=5, max_test=1000, min_len=3)
         assert s.n_test <= 3
 
     def test_split_disjoint(self):
         lengths = list(range(3, 33))
-        s, log = _run_split(lengths, n_test=10, min_len=3)
+        s, log = _run_split(lengths, test_pct=0.3, min_test=1, max_test=1000, min_len=3)
         test_ids = {t.attributes.get("concept:name") for t in s.test_cases}
         all_ids = {t.attributes.get("concept:name") for t in log}
         train_ids = all_ids - test_ids
@@ -131,16 +146,16 @@ class TestSplitSizes:
 
     def test_seed_reproducibility(self):
         lengths = list(range(3, 33))
-        s1, _ = _run_split(lengths, n_test=10, seed=99, min_len=3)
-        s2, _ = _run_split(lengths, n_test=10, seed=99, min_len=3)
+        s1, _ = _run_split(lengths, test_pct=0.3, seed=99, min_len=3)
+        s2, _ = _run_split(lengths, test_pct=0.3, seed=99, min_len=3)
         ids1 = [t.attributes.get("concept:name") for t in s1.test_cases]
         ids2 = [t.attributes.get("concept:name") for t in s2.test_cases]
         assert ids1 == ids2
 
     def test_different_seeds_give_different_splits(self):
         lengths = list(range(3, 53))  # 50 traces
-        s1, _ = _run_split(lengths, n_test=10, seed=1, min_len=3)
-        s2, _ = _run_split(lengths, n_test=10, seed=2, min_len=3)
+        s1, _ = _run_split(lengths, test_pct=0.2, seed=1, min_len=3)
+        s2, _ = _run_split(lengths, test_pct=0.2, seed=2, min_len=3)
         ids1 = [t.attributes.get("concept:name") for t in s1.test_cases]
         ids2 = [t.attributes.get("concept:name") for t in s2.test_cases]
         assert ids1 != ids2
@@ -154,20 +169,20 @@ class TestShortTraceExclusion:
     def test_short_traces_not_in_test_set(self):
         # traces 0-4 have length 1 (too short), 5-24 have length 5
         lengths = [1] * 5 + [5] * 20
-        s, log = _run_split(lengths, n_test=10, min_len=3)
+        s, log = _run_split(lengths, test_pct=0.4, min_test=1, max_test=1000, min_len=3)
         test_ids = {t.attributes.get("concept:name") for t in s.test_cases}
         short_ids = {str(i) for i in range(5)}
         assert test_ids.isdisjoint(short_ids)
 
     def test_short_traces_counted_in_train(self):
         lengths = [1] * 5 + [5] * 20
-        s, _ = _run_split(lengths, n_test=10, min_len=3)
+        s, _ = _run_split(lengths, test_pct=0.4, min_test=1, max_test=1000, min_len=3)
         # All 5 short traces must end up in train
         assert s.n_train >= 5
 
     def test_all_ineligible_gives_empty_test(self):
         lengths = [1, 2, 1, 2]  # all below min_len=3
-        s, _ = _run_split(lengths, n_test=10, min_len=3)
+        s, _ = _run_split(lengths, test_pct=0.5, min_test=1, max_test=1000, min_len=3)
         assert s.n_test == 0
         assert s.n_train == 4
 
@@ -206,7 +221,8 @@ class TestContextManager:
 @pytest.mark.skipif(not FIXTURE_XES.exists(), reason="fixture XES not found")
 class TestSplitWithRealLog:
     def test_train_path_is_readable_xes(self):
-        s = split(str(FIXTURE_XES), log_fmt="xes", n_test_cases=2, seed=0)
+        s = split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+                  max_test_cases=2, seed=0)
         try:
             loaded = pm4py.read_xes(str(s.train_path))
             assert loaded is not None
@@ -215,19 +231,21 @@ class TestSplitWithRealLog:
                 s.train_path.unlink()
 
     def test_context_manager_deletes_train_file(self):
-        with split(str(FIXTURE_XES), log_fmt="xes", n_test_cases=2, seed=0) as s:
+        with split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+                   max_test_cases=2, seed=0) as s:
             path = s.train_path
             assert path.exists()
         assert not path.exists()
 
     def test_split_sizes_with_real_log(self):
-        with split(str(FIXTURE_XES), log_fmt="xes", n_test_cases=2, seed=0) as s:
+        with split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+                   max_test_cases=2, seed=0) as s:
             assert s.n_train + s.n_test > 0
             assert s.n_test <= 2
 
     def test_test_traces_meet_min_length(self):
         min_len = 3
-        with split(str(FIXTURE_XES), log_fmt="xes", n_test_cases=5,
-                   seed=0, min_test_trace_length=min_len) as s:
+        with split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+                   max_test_cases=5, seed=0, min_test_trace_length=min_len) as s:
             for trace in s.test_cases:
                 assert len(trace) >= min_len

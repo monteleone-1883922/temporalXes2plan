@@ -34,7 +34,7 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def filter_logs(filter_difficulty: int | None = None ) -> pd.DataFrame:
+def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None = None, max_variants: int | None = None) -> pd.DataFrame:
     output_dir = Path(__file__).parent / "data"
     output_dir.mkdir(parents=True, exist_ok=True)  # crea la cartella se non esiste, non da errore se esiste già
 
@@ -56,6 +56,11 @@ def filter_logs(filter_difficulty: int | None = None ) -> pd.DataFrame:
     if filter_difficulty:
         candidates = candidates.loc[candidates["behavior_rank"] == filter_difficulty]
 
+    if log_ids:
+        candidates = candidates.loc[candidates["Event Log ID"].isin(log_ids)]
+
+    if max_variants is not None:
+        candidates = candidates.loc[candidates["Number of Variants"] < max_variants]
 
     manageable = candidates.sort_values(["behavior_rank", "Number of Activities"])
     manageable = manageable.drop_duplicates(subset="Event Log Name")
@@ -96,6 +101,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Configurations to analyze logs metadata")
     parser.add_argument("--difficulty", type=int, choices=range(1, 5),
                     metavar="N",  help="filter logs by difficulty level from 1 to 4")
+    parser.add_argument("--log-ids", dest="log_ids", type=int, nargs="+", default=None,
+                    help="Event Log IDs to include, e.g. --log-ids LOG_001 LOG_005")
+    parser.add_argument("--max-variants", dest="max_variants", type=int, default=None,
+                    help="Keep only logs with Number of Variants < max_variants")
     args = parser.parse_args(sys.argv[1:])
-    result = filter_logs(filter_difficulty=args.difficulty)
+    result = filter_logs(filter_difficulty=args.difficulty, log_ids=args.log_ids, max_variants=args.max_variants)
     result.to_csv(Path(__file__).parent / "data" / "filtered_logs_shortlist.csv", index=False)

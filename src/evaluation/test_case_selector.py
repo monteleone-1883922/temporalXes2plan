@@ -56,7 +56,9 @@ class TrainTestSplit:
 def split(
     log_path: str,
     log_fmt: str = "xes",
-    n_test_cases: int = 20,
+    test_pct: float = 0.2,
+    min_test_cases: int = 10,
+    max_test_cases: int = 200,
     seed: int = 42,
     mapping: Optional[dict] = None,
     min_test_trace_length: int = 3,
@@ -69,12 +71,15 @@ def split(
     cannot produce a meaningful prefix for evaluation) but are always kept in
     the training set.  The remaining traces are written to a temporary XES file.
 
+    The number of test traces is computed as:
+        n = clamp(round(total_traces * test_pct), min_test_cases, max_test_cases)
+
     Args:
         log_path: Path to the XES or CSV event log.
         log_fmt: Format of the log file — "xes" or "csv".
-        n_test_cases: Target number of test traces.  If the eligible pool has
-            fewer traces than *n_test_cases*, all eligible traces become test
-            cases.
+        test_pct: Fraction of total traces to use as test set (e.g. 0.2 = 20%).
+        min_test_cases: Lower bound on the number of test traces.
+        max_test_cases: Upper bound on the number of test traces.
         seed: Random seed for reproducibility.
         mapping: Column mapping required when log_fmt="csv".  Keys: case_id,
             activity, timestamp (optional), lifecycle (optional).
@@ -87,6 +92,8 @@ def split(
     """
     log = _load_log(log_path, log_fmt, mapping)
     traces = list(log)
+
+    n_test_cases = max(min_test_cases, min(max_test_cases, round(len(traces) * test_pct)))
 
     # Separate eligible test candidates from traces that are always in train.
     eligible_indices = [i for i, t in enumerate(traces) if len(t) >= min_test_trace_length]

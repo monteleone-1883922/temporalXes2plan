@@ -23,7 +23,9 @@ from evaluation.report_generator import LogResult, QueryResult
 def _make_cfg(output_dir: Path, **overrides) -> EvalConfig:
     defaults = dict(
         log_ids=None,
-        n_test_cases=5,
+        test_pct=0.2,
+        min_test_cases=1,
+        max_test_cases=100,
         min_prefix_pct=0.2,
         max_prefix_pct=0.8,
         seed=42,
@@ -399,9 +401,21 @@ class TestCLIParsing:
         args = build_parser().parse_args(["--csv-mapping", mapping])
         assert args.csv_mapping == mapping
 
-    def test_cli_parses_n_test_cases(self):
-        args = build_parser().parse_args(["--n-test-cases", "100"])
-        assert args.n_test_cases == 100
+    def test_cli_parses_test_pct(self):
+        args = build_parser().parse_args(["--test-pct", "0.3"])
+        assert args.test_pct == pytest.approx(0.3)
+
+    def test_cli_parses_min_test_cases(self):
+        args = build_parser().parse_args(["--min-test-cases", "5"])
+        assert args.min_test_cases == 5
+
+    def test_cli_parses_max_test_cases(self):
+        args = build_parser().parse_args(["--max-test-cases", "150"])
+        assert args.max_test_cases == 150
+
+    def test_cli_test_pct_default(self):
+        args = build_parser().parse_args([])
+        assert args.test_pct == pytest.approx(0.2)
 
     def test_cli_parses_resume_flag(self):
         args = build_parser().parse_args(["--resume"])
@@ -412,8 +426,8 @@ class TestCLIParsing:
         assert args.force_download is True
 
     def test_cli_parses_log_ids(self):
-        args = build_parser().parse_args(["--log-ids", "A,B,C"])
-        assert args.log_ids == "A,B,C"
+        args = build_parser().parse_args(["--log-ids", "1", "5", "12"])
+        assert args.log_ids == [1, 5, 12]
 
     def test_cli_default_algorithm(self):
         args = build_parser().parse_args([])

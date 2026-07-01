@@ -43,7 +43,9 @@ class EvalConfig:
     """All tunable parameters for the evaluation harness."""
 
     log_ids: Optional[List[str]]
-    n_test_cases: int
+    test_pct: float
+    min_test_cases: int
+    max_test_cases: int
     min_prefix_pct: float
     max_prefix_pct: float
     seed: int
@@ -111,7 +113,14 @@ def evaluate_log(
         )
 
     # 2. Train/test split
-    tts = _split_log(str(log_path), log_fmt, cfg.n_test_cases, cfg.seed, mapping=cfg.csv_mapping)
+    tts = _split_log(
+        str(log_path), log_fmt,
+        test_pct=cfg.test_pct,
+        min_test_cases=cfg.min_test_cases,
+        max_test_cases=cfg.max_test_cases,
+        seed=cfg.seed,
+        mapping=cfg.csv_mapping,
+    )
 
     with tts:
         # 3. Parse on training data
@@ -360,12 +369,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Directory for downloaded log files.")
     p.add_argument("--output-dir", dest="output_dir", type=Path, default=Path("evaluation/results"),
                    help="Directory for results.")
-    p.add_argument("--log-ids", dest="log_ids", type=str, default=None,
-                   help="Comma-separated Event Log IDs to evaluate (default: all).")
+    p.add_argument("--log-ids", dest="log_ids", type=int,  nargs="+", default=None,
+                    help="Event Log IDs to include, e.g. --log-ids LOG_001 LOG_005")
     p.add_argument("--cost-weight", dest="cost_weight", type=float, default=0.001,
                    help="α in (total-time + α * total-cost) metric.")
-    p.add_argument("--n-test-cases", dest="n_test_cases", type=int, default=50,
-                   help="Number of test cases per log.")
+    p.add_argument("--test-pct", dest="test_pct", type=float, default=0.2,
+                   help="Fraction of traces used as test set (e.g. 0.2 = 20%%).")
+    p.add_argument("--min-test-cases", dest="min_test_cases", type=int, default=10,
+                   help="Minimum number of test traces regardless of percentage.")
+    p.add_argument("--max-test-cases", dest="max_test_cases", type=int, default=200,
+                   help="Maximum number of test traces regardless of percentage.")
     p.add_argument("--seed", type=int, default=42,
                    help="Random seed for train/test split and prefix sampling.")
     p.add_argument("--min-prefix-pct", dest="min_prefix_pct", type=float, default=0.2,
@@ -409,13 +422,11 @@ def main(args: argparse.Namespace) -> None:
     if args.csv_mapping:
         csv_mapping = json.loads(args.csv_mapping)
 
-    log_ids: Optional[List[str]] = None
-    if args.log_ids:
-        log_ids = [lid.strip() for lid in args.log_ids.split(",") if lid.strip()]
-
     cfg = EvalConfig(
-        log_ids=log_ids,
-        n_test_cases=args.n_test_cases,
+        log_ids=args.log_ids,
+        test_pct=args.test_pct,
+        min_test_cases=args.min_test_cases,
+        max_test_cases=args.max_test_cases,
         min_prefix_pct=args.min_prefix_pct,
         max_prefix_pct=args.max_prefix_pct,
         seed=args.seed,
