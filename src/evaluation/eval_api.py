@@ -225,6 +225,36 @@ class EvalAPI:
         )
         return PDDLWriter()._render_domain(domain)
 
+    def build_domain_with_variant_effects(
+        self,
+        parse_result: ParseResult,
+        domain_name: str = "process",
+        use_durative: bool = False,
+        use_costs: bool = False,
+    ) -> tuple:
+        """Encode a ParseResult and return both the domain text and variant effects.
+
+        Args:
+            parse_result: Output of parse().
+            domain_name: PDDL domain name.
+            use_durative: Encode durative actions.
+            use_costs: Include action costs.
+
+        Returns:
+            Tuple of (domain_text, variant_effects) where variant_effects maps
+            each variant action name to its flat {attribute: value} effects dict.
+        """
+        from evaluation.plan_validator import build_variant_effects_lookup
+        domain, registry = DomainBuilder().build_with_registry(
+            parse_result,
+            domain_name=domain_name,
+            use_durative=use_durative,
+            use_costs=use_costs,
+        )
+        domain_text = PDDLWriter()._render_domain(domain)
+        variant_effects = build_variant_effects_lookup(registry)
+        return domain_text, variant_effects
+
 
     def build_problem(
         self,
