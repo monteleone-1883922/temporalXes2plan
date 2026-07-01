@@ -166,7 +166,7 @@ def evaluate_log(
         # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
         query_results: List[QueryResult] = []
         for trace in tts.test_cases:
-            trace_id = str(trace.attributes.get("concept:name", "unknown"))
+            trace_id = str(trace.attributes.get("concept:name", "unknown")).replace(" ", "_")
             prefix = _sample_prefix(
                 trace, serialized, api,
                 min_prefix_pct=cfg.min_prefix_pct,

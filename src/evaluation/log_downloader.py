@@ -13,7 +13,10 @@ Typical usage::
 
 from __future__ import annotations
 
+import gzip
+import io
 import logging
+import zipfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -92,14 +95,21 @@ def download_if_needed(
     if dest.exists() and not force:
         return dest, fmt
 
-    url = _resolve_download_url(doi, filename)
+    url, actual_filename = _resolve_file_link(doi, filename)
     logger.debug("[%s] Downloading from URL: %s", log_id, url)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     response = requests.get(url, timeout=120)
     response.raise_for_status()
 
-    dest.write_bytes(response.content)
+    safe_name = actual_filename.replace(" ", "_")
+    if safe_name.endswith(".gz"):
+        dest.write_bytes(gzip.decompress(response.content))
+    elif safe_name.endswith(".zip"):
+        dest.write_bytes(_extract_from_zip(response.content, fmt))
+    else:
+        dest.write_bytes(response.content)
+
     return dest, fmt
 
 
@@ -119,13 +129,39 @@ def _fmt_from_dataset_format(dataset_format: str) -> str:
     return dataset_format.strip().lower()
 
 
-def _resolve_download_url(doi: str, filename: str) -> str:
-    """Resolve a direct download URL from a DOI by following the redirect and
-    scraping the landing page for a link matching *filename*.
+def _extract_from_zip(content: bytes, fmt: str) -> bytes:
+    """Extract the first file matching *fmt* extension from a zip archive.
+
+    Args:
+        content: Raw bytes of the zip archive.
+        fmt: Target format ("xes" or "csv").
+
+    Returns:
+        Raw bytes of the extracted file.
+
+    Raises:
+        ValueError: If no file with the expected extension is found in the archive.
+    """
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        matches = [n for n in zf.namelist() if n.lower().endswith(f".{fmt}")]
+        if not matches:
+            raise ValueError(f"No .{fmt} file found inside zip archive (contents: {zf.namelist()})")
+        # Prefer a file not inside a subdirectory; fall back to the first match
+        top_level = [n for n in matches if "/" not in n]
+        entry = top_level[0] if top_level else matches[0]
+        logger.debug("Extracting '%s' from zip archive", entry)
+        return zf.read(entry)
+
+
+def _resolve_file_link(doi: str, filename: str) -> tuple[str, str]:
+    """Resolve a direct download URL and actual filename from a DOI landing page.
 
     On 4TU pages the file links live inside ``<div id="files">`` and the
     filename appears as the link **text**, not in the href (which is a UUID
-    path). The search order is:
+    path). The actual filename on the page may differ from the metadata value
+    (e.g. the page shows ``MyLog.xes.gz`` while the CSV says ``MyLog.xes``).
+
+    Search order:
     1. Exact text match (or with an added ``.gz`` suffix) inside ``div#files``.
     2. Any link whose text contains the target extension inside ``div#files``.
     3. Generic full-page fallback for ``.xes``/``.csv`` link text.
@@ -135,7 +171,8 @@ def _resolve_download_url(doi: str, filename: str) -> str:
         filename: Filename from the metadata (e.g. "MyLog.xes").
 
     Returns:
-        Direct download URL for the file.
+        Tuple (url, actual_filename) where actual_filename is the link text
+        from the landing page (e.g. "MyLog.xes.gz").
 
     Raises:
         requests.HTTPError: If the DOI resolution request fails.
@@ -147,7 +184,6 @@ def _resolve_download_url(doi: str, filename: str) -> str:
 
     page = BeautifulSoup(response.text, "html.parser")
     ext = Path(filename).suffix.lower()
-    stem = Path(filename).stem
 
     def _to_absolute(href: str) -> str:
         if href.startswith("http"):
@@ -166,20 +202,21 @@ def _resolve_download_url(doi: str, filename: str) -> str:
                 continue
             text = a.get_text(strip=True)
             if _find_filename(text, filename):
-                return _to_absolute(a["href"])
+                return _to_absolute(a["href"]), text
 
         # Extension-level fallback within files section
         for a in files_div.find_all("a", href=True):
             if not _is_file_link(a):
                 continue
-            if ext in a.get_text(strip=True):
-                return _to_absolute(a["href"])
+            text = a.get_text(strip=True)
+            if ext in text:
+                return _to_absolute(a["href"]), text
 
     # --- Generic fallback: any page link whose text contains the filename ---
     for a in page.find_all("a", href=True):
         text = a.get_text(strip=True)
         if filename in text or (ext in (".xes", ".csv") and ext in text):
-            return _to_absolute(a["href"])
+            return _to_absolute(a["href"]), text
 
     raise ValueError(
         f"File '{filename}' not found on landing page for DOI {doi} (resolved to {response.url})"
