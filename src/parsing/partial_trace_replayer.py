@@ -1,6 +1,9 @@
 """Replay a partial XES trace against a serialized Petri net to derive init state."""
 
 import tempfile
+from collections import deque
+from copy import copy
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from pm4py.objects.log.importer.xes import importer as _xes_importer
@@ -28,17 +31,37 @@ class PartialTraceError(Exception):
     """Raised when the partial trace cannot be replayed (blocking error)."""
 
 
+@dataclass
+class TauPath:
+    """A sequence of silent transitions that produces the needed token places."""
+    tau_sequence: List[str]      # node_ids of tau transitions in firing order
+    marking_after: Set[str]      # marking resulting after firing the sequence
+    superfluous: int             # tokens produced beyond what was in the needed set
+
+
+@dataclass
+class TauSplitPoint:
+    """A choice point where multiple tau paths were available."""
+    event_index: int             # index in events[] of the blocked visible activity
+    marking_before: Set[str]     # marking before any tau was fired at this split
+    replayed_before: List[str]   # replayed list state at the moment of this split
+    tau_fired_before: List[str]  # tau_fired list state at the moment of this split
+    alternatives: List[TauPath]  # ordered by superfluous asc, then BFS discovery order
+    tried_count: int = 0         # how many alternatives have already been attempted
+
+
 class PartialTraceReplayer:
-    """Replay a single-trace XES file against a serialized Petri net.
+    """Replay a trace (full or partial) against a serialized Petri net.
 
-    Two phases:
-    1. Pre-process each event: filter to catalog attributes, discretize
-       numerical values using stored bin_boundaries, normalize booleans.
-    2. Token replay: simulate marking from start_place through each activity.
+    Tau transitions are fired lazily — only when a visible activity is blocked
+    by missing input tokens.  When multiple tau paths exist, the one with fewest
+    superfluous tokens is chosen first.  Backtracking restores earlier choice
+    points if a selected path leads to a dead end later in the trace.
 
-    Returns the current marking (init_places — a list because AND-splits can
-    place tokens in multiple places simultaneously) and the last-seen value of
-    every catalog attribute encountered (init_effects), plus non-blocking warnings.
+    For evaluation use, pass the full trace + n_prefix so the chosen tau path
+    can be validated against the complete execution.  For the web endpoint,
+    pass only the partial trace with n_prefix == len(events) — the algorithm
+    treats it as a complete trace and the fast path always fires.
     """
 
     def replay(
@@ -47,30 +70,26 @@ class PartialTraceReplayer:
         current_data: Dict[str, Any],
         fmt: str = "xes",
         mapping: Optional[Dict[str, Optional[str]]] = None,
+        tau_max_depth: int = 10,
     ) -> Dict[str, Any]:
-        """Replay a partial trace and return the derived init state.
+        """Replay a trace from raw bytes (web API entry point).
+
+        The entire trace is treated as the prefix (n_prefix = all events).
 
         Args:
             file_bytes: Raw bytes of the XES or CSV file.
-            current_data: Parsed current.json dict (graph, transitions,
-                attribute_catalog, metadata).
-            fmt: File format — "xes" (default) or "csv".
-            mapping: Column mapping required when fmt="csv". Dict with keys
-                case_id, activity, timestamp, lifecycle (optional).
+            current_data: Parsed current.json dict.
+            fmt: "xes" (default) or "csv".
+            mapping: Column mapping required when fmt="csv".
+            tau_max_depth: Maximum tau chain depth in BFS search.
 
         Returns:
-            Dict with keys: init_places, init_effects, replayed_activities,
-            n_events, warnings.
+            Dict with init_places, init_effects, replayed_activities, n_events,
+            warnings, tau_fired, tau_split_count, full_trace_validated.
 
         Raises:
             PartialTraceError: On any blocking validation or replay error.
         """
-        catalog: Dict[str, Any] = current_data.get("attribute_catalog", {})
-        transitions: Dict[str, Any] = current_data.get("transitions", {})
-        graph: Dict[str, Any] = current_data.get("graph", {})
-        metadata: Dict[str, Any] = current_data.get("metadata", {})
-        start_place: str = metadata.get("start_place", "")
-
         warnings: List[str] = []
 
         if fmt == "csv":
@@ -81,7 +100,52 @@ class PartialTraceReplayer:
             trace = self._parse_csv(file_bytes, mapping)
         else:
             trace = self._parse_xes(file_bytes, warnings)
+
         events = list(trace)
+        return self.replay_with_full_trace(
+            events=events,
+            n_prefix=len(events),
+            current_data=current_data,
+            tau_max_depth=tau_max_depth,
+            extra_warnings=warnings,
+        )
+
+    def replay_with_full_trace(
+        self,
+        events: List[Any],
+        n_prefix: int,
+        current_data: Dict[str, Any],
+        tau_max_depth: int = 10,
+        extra_warnings: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Replay a trace with lazy tau firing and backtracking.
+
+        Args:
+            events: All pm4py events of the full trace (or just the prefix when
+                called from the web endpoint with n_prefix == len(events)).
+            n_prefix: Number of leading events that form the observed prefix.
+                Attributes are accumulated only for events[:n_prefix].
+                init_places is the marking snapshot taken after the last
+                prefix event fires.
+            current_data: Parsed current.json dict.
+            tau_max_depth: Maximum tau chain depth for BFS path search.
+            extra_warnings: Optional list prepended to output warnings.
+
+        Returns:
+            Dict with init_places, init_effects, replayed_activities, n_events,
+            warnings, tau_fired, tau_split_count, full_trace_validated.
+
+        Raises:
+            PartialTraceError: If the trace cannot be replayed (unknown activity
+                or backtracking exhausted).
+        """
+        catalog: Dict[str, Any] = current_data.get("attribute_catalog", {})
+        transitions: Dict[str, Any] = current_data.get("transitions", {})
+        graph: Dict[str, Any] = current_data.get("graph", {})
+        metadata: Dict[str, Any] = current_data.get("metadata", {})
+        start_place: str = metadata.get("start_place", "")
+
+        warnings: List[str] = list(extra_warnings or [])
 
         if not events:
             warnings.append("Trace has 0 events: using start place as initial state.")
@@ -92,54 +156,124 @@ class PartialTraceReplayer:
                 "replayed_activities": [],
                 "n_events": 0,
                 "warnings": warnings,
+                "tau_fired": [],
+                "tau_split_count": 0,
+                "full_trace_validated": True,
             }
 
-        # Build graph lookups
         activity_to_node, trans_outputs, silent_inputs, silent_outputs = (
             self._build_graph_lookups(graph)
         )
 
-        # Phase 1: pre-process events
+        # Phase 1 — accumulate attributes from prefix events only
         accumulated_attrs: Dict[str, str] = {}
-        for event in events:
+        for event in events[:n_prefix]:
             self._process_event_attributes(event, catalog, accumulated_attrs, warnings)
 
-        # Phase 2: token replay — marking is a multiset (list) to support AND-splits
+        # Phase 2 — token replay with lazy tau and backtracking
         marking: Set[str] = {start_place}
-        self._fire_silent_transitions(marking, silent_inputs, silent_outputs)
-        replayed: List[str] = []
+        split_stack: List[TauSplitPoint] = []
 
-        for event in events:
-            activity = utils.sanitize_name(str(event.get("concept:name", "")))
+        # Snapshot: marking + replayed + tau_fired captured at the prefix cut
+        snapshot_marking: Optional[Set[str]] = None
+        snapshot_replayed: Optional[List[str]] = None
+        snapshot_tau_fired: Optional[List[str]] = None
+
+        replayed: List[str] = []
+        tau_fired: List[str] = []
+
+        i = 0
+        while i < len(events):
+            activity = utils.sanitize_name(str(events[i].get("concept:name", "")))
             if not activity:
+                i += 1
                 continue
 
             if activity not in activity_to_node:
+                logger.error(
+                    "PartialTraceReplayer: activity '%s' not found in Petri net. "
+                    "Replayed so far: %s | marking: %s",
+                    activity, replayed, sorted(marking),
+                )
                 raise PartialTraceError(
-                    f"Activity '{activity}' not found in the Petri net."
+                    f"Activity '{activity}' not found in the Petri net. "
+                    f"Replayed so far ({len(replayed)}): {replayed}"
                 )
 
             node_id = activity_to_node[activity]
             trans_info = transitions.get(activity, {})
             input_places: List[str] = trans_info.get("input_places", [])
-
-            # Verify every required input token is present in the current marking
             missing = [p for p in input_places if p not in marking]
+
             if missing:
-                raise PartialTraceError(
-                    f"Replay stuck at '{activity}': marking {marking} "
-                    f"does not contain required places {input_places}."
+                paths = self._bfs_tau_paths(
+                    marking, set(missing), silent_inputs, silent_outputs, tau_max_depth
                 )
 
-            # Consume one token per input place, then produce one per output place
+                if not paths:
+                    logger.error(
+                        "PartialTraceReplayer: stuck at '%s', no tau path found. "
+                        "Required: %s | Marking: %s | Missing: %s | "
+                        "Replayed so far (%d): %s",
+                        activity, input_places, sorted(marking), missing,
+                        len(replayed), replayed,
+                    )
+                    marking, i, replayed, tau_fired = self._backtrack(
+                        split_stack, activity, replayed
+                    )
+                    # Invalidate snapshot if we jumped back before the cut
+                    if i < n_prefix:
+                        snapshot_marking = None
+                        snapshot_replayed = None
+                        snapshot_tau_fired = None
+                    continue
+
+                paths.sort(key=lambda p: p.superfluous)
+
+                # Record a split point only when multiple paths exist and none
+                # is uniquely best (i.e. the best still produces superfluous tokens).
+                if len(paths) > 1:
+                    split_stack.append(TauSplitPoint(
+                        event_index=i,
+                        marking_before=copy(marking),
+                        replayed_before=list(replayed),
+                        tau_fired_before=list(tau_fired),
+                        alternatives=paths,
+                        tried_count=0,
+                    ))
+
+                best = paths[0]
+                tau_fired.extend(best.tau_sequence)
+                marking = copy(best.marking_after)
+                # Do not advance i — retry the same activity with the updated marking
+                continue
+
+            # All required tokens present — fire the visible activity
             for p in input_places:
                 marking.remove(p)
             for p in trans_outputs.get(node_id, []):
                 marking.add(p)
             replayed.append(activity)
+            i += 1
 
-            # Fire any enabled silent transitions after each visible firing
-            self._fire_silent_transitions(marking, silent_inputs, silent_outputs)
+            # Capture snapshot immediately after the last prefix event fires
+            if i == n_prefix:
+                snapshot_marking = copy(marking)
+                snapshot_replayed = list(replayed)
+                snapshot_tau_fired = list(tau_fired)
+
+                # Fast path: no tau splits up to the cut → validation not needed
+                if not split_stack:
+                    break
+
+        full_trace_validated = (i >= len(events))
+
+        # If the loop ran to completion without hitting the fast path,
+        # snapshot may already be set; if n_prefix >= len(events), set it now.
+        if snapshot_marking is None:
+            snapshot_marking = copy(marking)
+            snapshot_replayed = list(replayed)
+            snapshot_tau_fired = list(tau_fired)
 
         init_effects = [
             {"attribute": attr, "value": value}
@@ -147,12 +281,134 @@ class PartialTraceReplayer:
         ]
 
         return {
-            "init_places": list(marking),
+            "init_places": list(snapshot_marking),
             "init_effects": init_effects,
-            "replayed_activities": replayed,
-            "n_events": len(events),
+            "replayed_activities": snapshot_replayed,
+            "n_events": n_prefix,
             "warnings": warnings,
+            "tau_fired": snapshot_tau_fired,
+            "tau_split_count": len(split_stack),
+            "full_trace_validated": full_trace_validated,
         }
+
+    # ------------------------------------------------------------------
+    # Tau search
+    # ------------------------------------------------------------------
+
+    def _bfs_tau_paths(
+        self,
+        marking: Set[str],
+        needed: Set[str],
+        silent_inputs: Dict[str, List[str]],
+        silent_outputs: Dict[str, List[str]],
+        max_depth: int,
+    ) -> List[TauPath]:
+        """BFS over tau-reachable markings to find chains that produce all needed places.
+
+        Args:
+            marking: Current marking before any tau is fired.
+            needed: Set of place IDs required by the blocked activity.
+            silent_inputs: tau node_id → list of input place IDs.
+            silent_outputs: tau node_id → list of output place IDs.
+            max_depth: Maximum number of tau transitions in a chain.
+
+        Returns:
+            List of TauPath whose marking_after contains all needed places.
+            Empty if none found within max_depth.
+        """
+        m_orig = frozenset(marking)
+        results: List[TauPath] = []
+        # queue entries: (current_marking_as_set, tau_sequence_so_far)
+        queue: deque = deque([(copy(marking), [])])
+        visited: Set[frozenset] = {m_orig}
+
+        while queue:
+            m, seq = queue.popleft()
+
+            for tau_id, inputs in silent_inputs.items():
+                if not inputs:
+                    continue
+                if tau_id in seq:
+                    continue
+                if not all(p in m for p in inputs):
+                    continue
+                if len(seq) >= max_depth:
+                    continue
+
+                m2 = copy(m)
+                for p in inputs:
+                    m2.remove(p)
+                for p in silent_outputs.get(tau_id, []):
+                    m2.add(p)
+
+                new_seq = seq + [tau_id]
+
+                if needed.issubset(m2):
+                    superfluous = len((m2 - set(m_orig)) - needed)
+                    results.append(TauPath(
+                        tau_sequence=new_seq,
+                        marking_after=m2,
+                        superfluous=superfluous,
+                    ))
+                    # Don't expand further from a goal state
+                    continue
+
+                fs = frozenset(m2)
+                if fs not in visited:
+                    visited.add(fs)
+                    queue.append((m2, new_seq))
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Backtracking
+    # ------------------------------------------------------------------
+
+    def _backtrack(
+        self,
+        split_stack: List[TauSplitPoint],
+        blocked_activity: str,
+        replayed: List[str],
+    ) -> Tuple[Set[str], int, List[str], List[str]]:
+        """Restore the most recent tau split point and advance to its next alternative.
+
+        Exhausted split points are popped from the stack before trying the next.
+
+        Returns:
+            Tuple (restored_marking, event_index, restored_replayed, restored_tau_fired).
+
+        Raises:
+            PartialTraceError: When the entire split stack is exhausted.
+        """
+        while split_stack:
+            split = split_stack[-1]
+            split.tried_count += 1
+
+            if split.tried_count < len(split.alternatives):
+                alt = split.alternatives[split.tried_count]
+                logger.debug(
+                    "PartialTraceReplayer: backtracking to split at event %d, "
+                    "trying alternative %d/%d (superfluous=%d)",
+                    split.event_index,
+                    split.tried_count,
+                    len(split.alternatives) - 1,
+                    alt.superfluous,
+                )
+                restored_tau = list(split.tau_fired_before) + list(alt.tau_sequence)
+                return (
+                    copy(alt.marking_after),
+                    split.event_index,
+                    list(split.replayed_before),
+                    restored_tau,
+                )
+
+            # All alternatives for this split exhausted — pop and try earlier split
+            split_stack.pop()
+
+        raise PartialTraceError(
+            f"Replay stuck at '{blocked_activity}': backtracking exhausted. "
+            f"Replayed so far: {replayed}"
+        )
 
     # ------------------------------------------------------------------
     # Parsing helpers
@@ -160,7 +416,6 @@ class PartialTraceReplayer:
 
     def _parse_csv(self, csv_bytes: bytes, mapping: Dict[str, Optional[str]]):
         """Parse CSV bytes and return the single trace."""
-
         try:
             with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
                 tmp.write(csv_bytes)
@@ -211,27 +466,9 @@ class PartialTraceReplayer:
     # Graph lookups
     # ------------------------------------------------------------------
 
-    def _fire_silent_transitions(
-        self,
-        marking: Set[str],
-        silent_inputs: Dict[str, List[str]],
-        silent_outputs: Dict[str, List[str]],
-    ) -> None:
-        """Fire all enabled silent transitions to fixpoint (BFS)."""
-        changed = True
-        while changed:
-            changed = False
-            for node_id, inputs in silent_inputs.items():
-                if inputs and all(p in marking for p in inputs):
-                    for p in inputs:
-                        marking.remove(p)
-                    for p in silent_outputs.get(node_id, []):
-                        marking.add(p)
-                    changed = True
-
     def _build_graph_lookups(
         self, graph: Dict[str, Any]
-    ) -> tuple[dict[str, str], dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
+    ) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
         """Build activity→node_id, node_id→output_places, and silent transition maps."""
         nodes = graph.get("nodes", [])
         edges = graph.get("edges", [])
@@ -246,11 +483,9 @@ class PartialTraceReplayer:
                 if label:
                     activity_to_node[utils.sanitize_name(label)] = node["id"]
 
-        # Output places for every non-silent transition (visible + and_split)
         trans_outputs: Dict[str, List[str]] = {}
-        # Input→output map for silent transitions (for automatic firing)
-        silent_inputs: Dict[str, List[str]] = {}   # node_id → [input place ids]
-        silent_outputs: Dict[str, List[str]] = {}  # node_id → [output place ids]
+        silent_inputs: Dict[str, List[str]] = {}
+        silent_outputs: Dict[str, List[str]] = {}
 
         for node in nodes:
             if node.get("type") == "silent":
