@@ -96,7 +96,6 @@ def _make_transition_info(input_places=None, output_label=None):
     """Return a minimal TransitionInfo mock."""
     t_info = MagicMock()
     t_info.input_places = input_places or []
-    t_info.attribute_preconditions = []
     t_info.effects = {}
     t_info.effect_groups = []
     t_info.duration = None

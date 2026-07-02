@@ -41,6 +41,8 @@ def _make_cfg(output_dir: Path, **overrides) -> EvalConfig:
         resume=False,
         cost_weight=0.001,
         csv_mapping=None,
+        force_rediscretize=False,
+        force_reanalysis=False,
     )
     defaults.update(overrides)
     return EvalConfig(**defaults)
@@ -315,6 +317,130 @@ class TestEvaluateLogSuccess:
 
 
 # ---------------------------------------------------------------------------
+# evaluate_log — reuse existing Petri net / domain / attributes
+# (current.json, domain.pddl, model_cache.json) unless --force-reanalysis
+# ---------------------------------------------------------------------------
+
+class TestEvaluateLogModelReuse:
+    def _write_existing_model(self, tmp_path, log_id="log_1", n_activities=7):
+        log_dir = tmp_path / log_id
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "domain.pddl").write_text("(define (domain cached))", encoding="utf-8")
+        (log_dir / "current.json").write_text(
+            json.dumps({
+                "transitions": {}, "attribute_catalog": {},
+                "metadata": {"end_place": "p_end"}, "graph": {},
+            }),
+            encoding="utf-8",
+        )
+        (log_dir / "model_cache.json").write_text(
+            json.dumps({"n_activities": n_activities, "variant_effects": {"act_a": {"x": 1}}}),
+            encoding="utf-8",
+        )
+        return log_dir
+
+    def _run(self, tmp_path, cfg_overrides=None, pre_write=True, n_activities=7):
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path, **(cfg_overrides or {}))
+
+        if pre_write:
+            self._write_existing_model(tmp_path, n_activities=n_activities)
+
+        prefix = MagicMock()
+        prefix.prefix_ratio = 0.5
+        prefix.prefix_events = [MagicMock()]
+        prefix.init_places = ["p_start"]
+        prefix.init_effects = []
+        prefix.full_duration_s = 3600.0
+        prefix.prefix_duration_s = 1000.0
+        prefix.final_event_attributes = {}
+
+        q1_spec = MagicMock()
+        q1_spec.query_type = "Q1"
+        q1_spec.init_places = ["p_start"]
+        q1_spec.init_effects = []
+        q1_spec.goal_sop = [[]]
+        q1_spec.metric = "minimize_weighted"
+        q1_spec.cost_weight = 0.001
+        q1_spec.require_completion = True
+        q1_spec.deadline = None
+
+        with (
+            patch("evaluation.run_evaluation._split_log") as mock_split,
+            patch("evaluation.run_evaluation._sample_prefix", return_value=prefix),
+            patch("evaluation.run_evaluation.build_q1", return_value=q1_spec),
+            patch("evaluation.run_evaluation.build_q2", return_value=None),
+            patch("evaluation.run_evaluation.build_q3", return_value=None),
+            patch("evaluation.run_evaluation.q1_metrics", return_value={"solved": True, "weighted_objective": 1.0}),
+            patch("evaluation.run_evaluation.validate_plan") as mock_validate,
+            patch("evaluation.run_evaluation.serialize_parse_result", return_value={
+                "transitions": {}, "attribute_catalog": {},
+                "metadata": {"end_place": "p_end"}, "graph": {},
+            }),
+        ):
+            mock_split.return_value = _make_mock_tts(n_test=1)
+            vr = MagicMock()
+            vr.valid = True
+            vr.attribute_checked = True
+            vr.error_step = None
+            vr.error_action = None
+            vr.error_reason = None
+            vr.steps_executed = 1
+            mock_validate.return_value = vr
+
+            lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
+
+        return lr, api
+
+    def test_reuses_existing_model_when_present(self, tmp_path):
+        lr, api = self._run(tmp_path, n_activities=7)
+        api.parse.assert_not_called()
+        api.build_domain_with_variant_effects.assert_not_called()
+        assert lr.n_activities == 7  # from model_cache.json, not the mocked parse (3)
+
+    def test_reused_run_still_produces_queries(self, tmp_path):
+        lr, _ = self._run(tmp_path, n_activities=7)
+        assert lr.pipeline_ok is True
+        q1_records = [q for q in lr.queries if q.query_type == "Q1"]
+        assert len(q1_records) == 1
+
+    def test_force_reanalysis_rebuilds_even_if_present(self, tmp_path):
+        lr, api = self._run(tmp_path, cfg_overrides={"force_reanalysis": True}, n_activities=7)
+        api.parse.assert_called_once()
+        api.build_domain_with_variant_effects.assert_called_once()
+        assert lr.n_activities == 3  # from the freshly mocked parse result {"a", "b", "c"}
+
+    def test_force_reanalysis_overwrites_cached_files(self, tmp_path):
+        self._run(tmp_path, cfg_overrides={"force_reanalysis": True}, n_activities=7)
+        domain_text = (tmp_path / "log_1" / "domain.pddl").read_text(encoding="utf-8")
+        assert domain_text == "(define (domain test))"  # written by the fresh build, not "cached"
+
+    def test_missing_model_cache_triggers_rebuild(self, tmp_path):
+        # current.json + domain.pddl present but model_cache.json absent — not
+        # enough info (variant_effects/n_activities) to safely skip discovery.
+        log_dir = self._write_existing_model(tmp_path, n_activities=7)
+        (log_dir / "model_cache.json").unlink()
+
+        lr, api = self._run(tmp_path, pre_write=False)
+        api.parse.assert_called_once()
+
+    def test_missing_domain_pddl_triggers_rebuild(self, tmp_path):
+        log_dir = self._write_existing_model(tmp_path, n_activities=7)
+        (log_dir / "domain.pddl").unlink()
+
+        lr, api = self._run(tmp_path, pre_write=False)
+        api.parse.assert_called_once()
+
+    def test_fresh_build_writes_model_cache(self, tmp_path):
+        self._run(tmp_path, pre_write=False)
+        cache_path = tmp_path / "log_1" / "model_cache.json"
+        assert cache_path.exists()
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        assert cache["n_activities"] == 3
+        assert cache["variant_effects"] == {}
+
+
+# ---------------------------------------------------------------------------
 # main — resume behaviour
 # ---------------------------------------------------------------------------
 
@@ -424,6 +550,14 @@ class TestCLIParsing:
     def test_cli_parses_force_download_flag(self):
         args = build_parser().parse_args(["--force-download"])
         assert args.force_download is True
+
+    def test_cli_parses_force_reanalysis_flag(self):
+        args = build_parser().parse_args(["--force-reanalysis"])
+        assert args.force_reanalysis is True
+
+    def test_cli_force_reanalysis_default_false(self):
+        args = build_parser().parse_args([])
+        assert args.force_reanalysis is False
 
     def test_cli_parses_log_ids(self):
         args = build_parser().parse_args(["--log-ids", "1", "5", "12"])

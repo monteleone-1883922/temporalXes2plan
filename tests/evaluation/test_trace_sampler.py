@@ -1,7 +1,7 @@
 """Unit tests for evaluation.trace_sampler."""
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pm4py
 import pytest
@@ -78,9 +78,8 @@ class TestPrefixRatioBounds:
     def test_prefix_ratio_within_bounds(self):
         trace = _make_trace(20)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api,
-                                   min_prefix_pct=0.2, max_prefix_pct=0.8, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api,
+                               min_prefix_pct=0.2, max_prefix_pct=0.8, seed=0)
         assert result is not None
         assert 0.2 <= result.prefix_ratio <= 0.8
 
@@ -88,18 +87,16 @@ class TestPrefixRatioBounds:
         trace = _make_trace(50)
         api = _make_api()
         for seed in range(10):
-            with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-                result = sample_prefix(trace, SERIALIZED, api,
-                                       min_prefix_pct=0.3, max_prefix_pct=0.7, seed=seed)
+            result = sample_prefix(trace, SERIALIZED, api,
+                                   min_prefix_pct=0.3, max_prefix_pct=0.7, seed=seed)
             assert result is not None
             assert 0.3 <= result.prefix_ratio <= 0.7
 
     def test_prefix_ratio_computed_from_actual_event_count(self):
         trace = _make_trace(10)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api,
-                                   min_prefix_pct=0.4, max_prefix_pct=0.6, seed=7)
+        result = sample_prefix(trace, SERIALIZED, api,
+                               min_prefix_pct=0.4, max_prefix_pct=0.6, seed=7)
         assert result is not None
         expected = len(result.prefix_events) / 10
         assert abs(result.prefix_ratio - expected) < 1e-9
@@ -113,8 +110,7 @@ class TestPrefixSuffix:
     def test_suffix_is_complement(self):
         trace = _make_trace(20)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api, seed=0)
         assert result is not None
         combined = result.prefix_events + result.suffix_events
         assert len(combined) == 20
@@ -123,16 +119,14 @@ class TestPrefixSuffix:
         trace = _make_trace(15)
         events = list(trace)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api, seed=42)
+        result = sample_prefix(trace, SERIALIZED, api, seed=42)
         assert result is not None
         assert result.prefix_events + result.suffix_events == events
 
     def test_prefix_not_empty(self):
         trace = _make_trace(10)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api, seed=0)
         assert result is not None
         assert len(result.prefix_events) >= 1
 
@@ -145,9 +139,8 @@ class TestFinalEventAttributes:
     def test_final_event_attributes_from_last_prefix_event(self):
         trace = _make_trace(10, status="discharged", score=42)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api,
-                                   min_prefix_pct=0.9, max_prefix_pct=1.0, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api,
+                               min_prefix_pct=0.9, max_prefix_pct=1.0, seed=0)
         assert result is not None
         # Last event has the custom attrs
         assert result.final_event_attributes.get("status") == "discharged"
@@ -156,16 +149,14 @@ class TestFinalEventAttributes:
     def test_final_event_attributes_excludes_concept_name(self):
         trace = _make_trace(5)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api, seed=0)
         assert result is not None
         assert "concept:name" not in result.final_event_attributes
 
     def test_final_event_attributes_excludes_timestamp(self):
         trace = _make_trace(5, with_timestamps=True)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api, seed=0)
         assert result is not None
         assert "time:timestamp" not in result.final_event_attributes
 
@@ -178,24 +169,15 @@ class TestReturnsNone:
     def test_returns_none_if_trace_too_short(self):
         trace = _make_trace(1)  # only 1 event
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api,
-                                   min_prefix_pct=0.5, max_prefix_pct=0.9,
-                                   min_prefix_events=2)
+        result = sample_prefix(trace, SERIALIZED, api,
+                               min_prefix_pct=0.5, max_prefix_pct=0.9,
+                               min_prefix_events=2)
         assert result is None
 
     def test_returns_none_if_replay_raises(self):
         trace = _make_trace(10)
         api = _make_api(replay_raises=Exception("replay error"))
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api, seed=0)
-        assert result is None
-
-    def test_returns_none_if_serialise_raises(self):
-        trace = _make_trace(10)
-        api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", side_effect=IOError("disk full")):
-            result = sample_prefix(trace, SERIALIZED, api, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api, seed=0)
         assert result is None
 
 
@@ -238,9 +220,8 @@ class TestDurationSeconds:
     def test_duration_in_prefix_sample(self):
         trace = _make_trace(10, with_timestamps=True)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api,
-                                   min_prefix_pct=0.9, max_prefix_pct=1.0, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api,
+                               min_prefix_pct=0.9, max_prefix_pct=1.0, seed=0)
         assert result is not None
         assert result.full_duration_s is not None
         assert result.full_duration_s > 0
@@ -248,8 +229,7 @@ class TestDurationSeconds:
     def test_duration_none_in_prefix_sample_without_timestamps(self):
         trace = _make_trace(10, with_timestamps=False)
         api = _make_api()
-        with patch("evaluation.trace_sampler._trace_to_xes_bytes", return_value=b"<log/>"):
-            result = sample_prefix(trace, SERIALIZED, api, seed=0)
+        result = sample_prefix(trace, SERIALIZED, api, seed=0)
         assert result is not None
         assert result.prefix_duration_s is None
         assert result.full_duration_s is None

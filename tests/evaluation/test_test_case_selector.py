@@ -4,12 +4,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pm4py
-import pytest
 
 from evaluation.test_case_selector import TrainTestSplit, split, _stratified_sample_indices
-
-# Path to a small real XES file available in the test fixtures.
-FIXTURE_XES = Path(__file__).parent.parent / "fixtures" / "partial_trace_sample_clinic.xes"
 
 
 # ---------------------------------------------------------------------------
@@ -215,13 +211,29 @@ class TestContextManager:
 
 
 # ---------------------------------------------------------------------------
-# Integration: real XES file (no mock)
+# Integration: real pm4py read/write round-trip (no mocks)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not FIXTURE_XES.exists(), reason="fixture XES not found")
 class TestSplitWithRealLog:
-    def test_train_path_is_readable_xes(self):
-        s = split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+    """Exercises split() against the real pm4py.read_xes/write_xes (no mocking).
+
+    Uses a synthetic multi-trace log written to a temp XES file rather than
+    the tests/fixtures/partial_trace_sample_clinic.xes fixture: that fixture
+    holds a single trace, so any split with min_test_cases>=1 leaves an empty
+    training set, and the current pm4py/rustxes writer raises on an empty log
+    (`"case:concept:name" not found`) instead of silently writing an empty
+    file.
+    """
+
+    def _make_real_xes(self, tmp_path: Path) -> Path:
+        log = _make_log([5, 4, 6, 3, 5, 4, 6, 3, 5, 4, 6, 3, 5, 4, 6, 3, 2, 2, 2, 2])
+        path = tmp_path / "synthetic.xes"
+        pm4py.write_xes(log, str(path))
+        return path
+
+    def test_train_path_is_readable_xes(self, tmp_path):
+        xes_path = self._make_real_xes(tmp_path)
+        s = split(str(xes_path), log_fmt="xes", test_pct=0.1, min_test_cases=1,
                   max_test_cases=2, seed=0)
         try:
             loaded = pm4py.read_xes(str(s.train_path))
@@ -230,22 +242,25 @@ class TestSplitWithRealLog:
             if s.train_path.exists():
                 s.train_path.unlink()
 
-    def test_context_manager_deletes_train_file(self):
-        with split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+    def test_context_manager_deletes_train_file(self, tmp_path):
+        xes_path = self._make_real_xes(tmp_path)
+        with split(str(xes_path), log_fmt="xes", test_pct=0.1, min_test_cases=1,
                    max_test_cases=2, seed=0) as s:
             path = s.train_path
             assert path.exists()
         assert not path.exists()
 
-    def test_split_sizes_with_real_log(self):
-        with split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+    def test_split_sizes_with_real_log(self, tmp_path):
+        xes_path = self._make_real_xes(tmp_path)
+        with split(str(xes_path), log_fmt="xes", test_pct=0.1, min_test_cases=1,
                    max_test_cases=2, seed=0) as s:
             assert s.n_train + s.n_test > 0
             assert s.n_test <= 2
 
-    def test_test_traces_meet_min_length(self):
+    def test_test_traces_meet_min_length(self, tmp_path):
+        xes_path = self._make_real_xes(tmp_path)
         min_len = 3
-        with split(str(FIXTURE_XES), log_fmt="xes", test_pct=0.1, min_test_cases=1,
+        with split(str(xes_path), log_fmt="xes", test_pct=0.1, min_test_cases=1,
                    max_test_cases=5, seed=0, min_test_trace_length=min_len) as s:
             for trace in s.test_cases:
                 assert len(trace) >= min_len

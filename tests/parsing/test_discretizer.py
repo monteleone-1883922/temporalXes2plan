@@ -118,12 +118,15 @@ class TestClusterResiduals:
         """Setting min_gvf_threshold above the achievable GVF at k=2 must force single bin.
 
         For uniform U(0,1000) Jenks with k=2 achieves GVF ≈ 0.75 (theoretical: 1 - 1/k²).
-        With min_gvf_threshold=0.80 the k=2 result is rejected and a single bin is returned.
+        kmeans_max_k=2 caps the search at k=2 — with higher k allowed, GVF keeps
+        improving (k=3 already reaches ≈0.89) and the threshold would be satisfied,
+        which is not what this test is checking. With min_gvf_threshold=0.80 the
+        k=2 result is rejected and a single bin is returned.
         """
         rng = np.random.default_rng(7)
         residuals = rng.uniform(0.0, 1000.0, 500)
         d = Discretizer(AnalysisConfig(
-            kmeans_max_k=5, min_residual_points=10,
+            kmeans_max_k=2, min_residual_points=10,
             min_gvf_threshold=0.80,   # > 0.75 → k=2 GVF is too low → single bin
         ))
         centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
