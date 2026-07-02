@@ -61,6 +61,7 @@ class EvalConfig:
     resume: bool
     cost_weight: float
     csv_mapping: Optional[Dict[str, Optional[str]]]
+    force_rediscretize: bool
 
 
 # ---------------------------------------------------------------------------
@@ -133,10 +134,13 @@ def evaluate_log(
         # 3. Parse on training data
         logger.debug("[%s] Running discovery (algorithm=%s, coverage=%.4f)", log_id, cfg.algorithm, cfg.coverage)
         try:
+            discretizer_cache = cfg.cache_dir / log_id / "discretizer_cache.json"
             parse_result = api.parse(
                 str(tts.train_path),
                 coverage_percentage=cfg.coverage,
                 discovery_algorithm=cfg.algorithm,
+                discretizer_cache_path=discretizer_cache,
+                force_rediscretize=cfg.force_rediscretize,
             )
         except Exception as exc:
             logger.error(
@@ -413,6 +417,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Re-download log files even if cached.")
     p.add_argument("--resume", action="store_true",
                    help="Skip logs whose result.json already exists.")
+    p.add_argument("--force-rediscretize", dest="force_rediscretize", action="store_true",
+                   help="Ricalcola la discretizzazione ignorando la cache salvata.")
     p.add_argument("--csv-mapping", dest="csv_mapping", type=str, default=None,
                    help="JSON string mapping CSV columns, e.g. '{\"case_id\": \"col_a\"}'.")
     p.add_argument("--log-level", dest="log_level", type=str, default="INFO",
@@ -454,6 +460,7 @@ def main(args: argparse.Namespace) -> None:
         resume=args.resume,
         cost_weight=args.cost_weight,
         csv_mapping=csv_mapping,
+        force_rediscretize=args.force_rediscretize,
     )
 
     selection = get_log_selection(Path(args.metadata), log_ids=cfg.log_ids)

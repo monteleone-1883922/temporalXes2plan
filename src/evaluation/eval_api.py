@@ -176,6 +176,8 @@ class EvalAPI:
         coverage_percentage: float = 0.001,
         discovery_algorithm: str = "inductive",
         use_activity_classifier: bool = False,
+        discretizer_cache_path: Optional[Path] = None,
+        force_rediscretize: bool = False,
     ) -> ParseResult:
         """Run the parsing stage only (Petri net discovery + mining).
 
@@ -185,6 +187,12 @@ class EvalAPI:
             coverage_percentage: Minimum variant coverage for log filtering.
             discovery_algorithm: "inductive" or "heuristic".
             use_activity_classifier: Use concept:name + lifecycle:transition.
+            discretizer_cache_path: Optional path to a JSON file for caching
+                discretizer boundaries. When set, boundaries are loaded from the
+                file if it exists (unless force_rediscretize=True) and saved
+                after computation. Intended for evaluation use only.
+            force_rediscretize: If True, ignore an existing cache and recompute
+                discretizer boundaries from scratch.
 
         Returns:
             ParseResult with Petri net model, transitions, attribute catalog, etc.
@@ -195,6 +203,8 @@ class EvalAPI:
             discovery_algorithm=discovery_algorithm,
             use_activity_classifier=use_activity_classifier,
             config=config,
+            discretizer_cache_path=discretizer_cache_path,
+            force_rediscretize=force_rediscretize,
         )
         return parser.parse_result
 

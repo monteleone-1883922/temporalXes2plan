@@ -19,6 +19,7 @@ downstream steps (pruning, filtering, ParseResult assembly) can access them.
 import json
 import os
 import random
+from pathlib import Path
 from typing import Any, Dict, Optional, Set, List
 
 import numpy as np
@@ -81,6 +82,8 @@ class Parser:
         use_activity_classifier: bool = False,
         config: Optional[AnalysisConfig] = None,
         external_durations: Optional[Dict[str, ExternalDuration]] = None,
+        discretizer_cache_path: Optional[Path] = None,
+        force_rediscretize: bool = False,
     ) -> None:
         """Run the full analysis pipeline up to and including DT mining.
 
@@ -127,7 +130,12 @@ class Parser:
         ]
         logger.info("Starting discretization for %d numerical attributes", len(numeric_attrs))
         discretizer = Discretizer(self.config)
-        discretizer.fit(self.full_log, numeric_attrs)
+        discretizer.fit(
+            self.full_log,
+            numeric_attrs,
+            cache_path=discretizer_cache_path,
+            force=force_rediscretize,
+        )
         self.discretizer = discretizer
         logger.info("Discretization complete: %d attributes discretized",
                     len(discretizer.boundaries))

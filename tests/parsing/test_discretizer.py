@@ -114,6 +114,27 @@ class TestClusterResiduals:
         centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
         assert centers == [pytest.approx(3.0)]
 
+    def test_min_delta_blocks_marginal_improvement(self):
+        """A high min_delta must prevent upgrading from k=1 even when k=2 silhouette > 0."""
+        rng = np.random.default_rng(0)
+        # Mild bimodal: two slightly separated groups — k=2 silhouette will be modest
+        residuals = np.concatenate([rng.normal(10, 2.0, 100), rng.normal(20, 2.0, 100)])
+        # With min_delta=1.0, k=2 silhouette can never beat baseline+1.0 → stays at k=1
+        d_strict = Discretizer(AnalysisConfig(
+            kmeans_max_k=5, kmeans_n_init=3, min_residual_points=10,
+            kmeans_silhouette_min_delta=1.0,
+        ))
+        centers_strict = d_strict._cluster_residuals("x", residuals, d_strict.config, n_dominant=0)
+        assert len(centers_strict) == 1  # k=1 baseline wins
+
+        # With min_delta=0.0, any improvement is accepted → k=2 should win
+        d_loose = Discretizer(AnalysisConfig(
+            kmeans_max_k=5, kmeans_n_init=3, min_residual_points=10,
+            kmeans_silhouette_min_delta=0.0,
+        ))
+        centers_loose = d_loose._cluster_residuals("x", residuals, d_loose.config, n_dominant=0)
+        assert len(centers_loose) >= 2
+
 
 class TestKDEFallback:
     def test_kde_failure_returns_equal_frequency_boundaries(self):

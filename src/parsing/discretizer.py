@@ -1,5 +1,7 @@
+import json
 import numpy as np
 import pm4py
+from pathlib import Path
 from pm4py.objects.log.obj import EventLog
 from scipy.signal import argrelextrema
 from scipy.stats import gaussian_kde
@@ -40,15 +42,34 @@ class Discretizer:
     # Public API
     # ------------------------------------------------------------------
 
-    def fit(self, log: EventLog, numeric_attributes: List[str]) -> None:
+    def fit(
+        self,
+        log: EventLog,
+        numeric_attributes: List[str],
+        cache_path: Optional[Path] = None,
+        force: bool = False,
+    ) -> None:
         """Compute boundaries for every numeric attribute in the log.
 
         Args:
             log: A pm4py EventLog object (full log, not just train split).
             numeric_attributes: Sanitized names of attributes typed as numerical.
+            cache_path: Optional path to a JSON cache file. When provided and the
+                file exists (and force=False), boundaries are loaded from it instead
+                of being recomputed. After computation the boundaries are saved there.
+            force: If True, ignore an existing cache and recompute from scratch.
         """
         if not numeric_attributes:
             logger.info("Discretizer: no numeric attributes to process.")
+            return
+
+        if cache_path is not None and not force and cache_path.exists():
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            self.boundaries = {k: v for k, v in cached.items() if k in numeric_attributes}
+            logger.info(
+                "Discretizer: boundaries loaded from cache %s (%d attrs)",
+                cache_path, len(self.boundaries),
+            )
             return
 
         df = pm4py.convert_to_dataframe(log)
@@ -77,6 +98,11 @@ class Discretizer:
                 logger.info("Discretizer: '%s' → %d bins, boundaries=%s", attr, len(bounds) + 1, bounds)
             else:
                 logger.info("Discretizer: '%s' not discretized (silhouette below threshold or no valid k).", attr)
+
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(self.boundaries), encoding="utf-8")
+            logger.info("Discretizer: boundaries saved to cache %s", cache_path)
 
     def transform_value(self, attr: str, value: Any) -> str:
         """Convert a numeric value to its interval label.
@@ -261,19 +287,19 @@ class Discretizer:
         logger.debug("Discretizer: '%s' Stage 3 k=1 (baseline, silhouette=0.0000)", attr)
 
         for k in range(2, min(max_k_residual, n_unique_res) + 1):
-            for _ in range(KMEANS_RETRY):
+            for i in range(KMEANS_RETRY):
                 km = KMeans(
                     n_clusters=k,
                     init="k-means++",
                     n_init=cfg.kmeans_n_init,
-                    random_state=42,
+                    random_state=42+i,
                 )
                 labels = km.fit_predict(residuals.reshape(-1, 1))
                 if len(np.unique(labels)) < 2:
                     continue
                 score = silhouette_score(residuals.reshape(-1, 1), labels)
                 logger.debug("Discretizer: '%s' Stage 3 k=%d silhouette=%.4f", attr, k, score)
-                if score > best_score:
+                if score > best_score + cfg.kmeans_silhouette_min_delta:
                     best_score = score
                     best_centers = sorted(km.cluster_centers_.flatten().tolist())
 

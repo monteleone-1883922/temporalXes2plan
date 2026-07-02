@@ -472,6 +472,7 @@ class AnalysisConfig:
     # --- Pre-discretization (3-stage pipeline) ---
     kmeans_max_k: int = 5
     kmeans_silhouette_threshold: float = 0.10
+    kmeans_silhouette_min_delta: float = 0.01
     kmeans_n_init: int = 3
     dominance_threshold: float = 0.30
     min_residual_points: int = 50
