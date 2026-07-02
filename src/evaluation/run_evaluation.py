@@ -200,6 +200,9 @@ def evaluate_log(
             serialized = serialize_parse_result(parse_result)
 
             (log_out_dir / "domain.pddl").write_text(domain_text, encoding="utf-8")
+            (log_out_dir / "current.json").write_text(
+                json.dumps(serialized, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
             logger.info(
                 "[%s] Domain built (%d activities, durative=True).", log_id, n_activities
             )

@@ -236,11 +236,11 @@ class Discretizer:
     # ------------------------------------------------------------------
 
     def _cluster_residuals(
-        self,
-        attr: str,
-        residuals: np.ndarray,
-        cfg: AnalysisConfig,
-        n_dominant: int,
+            self,
+            attr: str,
+            residuals: np.ndarray,
+            cfg: AnalysisConfig,
+            n_dominant: int,
     ) -> List[float]:
         """Jenks Natural Breaks on residual values with GVF-based k selection.
 
@@ -253,7 +253,6 @@ class Discretizer:
         Returns:
             List of bin center floats for the residuals.
         """
-
         if len(residuals) < cfg.min_residual_points or len(np.unique(residuals)) < 2:
             if len(residuals) > 0:
                 logger.debug(
@@ -266,62 +265,71 @@ class Discretizer:
         max_k_residual = max(2, cfg.kmeans_max_k - n_dominant)
         n_unique_res = len(np.unique(residuals))
         k_max = min(max_k_residual, n_unique_res)
-        gvf_at_k2 = best_k = best_breaks = None
+
+        # Global best across all retries
+        best_k = 1
+        best_breaks: Optional[List[float]] = None
+        best_gvf: float = 0.0
+        best_found = False
 
         retry_sample_loops = RNG_RETRY if len(residuals) > cfg.jenks_sample_size else 1
         for i in range(retry_sample_loops):
+            if best_found:
+                break
+
             # Stratified sample for Jenks DP (O(n²k) — too slow on large arrays)
             if len(residuals) > cfg.jenks_sample_size:
-                rng = np.random.default_rng(42+i)
+                rng = np.random.default_rng(42 + i)
                 idx = rng.choice(len(residuals), size=cfg.jenks_sample_size, replace=False)
                 sample = np.sort(residuals[idx])
                 logger.debug(
-                    "Discretizer: '%s' Stage 3 — sampling %d/%d points for Jenks",
-                    attr, cfg.jenks_sample_size, len(residuals),
+                    "Discretizer: '%s' Stage 3 — sampling %d/%d points for Jenks (seed=%d)",
+                    attr, cfg.jenks_sample_size, len(residuals), 42 + i,
                 )
             else:
                 sample = residuals
 
-            best_k = 1
-            best_breaks: Optional[List[float]] = None
-            prev_gvf: Optional[float] = None
-            gvf_at_k2: Optional[float] = None
+            # Per-retry state for marginal gain early stop
+            prev_gvf_local: Optional[float] = None
 
             for k in range(2, k_max + 1):
                 try:
                     breaks = jenkspy.jenks_breaks(sample.tolist(), n_classes=k)
                 except Exception as exc:
                     logger.warning(
-                        "Discretizer: '%s' Stage 3 — jenkspy failed at k=%d (%s) — single bin.",
+                        "Discretizer: '%s' Stage 3 — jenkspy failed at k=%d (%s) — stopping k search.",
                         attr, k, exc,
                     )
                     break
 
                 gvf = self._gvf(residuals, breaks)
-                logger.debug("Discretizer: '%s' Stage 3 k=%d GVF=%.4f", attr, k, gvf)
-
-                if gvf_at_k2 is None:
-                    gvf_at_k2 = gvf  # remember first GVF for post-loop quality gate
+                logger.debug("Discretizer: '%s' Stage 3 k=%d GVF=%.4f (retry %d)", attr, k, gvf, i)
 
                 # Early stop a: excellent fit reached
                 if gvf >= cfg.gvf_target:
                     best_k = k
                     best_breaks = breaks
+                    best_gvf = gvf
+                    best_found = True
                     break
 
-                # Early stop b: marginal gain too small — keep k-1
-                if prev_gvf is not None and (gvf - prev_gvf) < cfg.min_gvf_improvement:
+                # Early stop b: marginal gain too small within this retry — stop searching higher k
+                if prev_gvf_local is not None and (gvf - prev_gvf_local) < cfg.min_gvf_improvement:
                     break
 
-                best_k = k
-                best_breaks = breaks
-                prev_gvf = gvf
+                # Update global best if this k is better than anything found so far
+                if gvf > best_gvf:
+                    best_k = k
+                    best_breaks = breaks
+                    best_gvf = gvf
 
-        # Quality gate: if GVF at k=2 was too low, no meaningful structure
-        if best_k == 1 or (gvf_at_k2 is not None and gvf_at_k2 < cfg.min_gvf_threshold):
+                prev_gvf_local = gvf
+
+        # Quality gate: best partition must explain enough variance
+        if best_k == 1 or best_breaks is None or best_gvf < cfg.min_gvf_threshold:
             logger.debug(
-                "Discretizer: '%s' Stage 3 — GVF at k=2 (%.4f) below threshold %.2f → single bin.",
-                attr, gvf_at_k2 if gvf_at_k2 is not None else 0.0, cfg.min_gvf_threshold,
+                "Discretizer: '%s' Stage 3 — best GVF (%.4f at k=%d) below threshold %.2f → single bin.",
+                attr, best_gvf, best_k, cfg.min_gvf_threshold,
             )
             return [float(residuals.mean())]
 
