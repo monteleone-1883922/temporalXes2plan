@@ -20,3 +20,4 @@ dependencies:
     - scipy
     - rustxes
     - jenkspy==0.4.1
+    - flask

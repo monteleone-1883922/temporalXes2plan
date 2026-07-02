@@ -2,9 +2,9 @@
 
 Converts a pm4py Trace into a PrefixSample by:
 1. Sampling a random prefix percentage in [min_prefix_pct, max_prefix_pct].
-2. Serialising the prefix events to XES bytes in memory.
-3. Calling EvalAPI.replay_trace() to derive the init state from the prefix.
-4. Computing prefix and full-trace durations from timestamps when available.
+2. Calling EvalAPI.replay_trace() with the full trace + n_prefix to derive
+   the init state using tau-aware backtracking replay.
+3. Computing prefix and full-trace durations from timestamps when available.
 
 Returns None when the trace is too short to produce a meaningful prefix or
 when replay fails (non-blocking failure).
@@ -12,17 +12,13 @@ when replay fails (non-blocking failure).
 
 from __future__ import annotations
 
-import io
 import logging
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import pm4py
-
 from evaluation.eval_api import EvalAPI
-import tempfile, pathlib
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +62,7 @@ def sample_prefix(
     max_prefix_pct: float = 0.8,
     seed: Optional[int] = None,
     min_prefix_events: int = 1,
+    tau_max_depth: int = 10,
 ) -> Optional[PrefixSample]:
     """Sample a random prefix from a trace and derive its init state via replay.
 
@@ -78,6 +75,7 @@ def sample_prefix(
         seed: Optional random seed for reproducibility.
         min_prefix_events: Minimum number of events required in the prefix.
             Returns None if the prefix would be shorter.
+        tau_max_depth: Maximum tau chain depth for BFS search during replay.
 
     Returns:
         PrefixSample on success, or None if the trace is too short or replay
@@ -102,13 +100,7 @@ def sample_prefix(
     prefix_ratio = n_prefix / n
 
     try:
-        xes_bytes = _trace_to_xes_bytes(trace, n_prefix)
-    except Exception as exc:
-        logger.warning("Failed to serialise prefix to XES: %s", exc)
-        return None
-
-    try:
-        replay = api.replay_trace(xes_bytes, serialized, fmt="xes")
+        replay = api.replay_trace(trace, serialized, n_prefix=n_prefix, tau_max_depth=tau_max_depth)
     except Exception as exc:
         logger.warning("Replay failed: %s", exc)
         return None
@@ -133,39 +125,6 @@ def sample_prefix(
 
 # ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
-
-def _trace_to_xes_bytes(trace: Any, n_prefix: int) -> bytes:
-    """Serialise the first n_prefix events of a trace to XES bytes in memory.
-
-    Args:
-        trace: pm4py Trace object.
-        n_prefix: Number of leading events to include.
-
-    Returns:
-        Raw XES file contents as bytes.
-    """
-    prefix_trace = pm4py.objects.log.obj.Trace(
-        list(trace)[:n_prefix],
-        attributes=dict(trace.attributes),
-    )
-    mini_log = pm4py.objects.log.obj.EventLog(
-        [prefix_trace],
-        attributes=getattr(trace, "_log_attributes", {}),
-    )
-
-    buf = io.BytesIO()
-    # pm4py write_xes accepts a file path; use a temp file and read it back.
-
-    with tempfile.NamedTemporaryFile(suffix=".xes", delete=False) as f:
-        tmp = pathlib.Path(f.name)
-    try:
-        pm4py.write_xes(mini_log, str(tmp))
-        buf = tmp.read_bytes()
-    finally:
-        if tmp.exists():
-            tmp.unlink()
-    return buf
 
 
 def _duration_seconds(events: List[Any]) -> Optional[float]:

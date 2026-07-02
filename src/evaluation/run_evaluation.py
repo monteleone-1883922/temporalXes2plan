@@ -31,8 +31,13 @@ from evaluation.report_generator import (
     LogResult, QueryResult, write_log_result, write_cross_log_summary,
 )
 from web.serializer import serialize_parse_result
+from encoding.graph_updater import save_original_and_current
 
 logger = logging.getLogger(__name__)
+
+# Same directory web.app.DEFAULT_DATA_DIR resolves to (PROJECT_ROOT/data) —
+# publishing evaluation results here makes them visible in the Petri net editor.
+WEB_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +76,8 @@ class EvalConfig:
     gvf_target: float = 0.90
     min_gvf_improvement: float = 0.01
     jenks_sample_size: int = 20000
+    # Replay params
+    tau_max_depth: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +214,17 @@ def evaluate_log(
                 "[%s] Domain built (%d activities, durative=True).", log_id, n_activities
             )
 
+            # Also publish into the web UI's data directory so the network can be
+            # inspected via the Petri net editor (web.app reads DATA_DIR/<config_name>/).
+            web_config_dir = WEB_DATA_DIR / log_id
+            orig_written, curr_written = save_original_and_current(
+                str(web_config_dir), serialized
+            )
+            logger.info(
+                "[%s] Web UI data published at %s (original=%s, current=%s).",
+                log_id, web_config_dir, orig_written, curr_written,
+            )
+
             # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
             query_results: List[QueryResult] = []
             for trace in tts.test_cases:
@@ -216,6 +234,7 @@ def evaluate_log(
                     min_prefix_pct=cfg.min_prefix_pct,
                     max_prefix_pct=cfg.max_prefix_pct,
                     seed=cfg.seed,
+                    tau_max_depth=cfg.tau_max_depth,
                 )
                 if prefix is None:
                     logger.warning("[%s] %s: prefix sampling failed — skipping trace.", log_id, trace_id)
@@ -466,6 +485,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Stage 3: stop incrementing k when marginal GVF gain falls below this.")
     p.add_argument("--jenks-sample-size", dest="jenks_sample_size", type=int, default=20000,
                    help="Stage 3: max points for Jenks DP; larger arrays are sampled.")
+    p.add_argument("--tau-max-depth", dest="tau_max_depth", type=int, default=10,
+                   help="Maximum tau chain depth for BFS search during trace replay.")
     p.add_argument("--csv-mapping", dest="csv_mapping", type=str, default=None,
                    help="JSON string mapping CSV columns, e.g. '{\"case_id\": \"col_a\"}'.")
     p.add_argument("--log-level", dest="log_level", type=str, default="INFO",
@@ -515,6 +536,7 @@ def main(args: argparse.Namespace) -> None:
         gvf_target=args.gvf_target,
         min_gvf_improvement=args.min_gvf_improvement,
         jenks_sample_size=args.jenks_sample_size,
+        tau_max_depth=args.tau_max_depth,
     )
 
     selection = get_log_selection(Path(args.metadata), log_ids=cfg.log_ids)

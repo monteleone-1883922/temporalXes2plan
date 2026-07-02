@@ -24,7 +24,7 @@ Example::
 """
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -77,6 +77,9 @@ class ReplayResult:
     replayed_activities: List[str]
     n_events: int
     warnings: List[str]
+    tau_fired: List[str] = field(default_factory=list)
+    tau_split_count: int = 0
+    full_trace_validated: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -358,18 +361,65 @@ class EvalAPI:
 
     def replay_trace(
         self,
+        trace: Any,
+        serialized: Dict[str, Any],
+        n_prefix: Optional[int] = None,
+        tau_max_depth: int = 10,
+    ) -> ReplayResult:
+        """Replay a trace against a serialized Petri net.
+
+        Args:
+            trace: pm4py Trace object (full trace).
+            serialized: Dict in current.json format.
+            n_prefix: Number of leading events forming the observed prefix.
+                Attributes and init_places are derived up to this point.
+                Defaults to len(trace) (treat full trace as prefix).
+            tau_max_depth: Maximum tau chain depth for BFS search.
+
+        Returns:
+            ReplayResult with derived init state.
+
+        Raises:
+            PartialTraceError: If the trace cannot be replayed.
+        """
+        events = list(trace)
+        if n_prefix is None:
+            n_prefix = len(events)
+        raw = PartialTraceReplayer().replay_with_full_trace(
+            events=events,
+            n_prefix=n_prefix,
+            current_data=serialized,
+            tau_max_depth=tau_max_depth,
+        )
+        return ReplayResult(
+            init_places=raw["init_places"],
+            init_effects=raw["init_effects"],
+            replayed_activities=raw["replayed_activities"],
+            n_events=raw["n_events"],
+            warnings=raw["warnings"],
+            tau_fired=raw["tau_fired"],
+            tau_split_count=raw["tau_split_count"],
+            full_trace_validated=raw["full_trace_validated"],
+        )
+
+    def replay_trace_from_bytes(
+        self,
         trace_bytes: bytes,
         serialized: Dict[str, Any],
         fmt: str = "xes",
         mapping: Optional[Dict[str, Optional[str]]] = None,
+        tau_max_depth: int = 10,
     ) -> ReplayResult:
-        """Replay a partial trace against a serialized Petri net.
+        """Replay a trace from raw bytes (web API entry point).
+
+        The entire trace is treated as the prefix.
 
         Args:
             trace_bytes: Raw bytes of the XES or CSV trace file.
             serialized: Dict in current.json format.
             fmt: "xes" or "csv".
             mapping: Column mapping required when fmt="csv".
+            tau_max_depth: Maximum tau chain depth for BFS search.
 
         Returns:
             ReplayResult with derived init state.
@@ -382,6 +432,7 @@ class EvalAPI:
             current_data=serialized,
             fmt=fmt,
             mapping=mapping,
+            tau_max_depth=tau_max_depth,
         )
         return ReplayResult(
             init_places=raw["init_places"],
@@ -389,4 +440,7 @@ class EvalAPI:
             replayed_activities=raw["replayed_activities"],
             n_events=raw["n_events"],
             warnings=raw["warnings"],
+            tau_fired=raw["tau_fired"],
+            tau_split_count=raw["tau_split_count"],
+            full_trace_validated=raw["full_trace_validated"],
         )
