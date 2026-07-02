@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from evaluation.eval_api import EvalAPI
+from models import AnalysisConfig
 from evaluation.test_case_selector import split as _split_log
 from evaluation.trace_sampler import sample_prefix as _sample_prefix
 from evaluation.query_builder import build_q1, build_q2, build_q3, is_q3_reachable, QuerySpec
@@ -62,6 +63,14 @@ class EvalConfig:
     cost_weight: float
     csv_mapping: Optional[Dict[str, Optional[str]]]
     force_rediscretize: bool
+    # Discretizer (Stage 1–3) params — mapped to AnalysisConfig
+    kmeans_max_k: int = 5
+    dominance_threshold: float = 0.30
+    min_residual_points: int = 50
+    min_gvf_threshold: float = 0.70
+    gvf_target: float = 0.90
+    min_gvf_improvement: float = 0.01
+    jenks_sample_size: int = 20000
 
 
 # ---------------------------------------------------------------------------
@@ -94,151 +103,171 @@ def evaluate_log(
     log_out_dir = output_dir / log_id
     failures_dir = log_out_dir / "failures"
 
-    # 1. Validate timestamps
-    logger.debug("[%s] Validating log: path=%s fmt=%s", log_id, log_path, log_fmt)
+    log_out_dir.mkdir(parents=True, exist_ok=True)
+    _log_handler = logging.FileHandler(log_out_dir / "eval.log", encoding="utf-8")
+    _log_handler.setLevel(logging.DEBUG)
+    _log_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(name)-30s %(message)s"
+    ))
+    logging.getLogger().addHandler(_log_handler)
     try:
-        vr = api.validate_log(str(log_path), mapping=cfg.csv_mapping)
-    except Exception as exc:
-        logger.error(
-            "[%s] validate_log failed (path=%s, fmt=%s): %s",
-            log_id, log_path, log_fmt, exc, exc_info=True,
-        )
-        return LogResult(
-            log_id=log_id, log_name=log_name, log_fmt=log_fmt,
-            n_train_cases=0, n_test_cases=0, n_activities=0,
-            pipeline_ok=False, pipeline_error=str(exc),
-        )
-
-    if vr.missing_timestamp:
-        logger.error("[%s] Log has missing timestamps — skipping.", log_id)
-        return LogResult(
-            log_id=log_id, log_name=log_name, log_fmt=log_fmt,
-            n_train_cases=0, n_test_cases=0, n_activities=0,
-            pipeline_ok=False, pipeline_error="missing_timestamps",
-        )
-
-    # 2. Train/test split
-    logger.debug("[%s] Splitting log (test_pct=%.2f, max_test=%d)", log_id, cfg.test_pct, cfg.max_test_cases)
-    tts = _split_log(
-        str(log_path), log_fmt,
-        test_pct=cfg.test_pct,
-        min_test_cases=cfg.min_test_cases,
-        max_test_cases=cfg.max_test_cases,
-        seed=cfg.seed,
-        mapping=cfg.csv_mapping,
-    )
-
-    with tts:
-        logger.info("[%s] Split done — train=%d test=%d", log_id, tts.n_train, tts.n_test)
-
-        # 3. Parse on training data
-        logger.debug("[%s] Running discovery (algorithm=%s, coverage=%.4f)", log_id, cfg.algorithm, cfg.coverage)
+        # 1. Validate timestamps
+        logger.debug("[%s] Validating log: path=%s fmt=%s", log_id, log_path, log_fmt)
         try:
-            discretizer_cache = cfg.cache_dir / log_id / "discretizer_cache.json"
-            parse_result = api.parse(
-                str(tts.train_path),
-                coverage_percentage=cfg.coverage,
-                discovery_algorithm=cfg.algorithm,
-                discretizer_cache_path=discretizer_cache,
-                force_rediscretize=cfg.force_rediscretize,
-            )
+            vr = api.validate_log(str(log_path), mapping=cfg.csv_mapping)
         except Exception as exc:
             logger.error(
-                "[%s] parse failed (algorithm=%s, train_path=%s): %s",
-                log_id, cfg.algorithm, tts.train_path, exc, exc_info=True,
+                "[%s] validate_log failed (path=%s, fmt=%s): %s",
+                log_id, log_path, log_fmt, exc, exc_info=True,
             )
             return LogResult(
                 log_id=log_id, log_name=log_name, log_fmt=log_fmt,
-                n_train_cases=tts.n_train, n_test_cases=tts.n_test, n_activities=0,
+                n_train_cases=0, n_test_cases=0, n_activities=0,
                 pipeline_ok=False, pipeline_error=str(exc),
             )
 
-        n_activities = len(parse_result.petri_net_model.activities)
-
-        # 4. Build domain (durative + costs required for weighted metric)
-        try:
-            domain_text, variant_effects = api.build_domain_with_variant_effects(
-                parse_result, use_durative=True, use_costs=True
-            )
-        except Exception as exc:
-            logger.error("[%s] build_domain failed: %s", log_id, exc, exc_info=True)
+        if vr.missing_timestamp:
+            logger.error("[%s] Log has missing timestamps — skipping.", log_id)
             return LogResult(
                 log_id=log_id, log_name=log_name, log_fmt=log_fmt,
-                n_train_cases=tts.n_train, n_test_cases=tts.n_test,
+                n_train_cases=0, n_test_cases=0, n_activities=0,
+                pipeline_ok=False, pipeline_error="missing_timestamps",
+            )
+
+        # 2. Train/test split
+        logger.debug("[%s] Splitting log (test_pct=%.2f, max_test=%d)", log_id, cfg.test_pct, cfg.max_test_cases)
+        tts = _split_log(
+            str(log_path), log_fmt,
+            test_pct=cfg.test_pct,
+            min_test_cases=cfg.min_test_cases,
+            max_test_cases=cfg.max_test_cases,
+            seed=cfg.seed,
+            mapping=cfg.csv_mapping,
+        )
+
+        with tts:
+            logger.info("[%s] Split done — train=%d test=%d", log_id, tts.n_train, tts.n_test)
+
+            # 3. Parse on training data
+            logger.debug("[%s] Running discovery (algorithm=%s, coverage=%.4f)", log_id, cfg.algorithm, cfg.coverage)
+            try:
+                discretizer_cache = log_out_dir / "discretizer_cache.json"
+                analysis_cfg = AnalysisConfig(
+                    kmeans_max_k=cfg.kmeans_max_k,
+                    dominance_threshold=cfg.dominance_threshold,
+                    min_residual_points=cfg.min_residual_points,
+                    min_gvf_threshold=cfg.min_gvf_threshold,
+                    gvf_target=cfg.gvf_target,
+                    min_gvf_improvement=cfg.min_gvf_improvement,
+                    jenks_sample_size=cfg.jenks_sample_size,
+                )
+                parse_result = api.parse(
+                    str(tts.train_path),
+                    config=analysis_cfg,
+                    coverage_percentage=cfg.coverage,
+                    discovery_algorithm=cfg.algorithm,
+                    discretizer_cache_path=discretizer_cache,
+                    force_rediscretize=cfg.force_rediscretize,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[%s] parse failed (algorithm=%s, train_path=%s): %s",
+                    log_id, cfg.algorithm, tts.train_path, exc, exc_info=True,
+                )
+                return LogResult(
+                    log_id=log_id, log_name=log_name, log_fmt=log_fmt,
+                    n_train_cases=tts.n_train, n_test_cases=tts.n_test, n_activities=0,
+                    pipeline_ok=False, pipeline_error=str(exc),
+                )
+
+            n_activities = len(parse_result.petri_net_model.activities)
+
+            # 4. Build domain (durative + costs required for weighted metric)
+            try:
+                domain_text, variant_effects = api.build_domain_with_variant_effects(
+                    parse_result, use_durative=True, use_costs=True
+                )
+            except Exception as exc:
+                logger.error("[%s] build_domain failed: %s", log_id, exc, exc_info=True)
+                return LogResult(
+                    log_id=log_id, log_name=log_name, log_fmt=log_fmt,
+                    n_train_cases=tts.n_train, n_test_cases=tts.n_test,
+                    n_activities=n_activities,
+                    pipeline_ok=False, pipeline_error=str(exc),
+                )
+
+            # 5. Serialize Petri net for downstream modules
+            serialized = serialize_parse_result(parse_result)
+
+            (log_out_dir / "domain.pddl").write_text(domain_text, encoding="utf-8")
+            logger.info(
+                "[%s] Domain built (%d activities, durative=True).", log_id, n_activities
+            )
+
+            # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
+            query_results: List[QueryResult] = []
+            for trace in tts.test_cases:
+                trace_id = str(trace.attributes.get("concept:name", "unknown")).replace(" ", "_")
+                prefix = _sample_prefix(
+                    trace, serialized, api,
+                    min_prefix_pct=cfg.min_prefix_pct,
+                    max_prefix_pct=cfg.max_prefix_pct,
+                    seed=cfg.seed,
+                )
+                if prefix is None:
+                    logger.warning("[%s] %s: prefix sampling failed — skipping trace.", log_id, trace_id)
+                    continue
+
+                # Q1 — process completion, no deadline
+                q1_spec = build_q1(prefix, cfg.cost_weight)
+                query_results.append(
+                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
+                )
+
+                # Q2 — completion within remaining time budget
+                q2_spec = build_q2(prefix, cfg.cost_weight)
+                if q2_spec is not None:
+                    query_results.append(
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
+                    )
+
+                # Q3 — completion within budget + attribute constraints
+                q3_spec = build_q3(prefix, serialized, cfg.cost_weight)
+                if q3_spec is not None:
+                    query_results.append(
+                        _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
+                    )
+                else:
+                    query_id = f"{log_id}_{trace_id}_Q3"
+                    logger.warning("[%s] %s Q3 skipped — no discretized attributes.", log_id, trace_id)
+                    query_results.append(QueryResult(
+                        query_id=query_id,
+                        query_type="Q3",
+                        trace_id=trace_id,
+                        prefix_ratio=prefix.prefix_ratio,
+                        n_prefix_events=len(prefix.prefix_events),
+                        attempts=0,
+                        solvability="skipped_no_attributes",
+                        planner_duration_s=None,
+                        metrics={},
+                        validation=None,
+                    ))
+
+            logger.info("[%s] Done — %d queries.", log_id, len(query_results))
+            return LogResult(
+                log_id=log_id,
+                log_name=log_name,
+                log_fmt=log_fmt,
+                n_train_cases=tts.n_train,
+                n_test_cases=tts.n_test,
                 n_activities=n_activities,
-                pipeline_ok=False, pipeline_error=str(exc),
+                pipeline_ok=True,
+                pipeline_error=None,
+                queries=query_results,
             )
-
-        # 5. Serialize Petri net for downstream modules
-        serialized = serialize_parse_result(parse_result)
-
-        log_out_dir.mkdir(parents=True, exist_ok=True)
-        (log_out_dir / "domain.pddl").write_text(domain_text, encoding="utf-8")
-        logger.info(
-            "[%s] Domain built (%d activities, durative=True).", log_id, n_activities
-        )
-
-        # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
-        query_results: List[QueryResult] = []
-        for trace in tts.test_cases:
-            trace_id = str(trace.attributes.get("concept:name", "unknown")).replace(" ", "_")
-            prefix = _sample_prefix(
-                trace, serialized, api,
-                min_prefix_pct=cfg.min_prefix_pct,
-                max_prefix_pct=cfg.max_prefix_pct,
-                seed=cfg.seed,
-            )
-            if prefix is None:
-                logger.warning("[%s] %s: prefix sampling failed — skipping trace.", log_id, trace_id)
-                continue
-
-            # Q1 — process completion, no deadline
-            q1_spec = build_q1(prefix, cfg.cost_weight)
-            query_results.append(
-                _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
-            )
-
-            # Q2 — completion within remaining time budget
-            q2_spec = build_q2(prefix, cfg.cost_weight)
-            if q2_spec is not None:
-                query_results.append(
-                    _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
-                )
-
-            # Q3 — completion within budget + attribute constraints
-            q3_spec = build_q3(prefix, serialized, cfg.cost_weight)
-            if q3_spec is not None:
-                query_results.append(
-                    _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
-                )
-            else:
-                query_id = f"{log_id}_{trace_id}_Q3"
-                logger.warning("[%s] %s Q3 skipped — no discretized attributes.", log_id, trace_id)
-                query_results.append(QueryResult(
-                    query_id=query_id,
-                    query_type="Q3",
-                    trace_id=trace_id,
-                    prefix_ratio=prefix.prefix_ratio,
-                    n_prefix_events=len(prefix.prefix_events),
-                    attempts=0,
-                    solvability="skipped_no_attributes",
-                    planner_duration_s=None,
-                    metrics={},
-                    validation=None,
-                ))
-
-        logger.info("[%s] Done — %d queries.", log_id, len(query_results))
-        return LogResult(
-            log_id=log_id,
-            log_name=log_name,
-            log_fmt=log_fmt,
-            n_train_cases=tts.n_train,
-            n_test_cases=tts.n_test,
-            n_activities=n_activities,
-            pipeline_ok=True,
-            pipeline_error=None,
-            queries=query_results,
-        )
+    finally:
+        logging.getLogger().removeHandler(_log_handler)
+        _log_handler.close()
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +448,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip logs whose result.json already exists.")
     p.add_argument("--force-rediscretize", dest="force_rediscretize", action="store_true",
                    help="Ricalcola la discretizzazione ignorando la cache salvata.")
+    # Discretizer params
+    p.add_argument("--kmeans-max-k", dest="kmeans_max_k", type=int, default=5,
+                   help="Stage 1 threshold (few unique values) and max-k cap for Stage 3 Jenks.")
+    p.add_argument("--dominance-threshold", dest="dominance_threshold", type=float, default=0.30,
+                   help="Stage 2: minimum mass fraction for a KDE region to be dominant.")
+    p.add_argument("--min-residual-points", dest="min_residual_points", type=int, default=50,
+                   help="Stage 3: minimum residual points required to attempt Jenks (else single bin).")
+    p.add_argument("--min-gvf-threshold", dest="min_gvf_threshold", type=float, default=0.70,
+                   help="Stage 3: GVF at k=2 below this forces single bin (no structure).")
+    p.add_argument("--gvf-target", dest="gvf_target", type=float, default=0.90,
+                   help="Stage 3: GVF early-stop target — accept k once GVF exceeds this.")
+    p.add_argument("--min-gvf-improvement", dest="min_gvf_improvement", type=float, default=0.01,
+                   help="Stage 3: stop incrementing k when marginal GVF gain falls below this.")
+    p.add_argument("--jenks-sample-size", dest="jenks_sample_size", type=int, default=20000,
+                   help="Stage 3: max points for Jenks DP; larger arrays are sampled.")
     p.add_argument("--csv-mapping", dest="csv_mapping", type=str, default=None,
                    help="JSON string mapping CSV columns, e.g. '{\"case_id\": \"col_a\"}'.")
     p.add_argument("--log-level", dest="log_level", type=str, default="INFO",
@@ -461,6 +505,13 @@ def main(args: argparse.Namespace) -> None:
         cost_weight=args.cost_weight,
         csv_mapping=csv_mapping,
         force_rediscretize=args.force_rediscretize,
+        kmeans_max_k=args.kmeans_max_k,
+        dominance_threshold=args.dominance_threshold,
+        min_residual_points=args.min_residual_points,
+        min_gvf_threshold=args.min_gvf_threshold,
+        gvf_target=args.gvf_target,
+        min_gvf_improvement=args.min_gvf_improvement,
+        jenks_sample_size=args.jenks_sample_size,
     )
 
     selection = get_log_selection(Path(args.metadata), log_ids=cfg.log_ids)
