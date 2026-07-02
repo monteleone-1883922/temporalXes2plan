@@ -193,11 +193,11 @@
                 </div>
             </details>
 
-            <!-- k-means++ -->
+            <!-- Jenks Natural Breaks Discretization -->
             <details class="setup-section">
                 <summary class="setup-section-header">
                     <i class="bi bi-distribute-horizontal"></i>
-                    <span>k-means++ Discretization</span>
+                    <span>Jenks Natural Breaks Discretization</span>
                     <i class="bi bi-chevron-down setup-chevron"></i>
                 </summary>
                 <div class="setup-section-body">
@@ -208,19 +208,24 @@
                                    value="5" min="2" max="20">
                         </div>
                         <div class="form-field">
-                            <label for="c-kmeans_min_cluster_fraction">kmeans_min_cluster_fraction</label>
-                            <input type="number" id="c-kmeans_min_cluster_fraction" name="kmeans_min_cluster_fraction"
-                                   value="0.05" min="0" max="1" step="0.01">
+                            <label for="c-min_gvf_threshold">min_gvf_threshold</label>
+                            <input type="number" id="c-min_gvf_threshold" name="min_gvf_threshold"
+                                   value="0.70" min="0" max="1" step="0.01">
                         </div>
                         <div class="form-field">
-                            <label for="c-kmeans_silhouette_threshold">kmeans_silhouette_threshold</label>
-                            <input type="number" id="c-kmeans_silhouette_threshold" name="kmeans_silhouette_threshold"
-                                   value="0.10" min="0" max="1" step="0.01">
+                            <label for="c-gvf_target">gvf_target</label>
+                            <input type="number" id="c-gvf_target" name="gvf_target"
+                                   value="0.90" min="0" max="1" step="0.01">
                         </div>
                         <div class="form-field">
-                            <label for="c-kmeans_n_init">kmeans_n_init</label>
-                            <input type="number" id="c-kmeans_n_init" name="kmeans_n_init"
-                                   value="10" min="1">
+                            <label for="c-min_gvf_improvement">min_gvf_improvement</label>
+                            <input type="number" id="c-min_gvf_improvement" name="min_gvf_improvement"
+                                   value="0.01" min="0" max="1" step="0.001">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-jenks_sample_size">jenks_sample_size</label>
+                            <input type="number" id="c-jenks_sample_size" name="jenks_sample_size"
+                                   value="20000" min="1000" step="1000">
                         </div>
                     </div>
                 </div>

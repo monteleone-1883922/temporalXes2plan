@@ -107,8 +107,8 @@ function buildRequestBody(form) {
     const numericFields = [
         "dt_min_samples", "dt_min_accuracy", "dt_max_depth",
         "probability_min_samples",
-        "kmeans_max_k", "kmeans_min_cluster_fraction",
-        "kmeans_silhouette_threshold", "kmeans_n_init",
+        "kmeans_max_k",
+        "min_gvf_threshold", "gvf_target", "min_gvf_improvement", "jenks_sample_size",
         "dt_prune_min_leaf_samples", "dt_prune_min_purity",
         "xor_prune_threshold",
         "effect_never_threshold", "effect_always_threshold",

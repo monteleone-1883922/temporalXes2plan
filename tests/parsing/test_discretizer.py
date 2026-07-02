@@ -48,7 +48,7 @@ def _tiny_cluster_log():
 class TestDiscretizerFit:
     def test_fit_produces_boundaries_for_discriminant_attribute(self):
         """A clearly bimodal distribution must yield at least one boundary."""
-        d = Discretizer(AnalysisConfig(kmeans_silhouette_threshold=0.05))
+        d = Discretizer()
         d.fit(_bimodal_log(), numeric_attributes=["crp"])
         assert "crp" in d.boundaries
         assert len(d.boundaries["crp"]) >= 1
@@ -70,7 +70,7 @@ class TestDiscretizerFit:
         d = Discretizer(cfg)
         d.fit(_tiny_cluster_log(), numeric_attributes=["crp"])
         # With a dominant region at ~5.0 and residuals at ~200.0, we expect
-        # either a boundary separating them or no discretization if silhouette fails.
+        # either a boundary separating them or no discretization if GVF fails.
         # Either outcome is valid; we just verify no crash and correct type.
         if "crp" in d.boundaries:
             assert isinstance(d.boundaries["crp"], list)
@@ -91,7 +91,7 @@ class TestDiscretizerFit:
 
 class TestClusterResiduals:
     def test_always_returns_at_least_one_center_for_valid_input(self):
-        """k=1 baseline ensures _cluster_residuals never returns [] for sufficient input."""
+        """Single-bin fallback ensures _cluster_residuals never returns [] for sufficient input."""
         d = Discretizer(AnalysisConfig(min_residual_points=10))
         rng = np.random.default_rng(0)
         residuals = rng.uniform(0, 100, 200)
@@ -100,7 +100,7 @@ class TestClusterResiduals:
 
     def test_bimodal_residuals_return_multiple_centers(self):
         """Clearly bimodal residuals should produce at least 2 centers."""
-        d = Discretizer(AnalysisConfig(kmeans_max_k=5, kmeans_n_init=3, min_residual_points=10))
+        d = Discretizer(AnalysisConfig(kmeans_max_k=5, min_residual_points=10))
         rng = np.random.default_rng(42)
         residuals = np.concatenate([rng.normal(10, 0.3, 100), rng.normal(90, 0.3, 100)])
         centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
@@ -114,26 +114,66 @@ class TestClusterResiduals:
         centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
         assert centers == [pytest.approx(3.0)]
 
-    def test_min_delta_blocks_marginal_improvement(self):
-        """A high min_delta must prevent upgrading from k=1 even when k=2 silhouette > 0."""
-        rng = np.random.default_rng(0)
-        # Mild bimodal: two slightly separated groups — k=2 silhouette will be modest
-        residuals = np.concatenate([rng.normal(10, 2.0, 100), rng.normal(20, 2.0, 100)])
-        # With min_delta=1.0, k=2 silhouette can never beat baseline+1.0 → stays at k=1
-        d_strict = Discretizer(AnalysisConfig(
-            kmeans_max_k=5, kmeans_n_init=3, min_residual_points=10,
-            kmeans_silhouette_min_delta=1.0,
-        ))
-        centers_strict = d_strict._cluster_residuals("x", residuals, d_strict.config, n_dominant=0)
-        assert len(centers_strict) == 1  # k=1 baseline wins
+    def test_high_gvf_threshold_forces_single_bin(self):
+        """Setting min_gvf_threshold above the achievable GVF at k=2 must force single bin.
 
-        # With min_delta=0.0, any improvement is accepted → k=2 should win
-        d_loose = Discretizer(AnalysisConfig(
-            kmeans_max_k=5, kmeans_n_init=3, min_residual_points=10,
-            kmeans_silhouette_min_delta=0.0,
+        For uniform U(0,1000) Jenks with k=2 achieves GVF ≈ 0.75 (theoretical: 1 - 1/k²).
+        With min_gvf_threshold=0.80 the k=2 result is rejected and a single bin is returned.
+        """
+        rng = np.random.default_rng(7)
+        residuals = rng.uniform(0.0, 1000.0, 500)
+        d = Discretizer(AnalysisConfig(
+            kmeans_max_k=5, min_residual_points=10,
+            min_gvf_threshold=0.80,   # > 0.75 → k=2 GVF is too low → single bin
         ))
-        centers_loose = d_loose._cluster_residuals("x", residuals, d_loose.config, n_dominant=0)
-        assert len(centers_loose) >= 2
+        centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
+        assert len(centers) == 1
+
+    def test_deterministic_across_runs(self):
+        """Same input must produce identical output across multiple calls."""
+        rng = np.random.default_rng(42)
+        residuals = np.concatenate([rng.normal(10, 0.5, 200), rng.normal(90, 0.5, 200)])
+        d = Discretizer(AnalysisConfig(kmeans_max_k=5, min_residual_points=10))
+        centers_a = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
+        centers_b = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
+        assert centers_a == centers_b
+
+    def test_sampling_activates_for_large_input(self):
+        """Arrays exceeding jenks_sample_size must be sampled; result still correct."""
+        rng = np.random.default_rng(99)
+        # Two clear clusters × 15k points each = 30k total > default 20k
+        residuals = np.concatenate([rng.normal(0, 1, 15000), rng.normal(100, 1, 15000)])
+        d = Discretizer(AnalysisConfig(
+            kmeans_max_k=5, min_residual_points=10,
+            jenks_sample_size=20000,
+        ))
+        centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
+        assert len(centers) >= 2
+        assert centers == sorted(centers)
+
+
+class TestGVF:
+    def test_perfect_separation_returns_high_gvf(self):
+        """Two perfectly separated groups must yield GVF close to 1.0."""
+        values = np.array([1.0, 1.0, 1.0, 100.0, 100.0, 100.0])
+        breaks = [1.0, 50.5, 100.0]  # splits exactly between 1 and 100
+        gvf = Discretizer._gvf(values, breaks)
+        assert gvf > 0.95
+
+    def test_constant_array_returns_one(self):
+        """Constant array has TSS=0 → GVF defined as 1.0."""
+        values = np.array([42.0, 42.0, 42.0])
+        breaks = [42.0, 42.0]
+        gvf = Discretizer._gvf(values, breaks)
+        assert gvf == pytest.approx(1.0)
+
+    def test_single_bin_returns_zero(self):
+        """When all values fall in one bin, WCSS = TSS → GVF = 0."""
+        values = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        # breaks that encompass everything in one bin
+        breaks = [1.0, 5.0]
+        gvf = Discretizer._gvf(values, breaks)
+        assert gvf == pytest.approx(0.0, abs=1e-9)
 
 
 class TestKDEFallback:

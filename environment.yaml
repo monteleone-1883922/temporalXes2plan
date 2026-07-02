@@ -19,3 +19,4 @@ dependencies:
     - beautifulsoup4
     - scipy
     - rustxes
+    - jenkspy==0.4.1

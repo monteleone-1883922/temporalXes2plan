@@ -1,3 +1,4 @@
+import jenkspy
 import json
 import numpy as np
 import pm4py
@@ -5,8 +6,6 @@ from pathlib import Path
 from pm4py.objects.log.obj import EventLog
 from scipy.signal import argrelextrema
 from scipy.stats import gaussian_kde
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
 from typing import Dict, List, Optional, Any, Tuple
 
 import core_utils as utils
@@ -14,16 +13,15 @@ from models import AnalysisConfig
 
 logger = utils.get_logger(__name__)
 
-KMEANS_RETRY = 2
-
+RNG_RETRY = 2
 
 class Discretizer:
-    """Pre-computes k-means++ boundaries for numerical attributes.
+    """Pre-computes Jenks Natural Breaks boundaries for numerical attributes.
 
     Uses a 3-stage pipeline robust to skewed distributions:
       Stage 1 — short-circuit for few unique values.
       Stage 2 — KDE-based dominant region extraction.
-      Stage 3 — KMeans on residuals with silhouette-only validation.
+      Stage 3 — Jenks Natural Breaks on residuals with GVF-based k selection.
 
     Must be fit() before any DT training so that all downstream components
     (decision_mining, effect_analyzer, correlation_miner) share the same
@@ -97,7 +95,7 @@ class Discretizer:
                 self.boundaries[attr] = bounds
                 logger.info("Discretizer: '%s' → %d bins, boundaries=%s", attr, len(bounds) + 1, bounds)
             else:
-                logger.info("Discretizer: '%s' not discretized (silhouette below threshold or no valid k).", attr)
+                logger.info("Discretizer: '%s' not discretized (GVF below threshold or no meaningful structure).", attr)
 
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,7 +152,7 @@ class Discretizer:
         if dominant_centers is None:  # KDE failed — use equal-frequency fallback
             return self._equal_frequency_boundaries(values, cfg.kmeans_max_k)
 
-        # --- Stage 3: KMeans on residuals ---
+        # --- Stage 3: Jenks Natural Breaks on residuals ---
         residual_centers = self._cluster_residuals(attr, residuals, cfg, n_dominant=len(dominant_centers))
 
         # Merge all bin centers, compute boundaries as midpoints
@@ -166,20 +164,6 @@ class Discretizer:
         if not boundaries:
             return []
 
-        # Final silhouette gate on the full value set
-        labels = self._assign_labels(values, boundaries)
-        if len(np.unique(labels)) < 2:
-            return []
-
-        score = silhouette_score(values.reshape(-1, 1), labels)
-        if score < cfg.kmeans_silhouette_threshold:
-            logger.debug(
-                "Discretizer: '%s' final silhouette %.4f below threshold %.4f — discarding.",
-                attr, score, cfg.kmeans_silhouette_threshold,
-            )
-            return []
-
-        logger.debug("Discretizer: '%s' final silhouette=%.4f, %d boundaries", attr, score, len(boundaries))
         return boundaries
 
     # ------------------------------------------------------------------
@@ -248,7 +232,7 @@ class Discretizer:
         return dominant_centers, residuals
 
     # ------------------------------------------------------------------
-    # Stage 3 — KMeans on residuals
+    # Stage 3 — Jenks Natural Breaks on residuals
     # ------------------------------------------------------------------
 
     def _cluster_residuals(
@@ -258,7 +242,7 @@ class Discretizer:
         cfg: AnalysisConfig,
         n_dominant: int,
     ) -> List[float]:
-        """KMeans on residual values with silhouette-only k selection.
+        """Jenks Natural Breaks on residual values with GVF-based k selection.
 
         Args:
             attr: Attribute name (for logging).
@@ -267,8 +251,9 @@ class Discretizer:
             n_dominant: Number of dominant bins already found (caps max_k).
 
         Returns:
-            List of cluster center floats for the residuals.
+            List of bin center floats for the residuals.
         """
+
         if len(residuals) < cfg.min_residual_points or len(np.unique(residuals)) < 2:
             if len(residuals) > 0:
                 logger.debug(
@@ -280,34 +265,119 @@ class Discretizer:
 
         max_k_residual = max(2, cfg.kmeans_max_k - n_dominant)
         n_unique_res = len(np.unique(residuals))
+        k_max = min(max_k_residual, n_unique_res)
+        gvf_at_k2 = best_k = best_breaks = None
 
-        # k=1 baseline: all residuals in one group, silhouette=0 by convention
-        best_score = 0.0
-        best_centers: List[float] = [float(residuals.mean())]
-        logger.debug("Discretizer: '%s' Stage 3 k=1 (baseline, silhouette=0.0000)", attr)
-
-        for k in range(2, min(max_k_residual, n_unique_res) + 1):
-            for i in range(KMEANS_RETRY):
-                km = KMeans(
-                    n_clusters=k,
-                    init="k-means++",
-                    n_init=cfg.kmeans_n_init,
-                    random_state=42+i,
+        retry_sample_loops = RNG_RETRY if len(residuals) > cfg.jenks_sample_size else 1
+        for i in range(retry_sample_loops):
+            # Stratified sample for Jenks DP (O(n²k) — too slow on large arrays)
+            if len(residuals) > cfg.jenks_sample_size:
+                rng = np.random.default_rng(42+i)
+                idx = rng.choice(len(residuals), size=cfg.jenks_sample_size, replace=False)
+                sample = np.sort(residuals[idx])
+                logger.debug(
+                    "Discretizer: '%s' Stage 3 — sampling %d/%d points for Jenks",
+                    attr, cfg.jenks_sample_size, len(residuals),
                 )
-                labels = km.fit_predict(residuals.reshape(-1, 1))
-                if len(np.unique(labels)) < 2:
-                    continue
-                score = silhouette_score(residuals.reshape(-1, 1), labels)
-                logger.debug("Discretizer: '%s' Stage 3 k=%d silhouette=%.4f", attr, k, score)
-                if score > best_score + cfg.kmeans_silhouette_min_delta:
-                    best_score = score
-                    best_centers = sorted(km.cluster_centers_.flatten().tolist())
+            else:
+                sample = residuals
 
-        return best_centers
+            best_k = 1
+            best_breaks: Optional[List[float]] = None
+            prev_gvf: Optional[float] = None
+            gvf_at_k2: Optional[float] = None
+
+            for k in range(2, k_max + 1):
+                try:
+                    breaks = jenkspy.jenks_breaks(sample.tolist(), n_classes=k)
+                except Exception as exc:
+                    logger.warning(
+                        "Discretizer: '%s' Stage 3 — jenkspy failed at k=%d (%s) — single bin.",
+                        attr, k, exc,
+                    )
+                    break
+
+                gvf = self._gvf(residuals, breaks)
+                logger.debug("Discretizer: '%s' Stage 3 k=%d GVF=%.4f", attr, k, gvf)
+
+                if gvf_at_k2 is None:
+                    gvf_at_k2 = gvf  # remember first GVF for post-loop quality gate
+
+                # Early stop a: excellent fit reached
+                if gvf >= cfg.gvf_target:
+                    best_k = k
+                    best_breaks = breaks
+                    break
+
+                # Early stop b: marginal gain too small — keep k-1
+                if prev_gvf is not None and (gvf - prev_gvf) < cfg.min_gvf_improvement:
+                    break
+
+                best_k = k
+                best_breaks = breaks
+                prev_gvf = gvf
+
+        # Quality gate: if GVF at k=2 was too low, no meaningful structure
+        if best_k == 1 or (gvf_at_k2 is not None and gvf_at_k2 < cfg.min_gvf_threshold):
+            logger.debug(
+                "Discretizer: '%s' Stage 3 — GVF at k=2 (%.4f) below threshold %.2f → single bin.",
+                attr, gvf_at_k2 if gvf_at_k2 is not None else 0.0, cfg.min_gvf_threshold,
+            )
+            return [float(residuals.mean())]
+
+        return self._jenks_bin_centers(residuals, best_breaks)
 
     # ------------------------------------------------------------------
     # Static helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _gvf(values: np.ndarray, breaks: List[float]) -> float:
+        """Goodness of Variance Fit: 1 - WCSS/TSS.
+
+        Args:
+            values: 1-D array of all residual values (not just the sample).
+            breaks: Jenks breaks [min_val, b1, ..., max_val] — k+1 elements for k bins.
+
+        Returns:
+            GVF in [0.0, 1.0]. Returns 1.0 for constant arrays (TSS=0).
+        """
+        mean = float(values.mean())
+        tss = float(np.sum((values - mean) ** 2))
+        if tss == 0.0:
+            return 1.0
+        wcss = 0.0
+        for i in range(len(breaks) - 1):
+            # First bin is closed on both sides; subsequent bins are half-open (b_i, b_{i+1}]
+            if i == 0:
+                mask = (values >= breaks[0]) & (values <= breaks[1])
+            else:
+                mask = (values > breaks[i]) & (values <= breaks[i + 1])
+            if mask.any():
+                bin_vals = values[mask]
+                wcss += float(np.sum((bin_vals - float(bin_vals.mean())) ** 2))
+        return 1.0 - wcss / tss
+
+    @staticmethod
+    def _jenks_bin_centers(values: np.ndarray, breaks: List[float]) -> List[float]:
+        """Return the mean of values in each Jenks bin as the bin center.
+
+        Args:
+            values: Full residual array (all points, not just the sample).
+            breaks: Jenks breaks [min, b1, ..., max] for k bins.
+
+        Returns:
+            Sorted list of k center floats (one per non-empty bin).
+        """
+        centers = []
+        for i in range(len(breaks) - 1):
+            if i == 0:
+                mask = (values >= breaks[0]) & (values <= breaks[1])
+            else:
+                mask = (values > breaks[i]) & (values <= breaks[i + 1])
+            if mask.any():
+                centers.append(float(values[mask].mean()))
+        return sorted(centers)
 
     @staticmethod
     def _midpoints_between(sorted_vals: np.ndarray) -> List[float]:
@@ -316,11 +386,6 @@ class Discretizer:
             round((float(sorted_vals[i]) + float(sorted_vals[i + 1])) / 2, 4)
             for i in range(len(sorted_vals) - 1)
         ]
-
-    @staticmethod
-    def _assign_labels(values: np.ndarray, boundaries: List[float]) -> np.ndarray:
-        """Assign bin index to each value given sorted boundary list."""
-        return np.digitize(values, boundaries)
 
     @staticmethod
     def _equal_frequency_boundaries(values: np.ndarray, n_bins: int) -> List[float]:
