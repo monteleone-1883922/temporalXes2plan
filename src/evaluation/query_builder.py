@@ -227,7 +227,7 @@ def _goal_from_final_event(
                 matched_label = str_val
 
         else:
-            str_val = str(raw_value)
+            str_val = core_utils.sanitize_name(str(raw_value))
             if str_val in possible_values:
                 matched_label = str_val
 

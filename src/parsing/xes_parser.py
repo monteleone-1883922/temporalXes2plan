@@ -714,6 +714,19 @@ class Parser:
             if branch_info.guards is not None:
                 _scan_sop(branch_info.guards)
 
+        # Enrich categorical possible_values with every value observed in the
+        # training log, so values that survive variant filtering but are not
+        # selected by the DT/effects pipeline are still recognized at replay time.
+        _cat_attrs = {
+            a for a, t in self.attribute_categories.items() if t == "categorical"
+        }
+        for trace in self.log:
+            for event in trace:
+                for raw_key, raw_val in event.items():
+                    attr = utils.sanitize_name(raw_key)
+                    if attr in attr_values and attr in _cat_attrs and raw_val is not None:
+                        attr_values[attr].add(utils.sanitize_name(str(raw_val)))
+
         return {
             attr: AttributeCatalogEntry(
                 attribute_type=self.attribute_categories.get(attr, 'categorical'),

@@ -95,7 +95,9 @@ class PartialTraceReplayer:
             }
 
         # Build graph lookups
-        activity_to_node, trans_outputs = self._build_graph_lookups(graph)
+        activity_to_node, trans_outputs, silent_inputs, silent_outputs = (
+            self._build_graph_lookups(graph)
+        )
 
         # Phase 1: pre-process events
         accumulated_attrs: Dict[str, str] = {}
@@ -104,6 +106,7 @@ class PartialTraceReplayer:
 
         # Phase 2: token replay — marking is a multiset (list) to support AND-splits
         marking: Set[str] = {start_place}
+        self._fire_silent_transitions(marking, silent_inputs, silent_outputs)
         replayed: List[str] = []
 
         for event in events:
@@ -129,12 +132,14 @@ class PartialTraceReplayer:
                 )
 
             # Consume one token per input place, then produce one per output place
-
             for p in input_places:
                 marking.remove(p)
             for p in trans_outputs.get(node_id, []):
                 marking.add(p)
             replayed.append(activity)
+
+            # Fire any enabled silent transitions after each visible firing
+            self._fire_silent_transitions(marking, silent_inputs, silent_outputs)
 
         init_effects = [
             {"attribute": attr, "value": value}
@@ -206,27 +211,67 @@ class PartialTraceReplayer:
     # Graph lookups
     # ------------------------------------------------------------------
 
+    def _fire_silent_transitions(
+        self,
+        marking: Set[str],
+        silent_inputs: Dict[str, List[str]],
+        silent_outputs: Dict[str, List[str]],
+    ) -> None:
+        """Fire all enabled silent transitions to fixpoint (BFS)."""
+        changed = True
+        while changed:
+            changed = False
+            for node_id, inputs in silent_inputs.items():
+                if inputs and all(p in marking for p in inputs):
+                    for p in inputs:
+                        marking.remove(p)
+                    for p in silent_outputs.get(node_id, []):
+                        marking.add(p)
+                    changed = True
+
     def _build_graph_lookups(
         self, graph: Dict[str, Any]
-    ) -> Tuple[Dict[str, str], Dict[str, List[str]]]:
-        """Build activity→node_id and node_id→output_places from graph."""
+    ) -> tuple[dict[str, str], dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]]:
+        """Build activity→node_id, node_id→output_places, and silent transition maps."""
         nodes = graph.get("nodes", [])
         edges = graph.get("edges", [])
 
+        visible_types = {"transition", "and_split"}
+        node_by_id = {n["id"]: n for n in nodes}
+
         activity_to_node: Dict[str, str] = {}
         for node in nodes:
-            if node.get("type") == "transition":
+            if node.get("type") in visible_types:
                 label = node.get("label", "")
-                activity_to_node[utils.sanitize_name(label)] = node["id"]
+                if label:
+                    activity_to_node[utils.sanitize_name(label)] = node["id"]
 
+        # Output places for every non-silent transition (visible + and_split)
         trans_outputs: Dict[str, List[str]] = {}
+        # Input→output map for silent transitions (for automatic firing)
+        silent_inputs: Dict[str, List[str]] = {}   # node_id → [input place ids]
+        silent_outputs: Dict[str, List[str]] = {}  # node_id → [output place ids]
+
+        for node in nodes:
+            if node.get("type") == "silent":
+                silent_inputs[node["id"]] = []
+                silent_outputs[node["id"]] = []
+
         for edge in edges:
             src = edge.get("source")
             tgt = edge.get("target")
-            if src in {n["id"] for n in nodes if n.get("type") == "transition"}:
-                trans_outputs.setdefault(src, []).append(tgt)
+            src_node = node_by_id.get(src, {})
+            tgt_node = node_by_id.get(tgt, {})
 
-        return activity_to_node, trans_outputs
+            if src_node.get("type") in visible_types:
+                trans_outputs.setdefault(src, []).append(tgt)
+            elif src_node.get("type") == "silent":
+                silent_outputs.setdefault(src, []).append(tgt)
+
+            if tgt_node.get("type") == "silent":
+                silent_inputs.setdefault(tgt, []).append(src)
+
+        return activity_to_node, trans_outputs, silent_inputs, silent_outputs
 
     # ------------------------------------------------------------------
     # Attribute pre-processing
@@ -293,7 +338,7 @@ class PartialTraceReplayer:
             return label
 
         # categorical
-        value = str(raw_value)
+        value = utils.sanitize_name(str(raw_value))
         if possible_values and value not in possible_values:
             msg = f"Value '{value}' for '{attr}' ignored: not a known category."
             warnings.append(msg)
