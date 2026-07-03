@@ -53,7 +53,6 @@ from .log_preprocessor import LogPreprocessor
 from .log_processor import LogProcessor
 from .model_discoverer import ModelDiscoverer
 from .petri_net_log_builder import PetriNetLogBuilder
-from .precondition_miner import PreconditionMiner
 from .probability_estimator import ProbabilityEstimator
 from .temporal_extractor import ExternalDuration, TemporalExtractor
 
@@ -291,19 +290,25 @@ class Parser:
             if screening is None:
                 continue
 
-            act_to_trans = {
-                utils.sanitize_name(t.label): t
-                for t in transitions if t.label
-            }
+            # Include both labeled and silent transitions so that silent
+            # (tau) branches are correctly pruned from the net.
+            all_trans: Dict[str, PetriNet.Transition] = {}
+            for t in transitions:
+                if t.label:
+                    all_trans[utils.sanitize_name(t.label)] = t
+                else:
+                    silent_name = self.petri_net_model.silent_transitions.get(t)
+                    if silent_name:
+                        all_trans[silent_name] = t
 
             if screening.action == "dt" and place_name in self.xor_guards:
-                self._apply_dt_level(act_to_trans, screening, place_name, to_remove)
+                self._apply_dt_level(all_trans, screening, place_name, to_remove)
 
             elif screening.action == "deterministic":
-                self._apply_deterministic(act_to_trans, screening, to_remove)
+                self._apply_deterministic(all_trans, screening, to_remove)
 
             elif screening.action == "fallback":
-                self._apply_fallback(act_to_trans, screening, to_remove)
+                self._apply_fallback(all_trans, screening, to_remove)
 
         if to_remove:
             logger.info("Pruning %d branch transitions from Petri net", len(to_remove))
@@ -311,14 +316,20 @@ class Parser:
 
     def _apply_dt_level(
         self,
-        act_to_trans: Dict[str, PetriNet.Transition],
+        all_trans: Dict[str, PetriNet.Transition],
         screening: XorSplitScreening,
         place_name: str,
         to_remove: Set[PetriNet.Transition],
     ) -> None:
-        """Level 1 — DT succeeded: prune only 'pruned' branches."""
+        """Level 1 — DT succeeded: prune only 'pruned' branches.
+
+        Includes silent (tau) transitions so they are correctly removed when
+        their screening status is 'pruned'.  Non-pruned branches (labeled or
+        tau) all receive XorBranchInfo so tau XOR branches become first-class
+        entries in result.transitions.
+        """
         guards_obj = self.xor_guards[place_name]
-        for act, t in act_to_trans.items():
+        for act, t in all_trans.items():
             branch = screening.branches.get(act)
             if branch is None or branch.status == "pruned":
                 to_remove.add(t)
@@ -332,12 +343,16 @@ class Parser:
 
     def _apply_deterministic(
         self,
-        act_to_trans: Dict[str, PetriNet.Transition],
+        all_trans: Dict[str, PetriNet.Transition],
         screening: XorSplitScreening,
         to_remove: Set[PetriNet.Transition],
     ) -> None:
-        """Level 1 — Single certain branch: prune everything else."""
-        for act, t in act_to_trans.items():
+        """Level 1 — Single certain branch: prune everything else.
+
+        Includes silent (tau) transitions so they are removed when pruned.
+        The certain branch is always labeled; silent branches are never certain.
+        """
+        for act, t in all_trans.items():
             branch = screening.branches.get(act)
             if branch is None or branch.status != "certain":
                 to_remove.add(t)
@@ -345,7 +360,7 @@ class Parser:
 
     def _apply_fallback(
         self,
-        act_to_trans: Dict[str, PetriNet.Transition],
+        all_trans: Dict[str, PetriNet.Transition],
         screening: XorSplitScreening,
         to_remove: Set[PetriNet.Transition],
     ) -> None:
@@ -355,11 +370,15 @@ class Parser:
         config.probability_min_samples — probabilities are not reliable enough
         to make any routing decision.  Level 2 applies the configured
         xor_statistical_mode on the active (non-pruned) branches.
+
+        Includes silent (tau) transitions so they are correctly pruned.  Both
+        labeled and tau non-pruned branches receive XorBranchInfo so tau XOR
+        branches become first-class entries in result.transitions.
         """
         if screening.total_samples < self.config.probability_min_samples:
             # Level 3: too few samples to trust any probability — keep all
             # branches with equal weight and do not remove anything.
-            for act, t in act_to_trans.items():
+            for act, t in all_trans.items():
                 branch = screening.branches.get(act)
                 self._xor_branch_info[act] = XorBranchInfo(
                     probability=branch.probability if branch else 0.0,
@@ -382,7 +401,7 @@ class Parser:
                 "(%d) — keeping all branches to avoid empty split.",
                 screening.total_samples,
             )
-            for act, t in act_to_trans.items():
+            for act, t in all_trans.items():
                 branch = screening.branches.get(act)
                 self._xor_branch_info[act] = XorBranchInfo(
                     probability=branch.probability if branch else 0.0,
@@ -396,7 +415,7 @@ class Parser:
 
         if mode == "majority_only":
             majority = max(active, key=lambda a: active[a].probability)
-            for act, t in act_to_trans.items():
+            for act, t in all_trans.items():
                 if act != majority:
                     to_remove.add(t)
                 else:
@@ -409,7 +428,7 @@ class Parser:
 
         elif mode == "weighted":
             # Keep all branches; encoder will assign costs via -log(p).
-            for act, t in act_to_trans.items():
+            for act, t in all_trans.items():
                 branch = screening.branches.get(act)
                 self._xor_branch_info[act] = XorBranchInfo(
                     probability=branch.probability if branch else 0.0,
@@ -420,7 +439,7 @@ class Parser:
 
         else:
             # pruned_weighted (default): remove 'pruned', keep active with costs.
-            for act, t in act_to_trans.items():
+            for act, t in all_trans.items():
                 branch = screening.branches.get(act)
                 if branch is None or branch.status == "pruned":
                     to_remove.add(t)
@@ -552,22 +571,6 @@ class Parser:
             if t.label
         }
 
-        # Attribute precondition mining — run here so catalog_attributes is known.
-        # Only attributes that survived the effect pipeline are candidates.
-        catalog_attributes: Set[str] = set()
-        for attr_infos in self._transition_effect_info.values():
-            catalog_attributes.update(attr_infos.keys())
-        logger.info("Starting attribute precondition mining")
-        attr_preconditions = PreconditionMiner().mine(
-            transition_firings=self.preprocessed_log.transition_firings,
-            catalog_attributes=catalog_attributes,
-            config=self.config,
-        )
-        logger.info(
-            "Attribute precondition mining complete: %d transitions with preconditions",
-            len(attr_preconditions),
-        )
-
         # TransitionInfo per labeled transition
         transitions: Dict[str, TransitionInfo] = {}
         for t, input_places in pnm.trans_inputs.items():
@@ -585,8 +588,32 @@ class Parser:
                 duration=self.duration_stats.get(act),
                 related_effects=cooccurrence[0],
                 incompatible_effects=cooccurrence[1],
-                attribute_preconditions=attr_preconditions.get(act, []),
             )
+
+        # TransitionInfo for tau transitions that survived XOR screening
+        # (i.e., appear in _xor_branch_info).  These become first-class entries
+        # so XorBranchProcessor, ActionBuilder, and the serializer can treat
+        # them uniformly alongside labeled transitions.
+        for trans_obj, tau_label in pnm.silent_transitions.items():
+            tau_name = utils.sanitize_name(tau_label)
+            if tau_name not in self._xor_branch_info:
+                continue
+            input_places_obj = pnm.trans_inputs.get(trans_obj, set())
+            tau_firings = sum(
+                1
+                for fds in self.preprocessed_log.xor_firings.values()
+                for fd in fds
+                if fd.activity_name == tau_name
+            )
+            transitions[tau_name] = TransitionInfo(
+                activity_name=tau_name,
+                input_places=[p.name for p in input_places_obj],
+                total_firings=tau_firings,
+                xor_branch=self._xor_branch_info[tau_name],
+                effects={},
+                is_tau=True,
+            )
+            transition_predecessors[tau_name] = [p.name for p in input_places_obj]
 
         # Start / end place names from markings (single-place markings assumed)
         start_place = next(iter(pnm.initial_marking)).name

@@ -114,6 +114,10 @@ class ActionBuilder:
             key=lambda kv: kv[1],
         ):
             tau_name = utils.sanitize_name(tau_label)
+            if tau_name in self._pr.transitions:
+                # Already in result.transitions (XOR-branch tau) — built by
+                # _build_transition_actions() with full XOR guard support.
+                continue
             input_places = self._pr.petri_net_model.trans_inputs.get(trans_obj, set())
             preconditions = {
                 PDDLCondition.marked(utils.sanitize_name(p.name))

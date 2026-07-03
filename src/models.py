@@ -699,6 +699,7 @@ class TransitionInfo:
     total_firings: int
     xor_branch: Optional[XorBranchInfo]
     effects: Dict[str, EffectInfo]
+    is_tau: bool = False
     duration: Optional[ActionDurationStats] = None
     related_effects: Set[FrozenSet[str]] = field(default_factory=set)
     incompatible_effects: Set[FrozenSet[str]] = field(default_factory=set)

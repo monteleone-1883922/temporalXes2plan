@@ -265,6 +265,8 @@ def _build_transitions(result: ParseResult) -> Dict[str, Any]:
     output: Dict[str, Any] = {}
 
     for act, t_info in result.transitions.items():
+        if t_info.is_tau:
+            continue  # tau transitions appear in xor_splits, not in the activity panel
         preconditions: List[List[Dict[str, Any]]] = []
         if t_info.attribute_preconditions:
             preconditions = [[_guard_to_condition(g) for g in t_info.attribute_preconditions]]
@@ -328,9 +330,12 @@ def _build_xor_splits(
     for place, transitions in pnm.xor_splits.items():
         branches: Dict[str, Any] = {}
         for t in transitions:
-            if not t.label:
-                continue
-            act = utils.sanitize_name(t.label)
+            if t.label:
+                act = utils.sanitize_name(t.label)
+            else:
+                act = pnm.silent_transitions.get(t)
+                if not act:
+                    continue
             t_info = result.transitions.get(act)
             if not t_info or not t_info.xor_branch:
                 continue

@@ -80,10 +80,19 @@ class LogPreprocessor:
 
             for step in execution.steps:
                 # Tau transitions carry no observable activity and are never
-                # targets of effect analysis.  They are skipped entirely:
-                # they do not update the running state and produce no
-                # TransitionFiringData.
+                # targets of effect analysis.  They do not update the running
+                # state and produce no transition_firings entry, but they do
+                # traverse XOR split places and must be counted there.
                 if step.is_tau:
+                    for place in step.from_places:
+                        if place in valid_branches and step.transition in valid_branches[place]:
+                            fd = TransitionFiringData(
+                                activity_name=step.activity_name,
+                                pre_state=dict(state),
+                                changed_attrs={},
+                                from_places=frozenset(step.from_places),
+                            )
+                            xor_firings[place.name].append(fd)
                     continue
 
                 act = utils.sanitize_name(step.activity_name)
