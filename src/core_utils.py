@@ -76,6 +76,8 @@ def sanitize_value(attr_name: str, raw_value: str) -> str:
         sanitize_value("dismissal","#")      -> "dismissal_val_ascii35"
         sanitize_value("amount",   "2")      -> "amount_val_2"
     """
+    if raw_value.startswith(f"{attr_name}_val_"):
+        return raw_value
     cleaned = _replace_special_chars(str(raw_value).strip().lower())
     cleaned = cleaned or "empty"
     return f"{attr_name}_val_{cleaned}"
