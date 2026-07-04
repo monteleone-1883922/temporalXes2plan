@@ -64,10 +64,17 @@ class Discretizer:
         if cache_path is not None and not force and cache_path.exists():
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             self.boundaries = {k: v for k, v in cached.items() if k in numeric_attributes}
+            missing = [a for a in numeric_attributes if a not in self.boundaries]
             logger.info(
                 "Discretizer: boundaries loaded from cache %s (%d attrs)",
                 cache_path, len(self.boundaries),
             )
+            if missing:
+                logger.warning(
+                    "Discretizer: %d attribute(s) in numeric_attributes not found in cache "
+                    "(cache may be stale or attribute was skipped at build time): %s",
+                    len(missing), missing,
+                )
             return
 
         df = pm4py.convert_to_dataframe(log)
@@ -82,12 +89,20 @@ class Discretizer:
             values = values[~np.isnan(values)]
 
             if len(values) < 2:
-                logger.debug("Discretizer: '%s' has fewer than 2 non-null values, skipping.", attr)
+                logger.warning(
+                    "Discretizer: '%s' skipped — only %d non-null value(s) found in log "
+                    "(attribute is too sparse to discretize).",
+                    attr, len(values),
+                )
                 continue
 
             n_unique = len(np.unique(values))
             if n_unique < 2:
-                logger.debug("Discretizer: '%s' is constant (1 unique value), skipping.", attr)
+                logger.warning(
+                    "Discretizer: '%s' skipped — all %d non-null values are identical "
+                    "(constant attribute, no split point possible).",
+                    attr, len(values),
+                )
                 continue
 
             bounds = self._find_best_boundaries(attr, values, n_unique)
@@ -116,6 +131,33 @@ class Discretizer:
         if attr not in self.boundaries or value is None:
             return str(value)
         return utils.discretize_value(attr, value, self.boundaries)
+
+    def all_bin_labels(self, attr: str) -> List[str]:
+        """Return every possible interval label for a discretized attribute.
+
+        Mirrors exactly the label format produced by discretize_value so the
+        two are always consistent.  Returns [] if the attribute has no boundaries.
+
+        Args:
+            attr: Sanitized attribute name.
+
+        Returns:
+            Ordered list of bin label strings covering (-inf, +inf).
+        """
+        thresholds = self.boundaries.get(attr)
+        if not thresholds:
+            return []
+        thresholds = sorted(thresholds)
+        labels: List[str] = []
+        t0 = str(thresholds[0]).replace('.', '_').replace('-', 'neg')
+        labels.append(f"lte_{t0}")
+        for i in range(len(thresholds) - 1):
+            lo = str(thresholds[i]).replace('.', '_').replace('-', 'neg')
+            hi = str(thresholds[i + 1]).replace('.', '_').replace('-', 'neg')
+            labels.append(f"gte_{lo}_lte_{hi}")
+        tn = str(thresholds[-1]).replace('.', '_').replace('-', 'neg')
+        labels.append(f"gte_{tn}")
+        return labels
 
     # ------------------------------------------------------------------
     # Private orchestrator
