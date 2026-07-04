@@ -337,10 +337,17 @@ def _build_xor_splits(
                 if not act:
                     continue
             t_info = result.transitions.get(act)
-            if not t_info or not t_info.xor_branch:
+            if not t_info:
+                continue
+            xb = t_info.xor_branch
+            if xb is None:
+                # xor_branch may have been moved to a virtual tau by _inject_xor_taus
+                tau_info = result.transitions.get(f"xor_tau_{act}")
+                if tau_info:
+                    xb = tau_info.xor_branch
+            if xb is None:
                 continue
 
-            xb = t_info.xor_branch
             conditions = _guards_to_preconditions(xb.guards)
 
             branches[act] = {
@@ -350,6 +357,7 @@ def _build_xor_splits(
                 "_meta": {
                     "cascade_level": xb.cascade_level,
                     "total_samples": xb.total_samples,
+                    "routing_source": xb.routing_source,
                 },
             }
 
