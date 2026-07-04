@@ -148,7 +148,7 @@ class ProbabilityEstimator:
             for fd in firings:
                 for attr, val in fd.changed_attrs.items():
                     effect_counts[attr] += 1
-                    val_key = utils.sanitize_name(val) if isinstance(val, str) else val
+                    val_key = val  # values are pre-sanitized by LogPreprocessor
                     value_counts[attr][val_key] += 1
 
             presence_probs: Dict[str, float] = {
