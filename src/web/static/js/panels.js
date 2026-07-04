@@ -209,6 +209,16 @@ function buildCostSection(cost) {
 // XOR split panel
 // ─────────────────────────────────────────────────────────────────────────────
 
+const _ROUTING_SOURCE_LABEL = {
+    "dt":                  null,
+    "dt_orphan":           "Fallback — DT orphan (all leaves pruned)",
+    "dt_low_prob":         "Fallback — low probability (excluded from DT)",
+    "deterministic":       "Deterministic (certain branch)",
+    "deterministic_floor": "Fallback — floor cost (non-certain branch)",
+    "probabilistic":       "Probabilistic fallback",
+    "equal_weight":        "Fallback — equal weight (insufficient samples)",
+};
+
 function showXorSplitPanel(placeId) {
     if (!currentData) return;
     const xor = currentData.xor_splits[placeId];
@@ -246,7 +256,11 @@ function showXorSplitPanel(placeId) {
             card.appendChild(label);
             renderConditionGroups(card, branch.conditions);
         } else {
-            card.appendChild(emptyNote("No guards — statistical fallback"));
+            const src = branch._meta && branch._meta.routing_source;
+            const noteText = (src && src in _ROUTING_SOURCE_LABEL && _ROUTING_SOURCE_LABEL[src] !== null)
+                ? _ROUTING_SOURCE_LABEL[src]
+                : "No guards — statistical fallback";
+            card.appendChild(emptyNote(noteText));
         }
 
         const meta = document.createElement("div");
