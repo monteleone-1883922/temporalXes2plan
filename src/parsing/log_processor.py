@@ -61,17 +61,34 @@ class LogProcessor:
             try:
                 lifecycle_values = pm4py.get_event_attribute_values(log, 'lifecycle:transition')
                 if 'complete' in lifecycle_values:
-
+                    n_traces_before = len(log)
+                    events_before = sum(len(t) for t in log)
                     log = pm4py.filter_event_attribute_values(log, 'lifecycle:transition', 'complete')
+                    n_traces_after = len(log)
+                    events_after = sum(len(t) for t in log)
+                    logger.info(
+                        "Lifecycle filter (kept 'complete' events only): "
+                        "%d traces kept (%d removed), %d events kept (%d removed)",
+                        n_traces_after, n_traces_before - n_traces_after,
+                        events_after, events_before - events_after,
+                    )
             except Exception:
                 pass
 
         full_log = log  # Store full log for frequency computation
         
         try:
+            n_before_coverage = len(log)
             filtered_log = pm4py.filter_variants_by_coverage_percentage(log, coverage_percentage)
             if len(filtered_log) > 0:
                 log = filtered_log
+                removed = n_before_coverage - len(log)
+                logger.info(
+                    "Variant coverage filter (threshold=%.2f): %d traces kept, "
+                    "%d traces removed (%.1f%%)",
+                    coverage_percentage, len(log), removed,
+                    100.0 * removed / n_before_coverage if n_before_coverage else 0.0,
+                )
             else:
                 logger.warning("Warning: Coverage filter removed all traces, using full log")
         except Exception as e:
@@ -83,19 +100,6 @@ class LogProcessor:
         """Load a CSV event log using the companion .mapping.json file."""
         mapping = load_mapping_file(self.log_path)
         return csv_to_event_log(self.log_path, mapping)
-
-    def split_train_test(self, log: Any) -> Tuple[Any, Any]:
-        """
-        Split the event log into training (80%) and testing (20%) sets.
-
-        Args:
-            log: The event log to split.
-
-        Returns:
-            Tuple of (train_df, test_df).
-        """
-        train_df, test_df = pm4py.split_train_test(log, train_percentage=0.8)
-        return train_df, test_df
 
     def initialize_attributes(self, full_log: Any) -> Tuple[Set[str], Dict[str, str]]:
         """
