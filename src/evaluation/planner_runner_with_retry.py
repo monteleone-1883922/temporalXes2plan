@@ -61,6 +61,7 @@ def run_with_retry(
     retry_cfg: RetryConfig,
     failure_dir: Path,
     query_id: str,
+    pddl_dir: Optional[Path] = None,
 ) -> tuple[PlanResult, int]:
     """Run OPTIC with linear backoff, returning the result and attempt count.
 
@@ -99,7 +100,7 @@ def run_with_retry(
 
         if result.solvability in _NON_RETRYABLE:
             failure_path = _write_failure_pointer(
-                failure_dir, query_id, domain_text, problem_text, result
+                failure_dir, query_id, problem_text, result, pddl_dir
             )
             logger.warning(
                 "[retry] %s → %s (non-retryable, attempt %d): %s — see %s",
@@ -118,7 +119,7 @@ def run_with_retry(
             time.sleep(delay)
 
     logger.error("[retry] %s exhausted %d attempts — writing failure pointer.", query_id, retry_cfg.max_attempts)
-    failure_path = _write_failure_pointer(failure_dir, query_id, domain_text, problem_text, last_result)
+    failure_path = _write_failure_pointer(failure_dir, query_id, problem_text, last_result, pddl_dir)
     logger.error("[retry] %s failure log: %s", query_id, failure_path)
     return last_result, retry_cfg.max_attempts
 
@@ -130,28 +131,32 @@ def run_with_retry(
 def _write_failure_pointer(
     failure_dir: Path,
     query_id: str,
-    domain_text: str,
     problem_text: str,
     last_result: PlanResult,
+    pddl_dir: Optional[Path] = None,
 ) -> Path:
-    """Write a JSON failure pointer file for post-hoc debugging.
+    """Write a JSON failure pointer file and problem.pddl for post-hoc debugging.
 
     Args:
-        failure_dir: Directory to write the file into (created if absent).
+        failure_dir: Directory to write the JSON file into (created if absent).
         query_id: Used as the filename stem.
-        domain_text: PDDL domain string for the failed query.
         problem_text: PDDL problem string for the failed query.
         last_result: PlanResult from the final attempt.
+        pddl_dir: If provided, problem.pddl is written to pddl_dir/<query_id>/problem.pddl.
     """
     failure_dir.mkdir(parents=True, exist_ok=True)
+
+    if pddl_dir is not None:
+        query_pddl_dir = pddl_dir / query_id
+        query_pddl_dir.mkdir(parents=True, exist_ok=True)
+        (query_pddl_dir / "problem.pddl").write_text(problem_text, encoding="utf-8")
+
     pointer = {
         "query_id": query_id,
         "last_solvability": last_result.solvability,
         "last_error": last_result.error,
         "last_stdout": last_result.raw_stdout,
         "last_stderr": last_result.raw_stderr,
-        "domain_pddl": domain_text,
-        "problem_pddl": problem_text,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
     path = failure_dir / f"{query_id}.json"
