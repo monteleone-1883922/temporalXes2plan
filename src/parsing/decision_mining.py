@@ -92,7 +92,10 @@ class DecisionMiner:
             for t in transitions:
                 act = self._activity_name(t)
                 prob = stats.probabilities.get(act, 0.0) if stats else 0.0
-                status = "pruned" if prob < self.config.xor_prune_threshold else "active"
+                if self.config.xor_screen_prune_branches and prob < self.config.xor_prune_threshold:
+                    status = "pruned"
+                else:
+                    status = "active"
                 raw[act] = (status, prob)
 
             active_acts = [a for a, (s, _) in raw.items() if s == "active"]
@@ -115,11 +118,45 @@ class DecisionMiner:
             else:
                 action = "dt"
 
-            logger.debug(
-                "XOR screen '%s': action=%s, branches=%s",
-                place.name, action,
-                {a: b.status for a, b in branches.items()},
-            )
+            if action == "deterministic":
+                certain_act = next(a for a, b in branches.items() if b.status == "certain")
+                others = [a for a in branches if a != certain_act]
+                logger.debug(
+                    "[XOR '%s'] DETERMINISTIC — '%s' is the only active branch (p=%.3f); "
+                    "%d branch(es) kept in net with floor cost: %s",
+                    place.name, certain_act, branches[certain_act].probability,
+                    len(others), others,
+                )
+            elif action == "fallback":
+                if total_samples == 0:
+                    logger.debug(
+                        "[XOR '%s'] FALLBACK — no replay observations; "
+                        "all %d branches receive equal weight (cascade_level=3).",
+                        place.name, len(branches),
+                    )
+                elif total_samples < self.config.dt_min_samples:
+                    logger.debug(
+                        "[XOR '%s'] FALLBACK — insufficient samples (%d < %d); "
+                        "probabilistic costs assigned to all %d branches.",
+                        place.name, total_samples, self.config.dt_min_samples, len(branches),
+                    )
+                else:
+                    logger.debug(
+                        "[XOR '%s'] FALLBACK — all branches below xor_prune_threshold (%.2f); "
+                        "probabilistic costs assigned. branches: %s",
+                        place.name, self.config.xor_prune_threshold,
+                        {a: f"p={b.probability:.3f}" for a, b in branches.items()},
+                    )
+            else:  # "dt"
+                active_acts_log = [a for a, b in branches.items() if b.status == "active"]
+                low_prob = [a for a, b in branches.items() if b.status == "pruned"]
+                logger.debug(
+                    "[XOR '%s'] DT candidate — %d active branch(es) %s, "
+                    "%d low-probability branch(es) excluded from training %s "
+                    "(xor_prune_threshold=%.2f).",
+                    place.name, len(active_acts_log), active_acts_log,
+                    len(low_prob), low_prob, self.config.xor_prune_threshold,
+                )
             result[place.name] = XorSplitScreening(
                 total_samples=total_samples,
                 action=action,
@@ -165,10 +202,11 @@ class DecisionMiner:
                 preprocessed_log, place_name, active_branches
             )
             if X.empty or y.nunique() < 2:
-                logger.warning(
-                    "XOR split '%s': skipped — feature matrix empty or "
-                    "single class after pruning.",
-                    place_name,
+                logger.debug(
+                    "[XOR '%s'] DT skipped — feature matrix has %d rows and %d distinct class(es) "
+                    "after excluding low-probability branches (need ≥2 classes). "
+                    "Falling back to probabilistic costs.",
+                    place_name, len(X), y.nunique() if not X.empty else 0,
                 )
                 screening.action = "fallback"
                 continue
@@ -176,9 +214,9 @@ class DecisionMiner:
             guards, accuracy = self._train_and_extract(X, y)
 
             if accuracy < self.config.dt_min_accuracy:
-                logger.info(
-                    "XOR split '%s': DT accuracy %.2f < threshold %.2f — "
-                    "use probability fallback.",
+                logger.debug(
+                    "[XOR '%s'] DT accuracy %.3f < threshold %.2f — "
+                    "guards discarded, falling back to probabilistic costs.",
                     place_name, accuracy, self.config.dt_min_accuracy,
                 )
                 screening.action = "fallback"
@@ -188,6 +226,10 @@ class DecisionMiner:
                 guards=guards,
                 total_samples=screening.total_samples,
                 dt_accuracy=round(accuracy, 4),
+            )
+            logger.debug(
+                "[XOR '%s'] DT accepted — accuracy=%.3f, guards produced for %d branch(es): %s.",
+                place_name, accuracy, len(guards), sorted(guards.keys()),
             )
 
         return result
@@ -354,7 +396,8 @@ class DecisionMiner:
             else:
                 n_leaf = int(tree_.n_node_samples[node])
                 values = tree_.value[node][0]
-                purity = float(np.max(values) / n_leaf) if n_leaf > 0 else 0.0
+                total_weight = float(np.sum(values))
+                purity = float(np.max(values) / total_weight) if total_weight > 0 else 0.0
                 activity = str(clf.classes_[int(np.argmax(values))])
                 if conditions:
                     paths.append((activity, list(conditions), n_leaf, purity))
@@ -363,6 +406,14 @@ class DecisionMiner:
 
         min_n = self.config.dt_prune_min_leaf_samples
         min_p = self.config.dt_prune_min_purity
+
+        for act, conds, n, p in paths:
+            kept = n >= min_n and p >= min_p
+            logger.debug(
+                "[DT leaf] branch='%s' n=%d purity=%.3f → %s "
+                "(thresholds: min_n=%d min_purity=%.2f)",
+                act, n, p, "KEPT" if kept else "PRUNED", min_n, min_p,
+            )
 
         activities_before: Set[str] = {act for act, _, _, _ in paths}
         surviving: List[Tuple[str, List[Guard], int, float]] = [
@@ -374,19 +425,34 @@ class DecisionMiner:
 
         for orphaned in activities_before - activities_after:
             candidates = [(conds, n, p) for act, conds, n, p in paths if act == orphaned]
-            if self.config.dt_prune_orphan_mode == "keep_best":
+
+            if self.config.dt_prune_orphan_mode == "fallback":
+                best_n = max(c[1] for c in candidates)
+                best_p = max(c[2] for c in candidates)
+                logger.debug(
+                    "[DT orphan] branch '%s': all %d leaf/leaves below threshold "
+                    "(best purity=%.3f, best n=%d; min_purity=%.2f, min_n=%d) — "
+                    "no guard produced, branch will use probabilistic fallback.",
+                    orphaned, len(candidates), best_p, best_n, min_p, min_n,
+                )
+
+            elif self.config.dt_prune_orphan_mode == "keep_best":
                 best_conds, best_n, best_p = max(candidates, key=lambda x: (x[2], x[1]))
                 surviving.append((orphaned, best_conds, best_n, best_p))
-                logger.info(
-                    "Pruning '%s': all leaves below threshold; kept best leaf "
-                    "(purity=%.2f, n=%d).",
-                    orphaned, best_p, best_n,
+                logger.debug(
+                    "[DT orphan] branch '%s': all %d leaf/leaves below threshold — "
+                    "kept best (purity=%.3f, n=%d). Guard may be imprecise.",
+                    orphaned, len(candidates), best_p, best_n,
                 )
-            else:
+
+            else:  # "drop"
+                best_n = max(c[1] for c in candidates)
+                best_p = max(c[2] for c in candidates)
                 logger.warning(
-                    "Pruning '%s': dropped entirely — all leaves below threshold "
-                    "(min_purity=%.2f, min_samples=%d).",
-                    orphaned, min_p, min_n,
+                    "[DT orphan] branch '%s': all %d leaf/leaves below threshold "
+                    "(best purity=%.3f, best n=%d) — branch DROPPED from guards "
+                    "(dt_prune_orphan_mode='drop').",
+                    orphaned, len(candidates), best_p, best_n,
                 )
 
         sop: Dict[str, List[List[Guard]]] = defaultdict(list)
