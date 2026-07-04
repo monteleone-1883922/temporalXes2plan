@@ -45,9 +45,11 @@ class LogPreprocessor:
         self,
         config: Optional[AnalysisConfig] = None,
         discretizer: Optional[Discretizer] = None,
+        attribute_categories: Optional[Dict[str, str]] = None
     ) -> None:
         self.config = config or AnalysisConfig()
         self._discretizer = discretizer
+        self.attribute_categories = attribute_categories or {}
 
     def preprocess(
         self,
@@ -66,6 +68,7 @@ class LogPreprocessor:
         """
         transition_firings: Dict[str, List[TransitionFiringData]] = defaultdict(list)
         xor_firings: Dict[str, List[TransitionFiringData]] = defaultdict(list)
+        tau_seen: set = set()
 
         # Pre-build a set of valid branch transitions per XOR place for O(1)
         # membership checks inside the inner loop.
@@ -84,6 +87,7 @@ class LogPreprocessor:
                 # state and produce no transition_firings entry, but they do
                 # traverse XOR split places and must be counted there.
                 if step.is_tau:
+                    tau_seen.add(step.transition)
                     for place in step.from_places:
                         if place in valid_branches and step.transition in valid_branches[place]:
                             fd = TransitionFiringData(
@@ -117,7 +121,11 @@ class LogPreprocessor:
                     # last seen value in this execution, or if it appears for
                     # the first time.
                     if sanitized not in state or state[sanitized] != val:
-                        changed[sanitized] = val
+                        attr_type = self.attribute_categories.get(sanitized)
+                        if attr_type in ('categorical', 'numerical'):
+                            changed[sanitized] = utils.sanitize_value(sanitized, str(val))
+                        else:
+                            changed[sanitized] = val
 
                 # --- 3. Create the TransitionFiringData and index it ---
                 fd = TransitionFiringData(
@@ -148,11 +156,18 @@ class LogPreprocessor:
                             and sanitized in self._discretizer.boundaries):
                         val = self._discretizer.transform_value(sanitized, val)
                     if val is not None:
-                        state[sanitized] = val
+                        attr_type = self.attribute_categories.get(sanitized)
+                        if attr_type in ('categorical', 'numerical'):
+                            state[sanitized] = utils.sanitize_value(sanitized, str(val))
+                        else:
+                            state[sanitized] = val
 
-        logger.debug(
-            "Preprocessing complete: %d transitions, %d XOR places, %d total firings.",
+
+        logger.info(
+            "Preprocessing complete: %d labeled transitions fired, "
+            "%d distinct tau transitions seen, %d XOR places, %d total firings.",
             len(transition_firings),
+            len(tau_seen),
             len(xor_firings),
             sum(len(v) for v in transition_firings.values()),
         )
