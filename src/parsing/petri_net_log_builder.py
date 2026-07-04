@@ -91,11 +91,13 @@ class PetriNetLogBuilder:
             final_marking=self.final_marking,
         )
 
-    def _has_lifecycle_start_events(self, log: Any) -> bool:
+    @staticmethod
+    def _has_lifecycle_start_events(log: Any) -> bool:
         """Return True if any event in the log carries lifecycle:transition == 'start'."""
         for trace in log:
             for event in trace:
                 if event.get("lifecycle:transition", "").lower() == "start":
+                    logger.debug("lifecycle: detected start event in log")
                     return True
         return False
 
