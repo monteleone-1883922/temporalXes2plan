@@ -495,16 +495,21 @@ class AnalysisConfig:
     # from the SOP guards after training.
     # dt_prune_orphan_mode controls what happens when pruning would remove ALL leaves
     # for an activity:
-    #   "keep_best" — keep the single highest-purity leaf (tie-break: most samples)
-    #   "drop"      — remove the activity from guards entirely (WARNING logged)
+    #   "fallback" — assign probabilistic fallback (cascade_level=2); no guard produced,
+    #                branch stays in the PDDL domain with cost-based routing (default)
+    #   "keep_best"— keep the single highest-purity leaf (tie-break: most samples)
+    #   "drop"     — remove the activity from guards entirely (WARNING logged)
     dt_prune_min_leaf_samples: int = 5
     dt_prune_min_purity: float = 0.70
-    dt_prune_orphan_mode: str = "keep_best"
+    dt_prune_orphan_mode: str = "fallback"
 
     # --- XOR split statistical fallback (Level 2) ---
     # majority_only | weighted | pruned_weighted
-    xor_statistical_mode: str = "pruned_weighted"
+    xor_statistical_mode: str = "weighted"
     xor_prune_threshold: float = 0.10
+    # xor_screen_prune_branches: when False, xor_prune_threshold is ignored and all
+    # branches are treated as "active" regardless of observed probability.
+    xor_screen_prune_branches: bool = True
 
     # --- Conditional effect screening ---
     # Attributes with presence_probability below never_threshold are not effects.
@@ -644,11 +649,15 @@ class XorBranchInfo:
             3 = no data (all branches kept with equal cost).
         guards: DT conditions for THIS branch in SOP form (List[List[Guard]]).
             None when cascade_level > 1.
+        routing_source: Human-readable label explaining how routing was decided.
+            Values: "dt", "dt_orphan", "dt_low_prob", "deterministic",
+            "deterministic_floor", "probabilistic", "equal_weight".
     """
     probability: float
     total_samples: int
     cascade_level: int
     guards: Optional[List[List[Guard]]]
+    routing_source: str = ""
 
 
 @dataclass
