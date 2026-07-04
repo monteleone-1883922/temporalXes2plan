@@ -95,7 +95,7 @@ class DomainBuilder:
 
         requirements = [":strips", ":typing"]
         if any(isinstance(a, PDDLDurativeAction) for a in actions):
-            requirements.append(":durative-actions")
+            requirements += [":durative-actions", ":duration-inequalities"]
 
         has_costs = use_costs
         if has_costs:
