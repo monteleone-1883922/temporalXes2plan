@@ -2,6 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
+import core_utils as utils
 from encoding.pddl_model import PDDLCondition, PDDLEffect
 
 
@@ -108,6 +109,7 @@ class ProblemBuilder:
             atoms.append("(= (total-cost) 0)")
         if deadline is not None and deadline > 0:
             atoms.append(f"(at {deadline:.1f} (deadline_exceeded))")
+        already_set: set = set()
         for eff in effects:
             attr = eff["attribute"]
             value = str(eff.get("value", ""))
@@ -127,6 +129,20 @@ class ProblemBuilder:
             atom = effect.to_pddl()
             if not effect.clear:
                 atoms.append(atom)
+                already_set.add(attr)
+
+        # Emit (attr_is {attr}_val_none) for every categorical/numerical
+        # attribute not already initialised by init_effects.  This makes the
+        # initial PDDL state well-formed: every attribute starts as "unwritten"
+        # rather than simply absent, which matches the log_preprocessor semantics.
+        for attr, entry in catalog.items():
+            attr_type = entry.get("type") if isinstance(entry, dict) else getattr(entry, "attribute_type", None)
+            if attr_type not in ("categorical", "numerical"):
+                continue
+            if attr in already_set:
+                continue
+            none_val = utils.sanitize_value(attr, "none")
+            atoms.append(PDDLEffect.set_attr_is(attr, none_val).to_pddl())
 
         return atoms
 

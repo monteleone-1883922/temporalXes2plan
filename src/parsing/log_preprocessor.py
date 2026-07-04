@@ -79,7 +79,14 @@ class LogPreprocessor:
         for execution in pn_log.executions:
             # Per-execution running state: sanitized attr name → latest value.
             # Reset for every execution so traces remain independent.
-            state: Dict[str, Any] = {}
+            # Categorical and numerical attributes are pre-seeded with the NONE
+            # sentinel so pre_state always carries an explicit value for every
+            # known attribute, avoiding NaN in the DT feature matrix.
+            state: Dict[str, Any] = {
+                attr: utils.sanitize_value(attr, "none")
+                for attr, t in self.attribute_categories.items()
+                if t in ('categorical', 'numerical')
+            }
 
             for step in execution.steps:
                 # Tau transitions carry no observable activity and are never

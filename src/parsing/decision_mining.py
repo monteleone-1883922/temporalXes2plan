@@ -328,7 +328,16 @@ class DecisionMiner:
         if X.shape[1] == 0:
             return {}, 0.0
 
-        X_enc = pd.get_dummies(X.fillna(0), columns=list(categorical_cols), dummy_na=False)
+        # Only fill boolean/binary columns with 0; categorical columns must not
+        # be filled with 0 — that would create a spurious dummy column "{attr}_0"
+        # and produce Guard(attr, "0") in the extracted SOP conditions.
+        # Categorical NaN rows produce all-zero one-hot vectors via dummy_na=False,
+        # which is the correct encoding for "attribute absent / not yet written".
+        X_for_enc = X.copy()
+        for col in X_for_enc.columns:
+            if col not in categorical_cols:
+                X_for_enc[col] = X_for_enc[col].fillna(0)
+        X_enc = pd.get_dummies(X_for_enc, columns=list(categorical_cols), dummy_na=False)
         X_enc = X_enc.rename(columns={c: utils.sanitize_name(c) for c in X_enc.columns})
 
         if X_enc.empty or X_enc.shape[1] == 0:
