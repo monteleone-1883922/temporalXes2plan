@@ -7,13 +7,16 @@ Filtra la collezione di 98 event log (Costa et al., BPM 2025) per:
 
 Input: Metadata.csv scaricato da https://zenodo.org/records/16268743
 """
-import re
+
 import sys
 from pathlib import Path
 import argparse
 import pandas as pd
+import pm4py
 import requests
 
+from evaluation.log_downloader import download_if_needed, clean_columns
+from parsing.petri_net_log_builder import PetriNetLogBuilder
 
 MAX_ACTIVITIES = 40  # soglia di gestibilità per il dominio PDDL, modificabile
 
@@ -28,10 +31,7 @@ BEHAVIOR_DIFFICULTY = {
 }
 
 
-def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalizza i nomi colonna rimuovendo i ritorni a capo interni."""
-    df.columns = df.columns = [re.sub(r"\s+", " ", c).strip() for c in df.columns]
-    return df
+
 
 
 def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None = None, max_variants: int | None = None) -> pd.DataFrame:
@@ -46,9 +46,7 @@ def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None 
 
     df = clean_columns(df)
 
-    has_lifecycle = df["Additional Attributes"].str.contains("Lifecycle", case=False, na=False)
-
-    candidates = df.loc[has_lifecycle].copy()
+    candidates = df #df.loc[has_lifecycle].copy()
 
     candidates["behavior_rank"] = candidates["Prominent Exhibited Behavior"].map(
         BEHAVIOR_DIFFICULTY
@@ -61,6 +59,22 @@ def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None 
 
     if max_variants is not None:
         candidates = candidates.loc[candidates["Number of Variants"] < max_variants]
+
+    candidates = candidates.loc[candidates["Dataset Format"] == ".xes"]
+    candidates["has_lifecycle_start"] = None
+
+    for idx, row in candidates.iterrows():
+        try:
+            print(f"Processing row {row['Event Log ID']}")
+            log_path, fmt = download_if_needed(row, Path(__file__).parent / "data" / "cache")
+            log = pm4py.objects.log.importer.xes.importer.apply(str(log_path))
+            has_start = PetriNetLogBuilder._has_lifecycle_start_events(log)
+            candidates.at[idx, "has_lifecycle_start"] = has_start
+        except Exception as e:
+            # If download or parsing fails, mark as None and log the error
+            print(f"[WARN] Could not process row {row["Event Log ID"]}: {e}")
+            candidates.at[idx, "has_lifecycle_start"] = None
+    candidates = candidates.loc[candidates["has_lifecycle_start"] == True]
 
     manageable = candidates.sort_values(["behavior_rank", "Number of Activities"])
     manageable = manageable.drop_duplicates(subset="Event Log Name")
@@ -92,7 +106,8 @@ def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None 
             "Activity Label",
             "Variant Proportion Ratio",
             "% Case Coverage (Top 5 Variants)",
-            "Event Log ID"
+            "Event Log ID",
+            "has_lifecycle_start"
         ]
     ]
 
