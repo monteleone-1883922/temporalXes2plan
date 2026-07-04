@@ -509,6 +509,34 @@ class PartialTraceReplayer:
         return activity_to_node, trans_outputs, silent_inputs, silent_outputs
 
     # ------------------------------------------------------------------
+    # Full-trace attribute scan
+    # ------------------------------------------------------------------
+
+    def scan_final_attributes(
+        self,
+        events: List[Any],
+        current_data: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """Scan all events in a trace and accumulate final attribute values.
+
+        No Petri net verification is performed. Later events overwrite earlier
+        ones for the same attribute, yielding the last observed value for each.
+
+        Args:
+            events: All pm4py events of the trace.
+            current_data: Parsed current.json dict.
+
+        Returns:
+            Dict mapping sanitized attribute name → normalized value.
+        """
+        catalog = current_data.get("attribute_catalog", {})
+        accumulated: Dict[str, str] = {}
+        warnings: List[str] = []
+        for event in events:
+            self._process_event_attributes(event, catalog, accumulated, warnings)
+        return accumulated
+
+    # ------------------------------------------------------------------
     # Attribute pre-processing
     # ------------------------------------------------------------------
 
@@ -573,7 +601,7 @@ class PartialTraceReplayer:
             return label
 
         # categorical
-        value = utils.sanitize_name(str(raw_value))
+        value = utils.sanitize_value(attr, str(raw_value))
         if possible_values and value not in possible_values:
             msg = f"Value '{value}' for '{attr}' ignored: not a known category."
             warnings.append(msg)

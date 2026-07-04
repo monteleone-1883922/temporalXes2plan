@@ -107,7 +107,7 @@ def sample_prefix(
 
     prefix_duration_s = _duration_seconds(prefix_events)
     full_duration_s = _duration_seconds(events)
-    final_attrs = _event_attributes(prefix_events[-1]) if prefix_events else {}
+    final_attrs = {eff["attribute"]: eff["value"] for eff in replay.final_effects}
 
     return PrefixSample(
         prefix_events=prefix_events,
