@@ -17,7 +17,7 @@ class DomainBuilder:
     def build_with_registry(
         self,
         parse_result: ParseResult,
-        domain_name: str = "process",
+        domain_name: str = "test_process",
         use_durative: bool = False,
         use_costs: bool = False,
         config: Optional[AnalysisConfig] = None,
