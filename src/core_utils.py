@@ -14,36 +14,71 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def sanitize_name(name: str) -> str:
+def _replace_special_chars(s: str) -> str:
+    """Replace non-alphanumeric characters for PDDL name safety.
+
+    Space becomes '_'; any other non-alphanumeric/non-underscore character
+    becomes 'ascii{decimal_code}' (e.g. '#' → 'ascii35', '@' → 'ascii64').
+    Consecutive underscores are collapsed and leading/trailing underscores
+    are stripped.
     """
-    Sanitize an activity or attribute name for use in PDDL syntax.
-    Strips 'case:' prefixes and replaces spaces or special characters with underscores.
+    parts = []
+    for ch in s:
+        if ch.isalpha() or ch.isdigit() or ch == '_':
+            parts.append(ch)
+        elif ch == ' ':
+            parts.append('_')
+        else:
+            parts.append(f"ascii{ord(ch)}")
+    result = ''.join(parts)
+    result = re.sub(r'_+', '_', result)
+    return result.strip('_')
 
-    Args:
-        name: The original name string.
 
-    Returns:
-        A PDDL-compatible sanitized lowercase string.
+def sanitize_name(name: str) -> str:
+    """Sanitize an activity or attribute name for use in PDDL syntax.
+
+    Strips 'case:' prefixes; spaces become '_'; other special characters
+    become 'ascii{code}' to preserve uniqueness and avoid empty results.
 
     ESEMPIO:
-        "case:concept:name" -> "concept_name"
-        "ER Registration" -> "er_registration"
-        "CRP (mg/L)" -> "crp__mg_l_"
+        "case:concept:name" -> "conceptascii58name"
+        "ER Registration"   -> "er_registration"
+        "#"                 -> "ascii35"
     """
     if not name:
         return name
-    # Strip "case:" prefix for cleaner trace attribute names
     if name.lower().startswith("case:"):
-        name = name[5:]  # Remove "case:" prefix
-    return name.strip().lower()\
-        .replace(" ", "_")\
+        name = name[5:]
+    name = _replace_special_chars(name.strip().lower().replace(" ", "_")\
         .replace(":", "_")\
         .replace("-", "_")\
         .replace("(", "")\
         .replace(")", "")\
         .replace("/", "_")\
-        .replace("\\", "_")
+        .replace("\\", "_"))
+    return name or "_"
 
+
+def sanitize_value(attr_name: str, raw_value: str) -> str:
+    """Produce a PDDL constant for an attribute value as {attr}_val_{value}.
+
+    Args:
+        attr_name: Already-sanitized attribute name (e.g. "costo").
+        raw_value: Raw string value from the log (e.g. "alto", "lte_6_0", "#").
+
+    Returns:
+        A valid PDDL constant name, e.g. "costo_val_alto".
+
+    ESEMPIO:
+        sanitize_value("costo",    "alto")   -> "costo_val_alto"
+        sanitize_value("expense",  "lte_6_0")-> "expense_val_lte_6_0"
+        sanitize_value("dismissal","#")      -> "dismissal_val_ascii35"
+        sanitize_value("amount",   "2")      -> "amount_val_2"
+    """
+    cleaned = _replace_special_chars(str(raw_value).strip().lower())
+    cleaned = cleaned or "empty"
+    return f"{attr_name}_val_{cleaned}"
 
 def convert_interval_to_lte_gte(interval_str: str) -> str:
     """
