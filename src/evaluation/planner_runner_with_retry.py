@@ -26,7 +26,7 @@ from evaluation.eval_api import EvalAPI, PlanResult
 
 logger = logging.getLogger(__name__)
 
-_NON_RETRYABLE = {"unsolvable_structural", "unsolvable_resource", "timeout"}
+_NON_RETRYABLE = {"unsolvable_structural", "unsolvable_resource", "unsolvable_parse", "timeout"}
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,15 @@ def run_with_retry(
             return result, attempt
 
         if result.solvability in _NON_RETRYABLE:
-            logger.info("[retry] %s → %s (non-retryable, attempt %d)", query_id, result.solvability, attempt)
+            failure_path = _write_failure_pointer(
+                failure_dir, query_id, domain_text, problem_text, result
+            )
+            logger.warning(
+                "[retry] %s → %s (non-retryable, attempt %d): %s — see %s",
+                query_id, result.solvability, attempt,
+                result.error or "(no error detail)",
+                failure_path,
+            )
             return result, attempt
 
         if attempt < retry_cfg.max_attempts:
@@ -110,7 +118,8 @@ def run_with_retry(
             time.sleep(delay)
 
     logger.error("[retry] %s exhausted %d attempts — writing failure pointer.", query_id, retry_cfg.max_attempts)
-    _write_failure_pointer(failure_dir, query_id, domain_text, problem_text, last_result)
+    failure_path = _write_failure_pointer(failure_dir, query_id, domain_text, problem_text, last_result)
+    logger.error("[retry] %s failure log: %s", query_id, failure_path)
     return last_result, retry_cfg.max_attempts
 
 
@@ -124,7 +133,7 @@ def _write_failure_pointer(
     domain_text: str,
     problem_text: str,
     last_result: PlanResult,
-) -> None:
+) -> Path:
     """Write a JSON failure pointer file for post-hoc debugging.
 
     Args:
@@ -145,6 +154,6 @@ def _write_failure_pointer(
         "problem_pddl": problem_text,
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
-    (failure_dir / f"{query_id}.json").write_text(
-        json.dumps(pointer, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    path = failure_dir / f"{query_id}.json"
+    path.write_text(json.dumps(pointer, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
