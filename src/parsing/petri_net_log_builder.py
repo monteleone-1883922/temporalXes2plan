@@ -246,7 +246,7 @@ class PetriNetLogBuilder:
 
             is_tau = transition.label is None
             activity_name = (
-                utils.sanitize_name(transition.label)
+                transition.label
                 if not is_tau
                 else self.silent_transitions.get(transition, f"tau_unknown_{id(transition)}")
             )

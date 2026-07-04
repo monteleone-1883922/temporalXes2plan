@@ -1,7 +1,7 @@
-import logging
+
 import copy
 from tqdm import tqdm
-from typing import List, Dict, Optional, Any, Tuple, Set, Union
+from typing import Dict, Any, Tuple, Set
 import pm4py
 import core_utils as utils
 from parsing.csv_loader import csv_to_event_log, load_mapping_file
@@ -130,7 +130,7 @@ class LogProcessor:
         
         # Include trace (case) attributes
         for attr in pm4py.get_trace_attributes(full_log):
-            sanitized_name = utils.sanitize_name(f"case:{attr}")
+            sanitized_name = f"case:{attr}"
             values = [trace.attributes[attr] for trace in tqdm(full_log, desc=f"Categorizing trace attribute {attr}", leave=False) if attr in trace.attributes]
             if values:
                 attr_categories[sanitized_name] = 'boolean' \
@@ -143,7 +143,7 @@ class LogProcessor:
         for attr in pm4py.get_event_attributes(full_log):
             if attr in self.IGNORED_ATTRIBUTES:
                 continue 
-            sanitized_name = utils.sanitize_name(attr)
+            sanitized_name = attr
             values = pm4py.get_event_attribute_values(full_log, attr).keys()
             attr_categories[sanitized_name] = 'boolean' \
                 if all(isinstance(val, bool) for val in values) \

@@ -135,28 +135,43 @@ class Discretizer:
     def all_bin_labels(self, attr: str) -> List[str]:
         """Return every possible interval label for a discretized attribute.
 
-        Mirrors exactly the label format produced by discretize_value so the
-        two are always consistent.  Returns [] if the attribute has no boundaries.
-
         Args:
             attr: Sanitized attribute name.
 
         Returns:
             Ordered list of bin label strings covering (-inf, +inf).
+            Returns [] if the attribute has no boundaries.
         """
         thresholds = self.boundaries.get(attr)
         if not thresholds:
             return []
-        thresholds = sorted(thresholds)
-        labels: List[str] = []
-        t0 = str(thresholds[0]).replace('.', '_').replace('-', 'neg')
-        labels.append(f"lte_{t0}")
+        return Discretizer.labels_from_splits(thresholds)
+
+    @staticmethod
+    def labels_from_splits(splits: List[float]) -> List[str]:
+        """Return all categorical interval labels for a given list of split points.
+
+        Mirrors the label format produced by core_utils.discretize_value.
+
+        Args:
+            splits: Boundary floats (order does not matter).
+
+        Returns:
+            Ordered list of label strings covering (-inf, +inf).
+            E.g. splits=[10.0, 50.0] → ["lte_10_0", "gte_10_0_lte_50_0", "gte_50_0"].
+            Returns [] for an empty splits list.
+        """
+        if not splits:
+            return []
+        thresholds = sorted(splits)
+
+        def _fmt(t: float) -> str:
+            return str(t).replace('.', '_').replace('-', 'neg')
+
+        labels: List[str] = [f"lte_{_fmt(thresholds[0])}"]
         for i in range(len(thresholds) - 1):
-            lo = str(thresholds[i]).replace('.', '_').replace('-', 'neg')
-            hi = str(thresholds[i + 1]).replace('.', '_').replace('-', 'neg')
-            labels.append(f"gte_{lo}_lte_{hi}")
-        tn = str(thresholds[-1]).replace('.', '_').replace('-', 'neg')
-        labels.append(f"gte_{tn}")
+            labels.append(f"gte_{_fmt(thresholds[i])}_lte_{_fmt(thresholds[i + 1])}")
+        labels.append(f"gte_{_fmt(thresholds[-1])}")
         return labels
 
     # ------------------------------------------------------------------
@@ -237,11 +252,11 @@ class Discretizer:
             )
             return None, None
 
-        grid = np.linspace(values.min(), values.max(), 1000)
+        grid = np.linspace(values.min(), values.max(), self.config.kde_grid_points)
         density = kde(grid)
 
-        peak_idx = argrelextrema(density, np.greater, order=5)[0]
-        valley_idx = argrelextrema(density, np.less, order=5)[0]
+        peak_idx = argrelextrema(density, np.greater, order=self.config.kde_extrema_order)[0]
+        valley_idx = argrelextrema(density, np.less, order=self.config.kde_extrema_order)[0]
 
         # Sentinel valleys at the extremes
         valley_positions = np.concatenate([[grid[0]], grid[valley_idx], [grid[-1]]])
