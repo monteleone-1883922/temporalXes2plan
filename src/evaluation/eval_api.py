@@ -278,8 +278,8 @@ class EvalAPI:
         cost_weight: float = 0.001,
         require_completion: bool = False,
         deadline: Optional[float] = None,
-        domain_name: str = "process",
-        problem_name: str = "problem",
+        domain_name: str = "test_process",
+        problem_name: str = "test_problem",
     ) -> str:
         """Build a PDDL problem string.
 
