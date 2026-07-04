@@ -271,6 +271,12 @@ def _classify(return_code: int, plan_exists: bool, stdout: str, stderr: str) -> 
         return "solved"
     if "unsolvable" in combined or "no solution" in combined:
         return "unsolvable_structural"
+    if any(kw in combined for kw in (
+        "parse error", "error in domain", "error in problem",
+        "unrecognised", "undefined type", "undefined predicate",
+        "could not evaluate", "type error",
+    )):
+        return "unsolvable_parse"
     if return_code != 0:
         return "unsolvable_resource"
     return "unsolvable_resource"
