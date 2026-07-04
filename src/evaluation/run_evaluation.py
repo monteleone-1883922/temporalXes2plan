@@ -324,6 +324,7 @@ def _run_query(
         cost_weight=spec.cost_weight,
         require_completion=spec.require_completion,
         deadline=spec.deadline,
+        temporal=True
     )
 
     if pddl_out_dir is not None:

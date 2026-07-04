@@ -280,6 +280,7 @@ class EvalAPI:
         deadline: Optional[float] = None,
         domain_name: str = "test_process",
         problem_name: str = "test_problem",
+            temporal: bool = False,
     ) -> str:
         """Build a PDDL problem string.
 
@@ -316,6 +317,7 @@ class EvalAPI:
             require_completion=require_completion,
             end_place=end_place,
             deadline=deadline,
+            temporal=temporal
         )
 
     def run_planner(

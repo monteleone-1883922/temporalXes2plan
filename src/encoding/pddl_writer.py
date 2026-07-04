@@ -120,7 +120,7 @@ class PDDLWriter:
         else:
             lines.append("    :parameters ()")
 
-        deadline_atoms = [f"(not ({deadline_predicate}))"] if has_deadline else []
+        deadline_atoms = [f"({deadline_predicate})"] if has_deadline else []
         lines.append(self._render_condition_block(
             ":precondition", action.preconditions, indent="    ",
             extra_atoms=deadline_atoms,
@@ -159,7 +159,7 @@ class PDDLWriter:
                 self._render_timed_block("over all", action.conditions_over_all)
             )
         if has_deadline:
-            condition_parts.append(f"(over all (not ({deadline_predicate})))")
+            condition_parts.append(f"(over all ({deadline_predicate}))")
         if action.conditions_at_end:
             condition_parts.append(
                 self._render_timed_block("at end", action.conditions_at_end)
