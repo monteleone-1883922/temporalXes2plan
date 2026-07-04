@@ -100,7 +100,7 @@ class EvalAPI:
         self,
         log_path: str,
         config: Optional[AnalysisConfig] = None,
-        domain_name: str = "process",
+        domain_name: str = "test_process",
         discovery_algorithm: str = "inductive",
         coverage_percentage: float = 0.001,
         use_durative: bool = False,
@@ -214,7 +214,7 @@ class EvalAPI:
     def build_domain(
         self,
         parse_result: ParseResult,
-        domain_name: str = "process",
+        domain_name: str = "test_process",
         use_durative: bool = False,
         use_costs: bool = False,
     ) -> str:
@@ -240,7 +240,7 @@ class EvalAPI:
     def build_domain_with_variant_effects(
         self,
         parse_result: ParseResult,
-        domain_name: str = "process",
+        domain_name: str = "test_process",
         use_durative: bool = False,
         use_costs: bool = False,
     ) -> tuple:

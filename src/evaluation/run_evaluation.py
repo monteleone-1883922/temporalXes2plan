@@ -78,6 +78,8 @@ class EvalConfig:
     jenks_sample_size: int = 20000
     # Replay params
     tau_max_depth: int = 10
+    # Debug: persist domain.pddl + problem.pddl for every query
+    save_pddl: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -240,24 +242,26 @@ def evaluate_log(
                     logger.warning("[%s] %s: prefix sampling failed — skipping trace.", log_id, trace_id)
                     continue
 
+                pddl_out_dir = (log_out_dir / "pddl") if cfg.save_pddl else None
+
                 # Q1 — process completion, no deadline
                 q1_spec = build_q1(prefix, cfg.cost_weight)
                 query_results.append(
-                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
+                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects, pddl_out_dir)
                 )
 
                 # Q2 — completion within remaining time budget
                 q2_spec = build_q2(prefix, cfg.cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects, pddl_out_dir)
                     )
 
                 # Q3 — completion within budget + attribute constraints
                 q3_spec = build_q3(prefix, serialized, cfg.cost_weight)
                 if q3_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects)
+                        _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects, pddl_out_dir)
                     )
                 else:
                     query_id = f"{log_id}_{trace_id}_Q3"
@@ -307,6 +311,7 @@ def _run_query(
     failures_dir: Path,
     prefix: Any,
     variant_effects: Optional[Dict[str, Dict[str, Any]]] = None,
+    pddl_out_dir: Optional[Path] = None,
 ) -> QueryResult:
     query_id = f"{log_id}_{trace_id}_{spec.query_type}"
 
@@ -320,6 +325,12 @@ def _run_query(
         require_completion=spec.require_completion,
         deadline=spec.deadline,
     )
+
+    if pddl_out_dir is not None:
+        query_pddl_dir = pddl_out_dir / query_id
+        query_pddl_dir.mkdir(parents=True, exist_ok=True)
+        (query_pddl_dir / "domain.pddl").write_text(domain_text, encoding="utf-8")
+        (query_pddl_dir / "problem.pddl").write_text(problem_text, encoding="utf-8")
 
     retry_cfg = RetryConfig(
         max_attempts=cfg.max_retries,
@@ -491,6 +502,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="JSON string mapping CSV columns, e.g. '{\"case_id\": \"col_a\"}'.")
     p.add_argument("--log-level", dest="log_level", type=str, default="INFO",
                    help="Python logging level.")
+    p.add_argument("--save-pddl", action="store_true",
+                   help="save pddl problem file.")
     return p
 
 
@@ -537,6 +550,7 @@ def main(args: argparse.Namespace) -> None:
         min_gvf_improvement=args.min_gvf_improvement,
         jenks_sample_size=args.jenks_sample_size,
         tau_max_depth=args.tau_max_depth,
+        save_pddl=args.save_pddl,
     )
 
     selection = get_log_selection(Path(args.metadata), log_ids=cfg.log_ids)
