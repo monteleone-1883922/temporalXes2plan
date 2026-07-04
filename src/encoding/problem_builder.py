@@ -112,7 +112,7 @@ class ProblemBuilder:
         already_set: set = set()
         for eff in effects:
             attr = eff["attribute"]
-            value = str(eff.get("value", ""))
+            value = utils.sanitize_value(attr ,str(eff.get("value", "")))
             is_bool = catalog.get(attr, {}).get("type") == "boolean"
 
             if is_bool:

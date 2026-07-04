@@ -28,7 +28,7 @@ class DomainRebuilder:
     def rebuild(
         self,
         data: Dict[str, Any],
-        domain_name: str = "process",
+        domain_name: str = "test_process",
         use_durative: bool = False,
         use_costs: bool = False,
         has_deadline: bool = False,
