@@ -92,7 +92,7 @@ class DecisionMiner:
             for t in transitions:
                 act = self._activity_name(t)
                 prob = stats.probabilities.get(act, 0.0) if stats else 0.0
-                if self.config.xor_screen_prune_branches and prob < self.config.xor_prune_threshold:
+                if prob < self.config.xor_prune_threshold:
                     status = "pruned"
                 else:
                     status = "active"
@@ -338,14 +338,14 @@ class DecisionMiner:
             if col not in categorical_cols:
                 X_for_enc[col] = X_for_enc[col].fillna(0)
         X_enc = pd.get_dummies(X_for_enc, columns=list(categorical_cols), dummy_na=False)
-        X_enc = X_enc.rename(columns={c: utils.sanitize_name(c) for c in X_enc.columns})
+        X_enc = X_enc.rename(columns={c: c for c in X_enc.columns})
 
         if X_enc.empty or X_enc.shape[1] == 0:
             return {}, 0.0
 
         feature_names = list(X_enc.columns)
-        sanitized_cats = {utils.sanitize_name(c) for c in categorical_cols}
-        sanitized_bools = {utils.sanitize_name(c) for c in bool_cols}
+        sanitized_cats = {c for c in categorical_cols}
+        sanitized_bools = {c for c in bool_cols}
 
         clf = DecisionTreeClassifier(
             max_depth=self.config.dt_max_depth,
@@ -540,7 +540,7 @@ class DecisionMiner:
     def _activity_name(self, transition: Transition) -> str:
         """Resolve the sanitized activity name for a transition."""
         if transition.label is not None:
-            return utils.sanitize_name(transition.label)
+            return transition.label
         return self.silent_transitions.get(transition, f"tau_unknown_{id(transition)}")
 
     # =========================================================================
