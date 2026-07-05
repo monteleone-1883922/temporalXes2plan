@@ -126,7 +126,7 @@ class ModelDiscoverer:
                 activities.add(tau_name)
                 tau_counter += 1
             else:
-                activities.add(utils.sanitize_name(transition.label))
+                activities.add(transition.label)
 
         return activities, silent_transitions
 
@@ -213,5 +213,5 @@ class ModelDiscoverer:
     @staticmethod
     def _activity_name(transition: Transition, silent_transitions: Dict[Transition, str]) -> str:
         if transition.label is not None:
-            return utils.sanitize_name(transition.label)
+            return transition.label
         return silent_transitions.get(transition, f"tau_unknown_{id(transition)}")
