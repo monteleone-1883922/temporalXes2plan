@@ -83,7 +83,7 @@ class LogPreprocessor:
             # sentinel so pre_state always carries an explicit value for every
             # known attribute, avoiding NaN in the DT feature matrix.
             state: Dict[str, Any] = {
-                attr: utils.sanitize_value(attr, "none")
+                attr: "none"
                 for attr, t in self.attribute_categories.items()
                 if t in ('categorical', 'numerical')
             }
@@ -106,7 +106,7 @@ class LogPreprocessor:
                             xor_firings[place.name].append(fd)
                     continue
 
-                act = utils.sanitize_name(step.activity_name)
+                act = step.activity_name
 
                 # --- 1. Snapshot the state BEFORE this step's attributes ---
                 # This enforces causal ordering: features represent what was
@@ -118,7 +118,7 @@ class LogPreprocessor:
                 for attr, val in step.attributes.items():
                     if attr in self.config.ignored_attributes or val is None:
                         continue
-                    sanitized = utils.sanitize_name(attr)
+                    sanitized = attr
                     if (self._discretizer is not None
                             and sanitized in self._discretizer.boundaries):
                         val = self._discretizer.transform_value(sanitized, val)
@@ -128,11 +128,7 @@ class LogPreprocessor:
                     # last seen value in this execution, or if it appears for
                     # the first time.
                     if sanitized not in state or state[sanitized] != val:
-                        attr_type = self.attribute_categories.get(sanitized)
-                        if attr_type in ('categorical', 'numerical'):
-                            changed[sanitized] = utils.sanitize_value(sanitized, str(val))
-                        else:
-                            changed[sanitized] = val
+                        changed[sanitized] = val
 
                 # --- 3. Create the TransitionFiringData and index it ---
                 fd = TransitionFiringData(
@@ -163,11 +159,7 @@ class LogPreprocessor:
                             and sanitized in self._discretizer.boundaries):
                         val = self._discretizer.transform_value(sanitized, val)
                     if val is not None:
-                        attr_type = self.attribute_categories.get(sanitized)
-                        if attr_type in ('categorical', 'numerical'):
-                            state[sanitized] = utils.sanitize_value(sanitized, str(val))
-                        else:
-                            state[sanitized] = val
+                        state[sanitized] = val
 
 
         logger.info(
