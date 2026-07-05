@@ -494,8 +494,10 @@ class AnalysisConfig:
     kde_extrema_order: int = 5
 
 
+    # TODO: split between config for effects and for xor split
     # --- Decision tree cascade (shared for XOR splits and conditional effects) ---
     dt_min_samples: int = 30
+    dt_min_prob_to_use: float = 0.05
     dt_min_accuracy: float = 0.75
     dt_max_depth: int = 3
 
@@ -528,6 +530,8 @@ class AnalysisConfig:
     # xor_screen_prune_branches: when False, xor_prune_threshold is ignored and all
     # branches are treated as "active" regardless of observed probability.
     xor_screen_prune_branches: bool = True
+
+    min_probability_for_fallbacks: float = 1e-3
 
     # --- Conditional effect screening ---
     # Attributes with presence_probability below never_threshold are not effects.
