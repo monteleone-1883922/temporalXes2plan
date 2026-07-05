@@ -23,7 +23,7 @@ from models import (
     AnalysisConfig,
     PetriNetLog,
     PreprocessedLog,
-    TransitionFiringData,
+    TransitionFiringData, StaticAttributeInfo,
 )
 from parsing.discretizer import Discretizer
 
@@ -75,6 +75,7 @@ class LogPreprocessor:
         valid_branches: Dict[PetriNet.Place, Set[Transition]] = {
             place: set(transitions) for place, transitions in xor_splits.items()
         }
+        static_attributes_info: Dict[str, StaticAttributeInfo] = {}
 
         for execution in pn_log.executions:
             # Per-execution running state: sanitized attr name → latest value.
@@ -87,6 +88,7 @@ class LogPreprocessor:
                 for attr, t in self.attribute_categories.items()
                 if t in ('categorical', 'numerical')
             }
+            attr_is_static: Dict[str, bool] = {}
 
             for step in execution.steps:
                 # Tau transitions carry no observable activity and are never
@@ -116,6 +118,8 @@ class LogPreprocessor:
                 # --- 2. Compute which attributes this step changes ---
                 changed: Dict[str, Any] = {}
                 for attr, val in step.attributes.items():
+                    if attr not in attr_is_static:
+                        attr_is_static[attr] = True
                     if attr in self.config.ignored_attributes or val is None:
                         continue
                     sanitized = attr
@@ -129,6 +133,7 @@ class LogPreprocessor:
                     # the first time.
                     if sanitized not in state or state[sanitized] != val:
                         changed[sanitized] = val
+                        attr_is_static[attr] = False
 
                 # --- 3. Create the TransitionFiringData and index it ---
                 fd = TransitionFiringData(
@@ -161,6 +166,15 @@ class LogPreprocessor:
                     if val is not None:
                         state[sanitized] = val
 
+            for attr, is_static in attr_is_static.items():
+                attr_static_info = static_attributes_info.get(attr, StaticAttributeInfo(attr, 0, 0))
+                attr_static_info.appearances += 1
+                attr_static_info.static_appearances += int(is_static)
+                static_attributes_info[attr] = attr_static_info
+
+        static_attrs = {attr_info.name
+                        for attr_info in static_attributes_info.values()
+                        if attr_info.is_static(self.config.static_attr_probability, self.config.static_appearances_min_samples)}
 
         logger.info(
             "Preprocessing complete: %d labeled transitions fired, "
@@ -174,4 +188,5 @@ class LogPreprocessor:
         return PreprocessedLog(
             transition_firings=dict(transition_firings),
             xor_firings=dict(xor_firings),
+            static_attributes=static_attrs,
         )
