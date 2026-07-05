@@ -147,6 +147,9 @@ class ProbabilityEstimator:
 
             for fd in firings:
                 for attr, val in fd.changed_attrs.items():
+                    # Ignore static attributes for effects
+                    if attr in preprocessed_log.static_attributes:
+                        continue
                     effect_counts[attr] += 1
                     val_key = val  # values are pre-sanitized by LogPreprocessor
                     value_counts[attr][val_key] += 1
@@ -182,6 +185,6 @@ class ProbabilityEstimator:
         pre-assigned tau name for silent transitions.
         """
         if transition.label is not None:
-            return utils.sanitize_name(transition.label)
+            return transition.label
         fallback_name = f"tau_unknown_{id(transition)}"
         return self.silent_transitions.get(transition, fallback_name)
