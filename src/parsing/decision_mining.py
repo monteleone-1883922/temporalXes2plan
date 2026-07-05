@@ -94,13 +94,15 @@ class DecisionMiner:
                 prob = stats.probabilities.get(act, 0.0) if stats else 0.0
                 if prob < self.config.xor_prune_threshold:
                     status = "pruned"
+                elif prob < self.config.dt_min_prob_to_use or prob * total_samples < self.config.dt_min_samples:
+                    status = "fallback"
                 else:
                     status = "active"
                 raw[act] = (status, prob)
 
             active_acts = [a for a, (s, _) in raw.items() if s == "active"]
 
-            if len(active_acts) == 1:
+            if len(active_acts) == 1 and all(s != "fallback" for (s, _) in raw.values()):
                 sole = active_acts[0]
                 raw[sole] = ("certain", raw[sole][1])
 
@@ -221,6 +223,13 @@ class DecisionMiner:
                 )
                 screening.action = "fallback"
                 continue
+            if not guards:
+                logger.debug(
+                    "[XOR '%s'] DT produced no guards — falling back to probabilistic costs.",
+                    place_name,
+                )
+                screening.action = "fallback"
+                continue
 
             result[place_name] = XorSplitGuards(
                 guards=guards,
@@ -337,6 +346,8 @@ class DecisionMiner:
         for col in X_for_enc.columns:
             if col not in categorical_cols:
                 X_for_enc[col] = X_for_enc[col].fillna(0)
+            else:
+                X_for_enc[col] = X_for_enc[col].fillna("none")
         X_enc = pd.get_dummies(X_for_enc, columns=list(categorical_cols), dummy_na=False)
         X_enc = X_enc.rename(columns={c: c for c in X_enc.columns})
 
@@ -454,15 +465,6 @@ class DecisionMiner:
                     orphaned, len(candidates), best_p, best_n,
                 )
 
-            else:  # "drop"
-                best_n = max(c[1] for c in candidates)
-                best_p = max(c[2] for c in candidates)
-                logger.warning(
-                    "[DT orphan] branch '%s': all %d leaf/leaves below threshold "
-                    "(best purity=%.3f, best n=%d) — branch DROPPED from guards "
-                    "(dt_prune_orphan_mode='drop').",
-                    orphaned, len(candidates), best_p, best_n,
-                )
 
         sop: Dict[str, List[List[Guard]]] = defaultdict(list)
         for activity, cond_list, _, _ in surviving:
@@ -575,7 +577,8 @@ class DecisionMiner:
             attr_screenings: Dict[str, EffectAttrScreening] = {}
 
             for attr, p in ae.presence_probabilities.items():
-                if p < never_thr:
+                # ignored effect
+                if p < (never_thr and ae.total_firings > self.config.probability_min_samples) or ae.total_firings < self.config.probability_min_samples:
                     attr_screenings[attr] = EffectAttrScreening(
                         presence_probability=p,
                         appearance_action="never",
@@ -585,11 +588,11 @@ class DecisionMiner:
                         values={},
                     )
                     continue
-
-                if p > always_thr:
+                # sure effect
+                if p > always_thr and ae.total_firings > self.config.probability_min_samples:
                     app_action = "deterministic"
                     app_samples = 0
-                elif ae.total_firings < self.config.dt_min_samples:
+                elif ae.total_firings < self.config.dt_min_samples or p < self.config.dt_min_prob_to_use:
                     app_action = "fallback"
                     app_samples = ae.total_firings
                 else:
@@ -601,18 +604,18 @@ class DecisionMiner:
 
                 values: Dict[Any, EffectValueScreening] = {}
                 for val, vp in value_probs.items():
-                    if vp < v_prune:
+                    if vp < v_prune and ae.total_firings * vp > self.config.probability_min_samples:
                         vs = "pruned"
-                    elif vp > v_certain:
+                    elif vp > v_certain and ae.total_firings * vp > self.config.probability_min_samples:
                         vs = "certain"
-                    else:
+                    elif ae.total_firings * vp > self.config.dt_min_samples and vp > self.config.dt_min_prob_to_use:
                         vs = "active"
+                    else:
+                        vs = "fallback"
                     values[val] = EffectValueScreening(probability=vp, status=vs)
 
                 n_active = sum(1 for v in values.values() if v.status == "active")
-                if len(value_probs) <= 1:
-                    val_action = "deterministic"
-                elif n_active < 2:
+                if len(value_probs) <= 1 or n_active < 2 or any(v.status == "certain" for v in values.values()):
                     val_action = "deterministic"
                 elif n_val_samples < self.config.dt_min_samples:
                     val_action = "fallback"
