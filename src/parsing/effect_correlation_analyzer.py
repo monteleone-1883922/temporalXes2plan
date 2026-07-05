@@ -90,7 +90,8 @@ class EffectCorrelationAnalyzer:
             pair_counts: Dict[FrozenSet[str], int] = defaultdict(int)
 
             for firing in firings:
-                attrs = set(firing.changed_attrs.keys())
+                #ignore static attributes
+                attrs = set(firing.changed_attrs.keys()) - preprocessed_log.static_attributes
                 if len(attrs) < 2:
                     continue
                 for a, b in combinations(sorted(attrs), 2):
