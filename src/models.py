@@ -107,6 +107,7 @@ class PreprocessedLog:
     """
     transition_firings: Dict[str, List[TransitionFiringData]]
     xor_firings: Dict[str, List[TransitionFiringData]]
+    static_attributes: Set[str]
 
 
 @dataclass
@@ -462,6 +463,17 @@ class PetriNetModel:
 
 
 @dataclass
+class StaticAttributeInfo:
+    name: str
+    appearances: int
+    static_appearances: int
+
+    def is_static(self, min_static_prob: float, min_appearances: int) -> bool:
+        """Check if this attribute is statically present in the log."""
+        return self.appearances >= min_appearances and self.static_appearances / self.appearances >= min_static_prob
+
+
+@dataclass
 class AnalysisConfig:
     """Global configuration for the XES log analysis pipeline.
 
@@ -478,6 +490,9 @@ class AnalysisConfig:
     gvf_target: float = 0.90          # Early stop when GVF exceeds this (excellent fit)
     min_gvf_improvement: float = 0.01 # Early stop when marginal GVF gain falls below this
     jenks_sample_size: int = 20000    # Max points for Jenks DP (O(n²k)); sample if exceeded
+    kde_grid_points: int = 1000
+    kde_extrema_order: int = 5
+
 
     # --- Decision tree cascade (shared for XOR splits and conditional effects) ---
     dt_min_samples: int = 30
@@ -489,6 +504,9 @@ class AnalysisConfig:
     # Below this threshold the system falls back to level 3: equal weights for XOR
     # branches, or effect removal for conditional effects.
     probability_min_samples: int = 10
+
+    static_appearances_min_samples: int = 40
+    static_attr_probability: float = 0.95
 
     # --- DT leaf pruning ---
     # Leaves with fewer samples or lower purity than these thresholds are removed
