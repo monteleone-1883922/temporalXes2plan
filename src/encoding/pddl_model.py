@@ -1,7 +1,9 @@
 
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Set, Tuple
+from typing import Dict, List, Literal, Optional, Set, Tuple
 
+import core_utils
 
 # ---------------------------------------------------------------------------
 # Structured predicate / effect types
@@ -61,17 +63,22 @@ class PDDLCondition:
 
     def to_pddl(self) -> str:
         """Render to a PDDL predicate string."""
+        attr = core_utils.sanitize_name(self.attribute)
+        value = core_utils.sanitize_value(self.attribute, self.value)
         if self.kind == "marked":
-            return f"(marked {self.attribute})"
+            return f"(marked {attr})"
         if self.kind == "attr_is":
-            return f"({self.attribute}_is {self.value})"
+            return f"({attr}_is {value})"
         if self.kind == "attr_is_not":
-            return f"({self.attribute}_is_not {self.value})"
+            return f"({attr}_is_not {value})"
         if self.kind == "attr_true":
-            return f"({self.attribute}_true)"
+            return f"({attr}_true)"
         if self.kind == "attr_false":
-            return f"({self.attribute}_false)"
+            return f"({attr}_false)"
         raise ValueError(f"Unknown kind: {self.kind!r}")
+
+    def __str__(self) -> str:
+        return self.to_pddl()
 
     # ------------------------------------------------------------------
     # Logic helpers
@@ -129,7 +136,7 @@ class PDDLEffect:
         return cls(kind="marked", attribute=name)
 
     @classmethod
-    def unmarking(cls, name:str) -> "PDDLEffect":
+    def unmarking(cls, name: str) -> "PDDLEffect":
         return cls(kind="marked", attribute=name, clear=True)
 
     @classmethod
@@ -174,19 +181,24 @@ class PDDLEffect:
 
     def to_pddl(self) -> str:
         """Render to a PDDL effect string."""
+        attr = core_utils.sanitize_name(self.attribute)
+        value = core_utils.sanitize_value(self.attribute, self.value)
         if self.kind == "marked":
-            inner = f"(marked {self.attribute})"
+            inner = f"(marked {attr})"
         elif self.kind == "attr_is":
-            inner = f"({self.attribute}_is {self.value})"
+            inner = f"({attr}_is {value})"
         elif self.kind == "attr_is_not":
-            inner = f"({self.attribute}_is_not {self.value})"
+            inner = f"({attr}_is_not {value})"
         elif self.kind == "attr_true":
-            inner = f"({self.attribute}_true)"
+            inner = f"({attr}_true)"
         elif self.kind == "attr_false":
-            inner = f"({self.attribute}_false)"
+            inner = f"({attr}_false)"
         else:
             raise ValueError(f"Unknown kind: {self.kind!r}")
         return f"(not {inner})" if self.clear else inner
+
+    def __str__(self) -> str:
+        return self.to_pddl()
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +211,9 @@ class PDDLType:
     name: str
     parent: Optional[str] = None
 
+    def __str__(self) -> str:
+        return core_utils.sanitize_name(self.name)
+
 
 @dataclass
 class PDDLObject:
@@ -206,12 +221,112 @@ class PDDLObject:
     name: str
     type_name: str
 
+    def __str__(self) -> str:
+        return core_utils.sanitize_name(self.name)
+
 
 @dataclass
 class PDDLPredicate:
     """A PDDL predicate *declaration* with typed parameters (used in :predicates block)."""
     name: str
     parameters: List[Tuple[str, str]] = field(default_factory=list)
+
+    def __str__(self) -> str:
+        name = core_utils.sanitize_name(self.name)
+        if not self.parameters:
+            return f"({name})"
+        ptypes_dict = defaultdict(list)
+        for pname, ptype in self.parameters:
+            ptypes_dict[ptype].append(pname)
+        # pname is a PDDL variable (e.g. "?v") — must not be sanitized
+        params = " ".join(
+            f"{' '.join(pnames)} - {core_utils.sanitize_name(ptype)}"
+            for ptype, pnames  in ptypes_dict.items()
+        )
+        return f"({name} {params})"
+
+
+# ---------------------------------------------------------------------------
+# Container types for domain sections
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PDDLConstants:
+    """Container for PDDL constants; serializes to a (:constants ...) block.
+
+    Groups constants by type when rendering. Both name and type_name are
+    sanitized at render time via PDDLObject.__str__ and sanitize_name.
+    """
+    items: List[PDDLObject] = field(default_factory=list)
+
+    def add(self, obj: PDDLObject) -> None:
+        self.items.append(obj)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __str__(self) -> str:
+        lines = ["  (:constants"]
+        by_type: Dict[str, List[str]] = defaultdict(list)
+        for obj in self.items:
+            type_name = core_utils.sanitize_name(obj.type_name)
+            by_type[type_name].append(str(obj))
+        for type_name in sorted(by_type):
+            names = " ".join(sorted(by_type[type_name]))
+            lines.append(f"    {names} - {type_name}")
+        lines.append("  )")
+        return "\n".join(lines)
+
+
+@dataclass
+class PDDLTypes:
+    """Container for PDDL type declarations; serializes to a (:types ...) block.
+
+    Groups types by parent when rendering (types with no parent are grouped
+    under "object").
+    """
+    items: List[PDDLType] = field(default_factory=list)
+
+    def add(self, t: PDDLType) -> None:
+        self.items.append(t)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __str__(self) -> str:
+        lines = ["  (:types"]
+        by_parent: Dict[str, List[str]] = defaultdict(list)
+        for t in self.items:
+            parent = core_utils.sanitize_name(t.parent) if t.parent else "object"
+            by_parent[parent].append(str(t))
+        for parent in sorted(by_parent):
+            children = " ".join(sorted(by_parent[parent]))
+            lines.append(f"    {children} - {parent}")
+        lines.append("  )")
+        return "\n".join(lines)
+
+
+@dataclass
+class PDDLPredicates:
+    """Container for PDDL predicate declarations; serializes to a (:predicates ...) block.
+
+    extra_names holds zero-parameter predicate names added outside the main catalog
+    (e.g. deadline_ok). They are sanitized at render time.
+    """
+    items: List[PDDLPredicate] = field(default_factory=list)
+
+    def add(self, pred: PDDLPredicate) -> None:
+        self.items.append(pred)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __str__(self) -> str:
+        lines = ["  (:predicates"]
+        for pred in self.items:
+            lines.append(f"    {pred}")
+        lines.append("  )")
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +360,107 @@ class PDDLBaseAction:
     effect_probability: float = 1.0
     effect_attributes: Set[str] = field(default_factory=set)
 
+    # ------------------------------------------------------------------
+    # Rendering helpers shared by PDDLAction / PDDLDurativeAction
+    # ------------------------------------------------------------------
+
+    def _total_cost(self) -> float:
+        return (self.base_cost or 1.0) + (self.additional_cost or 0.0)
+
+    def _render_parameters_block(self) -> str:
+        if self.parameters:
+            by_type: Dict[str, List[str]] = defaultdict(list)
+            for pname, ptype in self.parameters:
+                type_name = core_utils.sanitize_name(ptype)
+                by_type[type_name].append(pname)
+            params = " ".join(
+                f"{' '.join(pnames)} - {ptype}"
+                for ptype, pnames in by_type.items()
+            )
+            return f"    :parameters ({params})"
+        else:
+            return "    :parameters ()"
+
+    @staticmethod
+    def _render_condition_block(
+        keyword: str,
+        items: Set[PDDLCondition],
+        indent: str = "    ",
+        extra_atoms: Optional[List[str]] = None,
+    ) -> str:
+        ordered = sorted(str(c) for c in items)
+        if extra_atoms:
+            ordered = sorted(ordered + extra_atoms)
+        if not ordered:
+            return f"{indent}{keyword} ()"
+        if len(ordered) == 1:
+            return f"{indent}{keyword} {ordered[0]}"
+        inner = f"\n{indent}  ".join(ordered)
+        return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
+
+    @staticmethod
+    def _render_effect_block(
+        keyword: str,
+        items: List[PDDLEffect],
+        indent: str = "    ",
+        cost: Optional[float] = None,
+    ) -> str:
+        ordered = sorted(str(e) for e in items)
+        if cost is not None:
+            ordered.append(f"(increase (total-cost) {cost:.4f})")
+        if not ordered:
+            return f"{indent}{keyword} ()"
+        if len(ordered) == 1:
+            return f"{indent}{keyword} {ordered[0]}"
+        inner = f"\n{indent}  ".join(ordered)
+        return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
+
+    @staticmethod
+    def _render_timed_block(timing: str, items: Set[PDDLCondition], extra_atoms: Optional[List[str]] = None) -> str:
+        ordered = sorted(str(c) for c in items) + (sorted(extra_atoms) if extra_atoms else [])
+        if len(ordered) == 1:
+            return f"({timing} {ordered[0]})"
+        inner = "\n        ".join(ordered)
+
+        return f"({timing} (and\n        {inner}\n      ))"
+
+    @staticmethod
+    def _render_timed_effect_block(timing: str, items: List[PDDLEffect], cost: Optional[float] = None) -> str:
+        ordered = sorted(str(e) for e in items)
+        if cost is not None:
+            ordered.append(f"(increase (total-cost) {cost:.4f})")
+        if len(ordered) == 1:
+            return f"({timing} {ordered[0]})"
+        inner = "\n        ".join(ordered)
+        return f"({timing} (and\n        {inner}\n      ))"
+
 
 @dataclass
 class PDDLAction(PDDLBaseAction):
     """A PDDL instantaneous action."""
     preconditions: Set[PDDLCondition] = field(default_factory=set)
     effects: List[PDDLEffect] = field(default_factory=list)
+
+    def to_pddl(
+        self,
+        has_costs: bool = False,
+        has_deadline: bool = False,
+        deadline_predicate: str = "deadline_ok",
+    ) -> str:
+        """Render to a complete (:action ...) block."""
+        deadline_atoms = [f"({deadline_predicate})"] if has_deadline else []
+        cost = self._total_cost() if has_costs else None
+        lines = [
+            f"  (:action {self.name}",
+            self._render_parameters_block(),
+            self._render_condition_block(
+                ":precondition", self.preconditions,
+                indent="    ", extra_atoms=deadline_atoms
+            ),
+            self._render_effect_block(":effect", self.effects, indent="    ", cost=cost),
+            "  )"
+        ]
+        return "\n".join(lines)
 
 
 @dataclass
@@ -286,16 +496,92 @@ class PDDLDurativeAction(PDDLBaseAction):
     def preconditions(self) -> Set[PDDLCondition]:
         return self.conditions_at_start
 
+    def to_pddl(
+        self,
+        has_costs: bool = False,
+        has_deadline: bool = False,
+        deadline_predicate: str = "deadline_ok",
+    ) -> str:
+        """Render to a complete (:durative-action ...) block."""
+        lines = [f"  (:durative-action {self.name}", self._render_parameters_block(),
+                 f"    :duration (and (>= ?duration {self.duration_min})"
+                 f" (<= ?duration {self.duration_max}))"]
+
+        condition_parts = []
+        if self.conditions_at_start:
+            condition_parts.append(self._render_timed_block("at start", self.conditions_at_start))
+        if self.conditions_over_all:
+            condition_parts.append(self._render_timed_block("over all", self.conditions_over_all, [deadline_predicate] if has_deadline else []))
+        if self.conditions_at_end:
+            condition_parts.append(self._render_timed_block("at end", self.conditions_at_end))
+
+        if not condition_parts:
+            lines.append("    :condition ()")
+        elif len(condition_parts) == 1:
+            lines.append(f"    :condition {condition_parts[0]}")
+        else:
+            lines.append("    :condition (and")
+            for part in condition_parts:
+                lines.append(f"      {part}")
+            lines.append("    )")
+
+        cost = self._total_cost() if has_costs else None
+        effect_parts = []
+        if self.effects_at_start:
+            effect_parts.append(self._render_timed_effect_block("at start", self.effects_at_start))
+        if self.effects_at_end or cost is not None:
+            effect_parts.append(self._render_timed_effect_block("at end", self.effects_at_end, cost=cost))
+
+        if not effect_parts:
+            lines.append("    :effect ()")
+        elif len(effect_parts) == 1:
+            lines.append(f"    :effect {effect_parts[0]}")
+        else:
+            lines.append("    :effect (and")
+            for part in effect_parts:
+                lines.append(f"      {part}")
+            lines.append("    )")
+
+        lines.append("  )")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# PDDL domain
+# ---------------------------------------------------------------------------
 
 @dataclass
 class PDDLDomain:
     """Complete PDDL domain representation."""
     name: str
     requirements: List[str] = field(default_factory=list)
-    types: List[PDDLType] = field(default_factory=list)
-    constants: List[PDDLObject] = field(default_factory=list)
-    predicates: List[PDDLPredicate] = field(default_factory=list)
+    types: PDDLTypes = field(default_factory=PDDLTypes)
+    constants: PDDLConstants = field(default_factory=PDDLConstants)
+    predicates: PDDLPredicates = field(default_factory=PDDLPredicates)
     actions: List[PDDLBaseAction] = field(default_factory=list)
     has_costs: bool = False
     has_deadline: bool = False
     deadline_predicate: str = "deadline_ok"
+
+    def __post_init__(self) -> None:
+        if self.has_deadline:
+            self.predicates.add(PDDLPredicate(self.deadline_predicate))
+
+    def __str__(self) -> str:
+        sections = [
+            f"(define (domain {self.name})",
+            f"  (:requirements {' '.join(self.requirements)})",
+            str(self.types),
+            str(self.constants),
+            str(self.predicates),
+        ]
+        if self.has_costs:
+            sections.append("  (:functions\n    (total-cost)\n  )")
+        for action in self.actions:
+            sections.append(action.to_pddl(
+                has_costs=self.has_costs,
+                has_deadline=self.has_deadline,
+                deadline_predicate=self.deadline_predicate,
+            ))
+        sections.append(")")
+        return "\n\n".join(sections) + "\n"
