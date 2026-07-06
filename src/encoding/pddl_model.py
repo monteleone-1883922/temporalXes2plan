@@ -1,9 +1,12 @@
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional, Set, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 import core_utils
+
+logger = core_utils.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Structured predicate / effect types
@@ -241,7 +244,7 @@ class PDDLPredicate:
         # pname is a PDDL variable (e.g. "?v") — must not be sanitized
         params = " ".join(
             f"{' '.join(pnames)} - {core_utils.sanitize_name(ptype)}"
-            for ptype, pnames  in ptypes_dict.items()
+            for ptype, pnames in ptypes_dict.items()
         )
         return f"({name} {params})"
 
@@ -250,8 +253,28 @@ class PDDLPredicate:
 # Container types for domain sections
 # ---------------------------------------------------------------------------
 
+class _GroupedBlockMixin:
+    """Shared rendering for containers that group their items by a key into a
+    `(:keyword\n    member1 member2 - key\n  )` block (used by PDDLConstants
+    and PDDLTypes, which differ only in what they group by).
+    """
+
+    items: List[Any]
+
+    def _render_grouped_block(self, keyword: str, key_fn) -> str:
+        groups: Dict[str, List[str]] = defaultdict(list)
+        for item in self.items:
+            groups[key_fn(item)].append(str(item))
+        lines = [f"  ({keyword}"]
+        for key in sorted(groups):
+            members = " ".join(sorted(groups[key]))
+            lines.append(f"    {members} - {key}")
+        lines.append("  )")
+        return "\n".join(lines)
+
+
 @dataclass
-class PDDLConstants:
+class PDDLConstants(_GroupedBlockMixin):
     """Container for PDDL constants; serializes to a (:constants ...) block.
 
     Groups constants by type when rendering. Both name and type_name are
@@ -266,20 +289,13 @@ class PDDLConstants:
         return iter(self.items)
 
     def __str__(self) -> str:
-        lines = ["  (:constants"]
-        by_type: Dict[str, List[str]] = defaultdict(list)
-        for obj in self.items:
-            type_name = core_utils.sanitize_name(obj.type_name)
-            by_type[type_name].append(str(obj))
-        for type_name in sorted(by_type):
-            names = " ".join(sorted(by_type[type_name]))
-            lines.append(f"    {names} - {type_name}")
-        lines.append("  )")
-        return "\n".join(lines)
+        return self._render_grouped_block(
+            ":constants", lambda obj: core_utils.sanitize_name(obj.type_name)
+        )
 
 
 @dataclass
-class PDDLTypes:
+class PDDLTypes(_GroupedBlockMixin):
     """Container for PDDL type declarations; serializes to a (:types ...) block.
 
     Groups types by parent when rendering (types with no parent are grouped
@@ -294,25 +310,15 @@ class PDDLTypes:
         return iter(self.items)
 
     def __str__(self) -> str:
-        lines = ["  (:types"]
-        by_parent: Dict[str, List[str]] = defaultdict(list)
-        for t in self.items:
-            parent = core_utils.sanitize_name(t.parent) if t.parent else "object"
-            by_parent[parent].append(str(t))
-        for parent in sorted(by_parent):
-            children = " ".join(sorted(by_parent[parent]))
-            lines.append(f"    {children} - {parent}")
-        lines.append("  )")
-        return "\n".join(lines)
+        return self._render_grouped_block(
+            ":types",
+            lambda t: core_utils.sanitize_name(t.parent) if t.parent else "object",
+        )
 
 
 @dataclass
 class PDDLPredicates:
-    """Container for PDDL predicate declarations; serializes to a (:predicates ...) block.
-
-    extra_names holds zero-parameter predicate names added outside the main catalog
-    (e.g. deadline_ok). They are sanitized at render time.
-    """
+    """Container for PDDL predicate declarations; serializes to a (:predicates ...) block."""
     items: List[PDDLPredicate] = field(default_factory=list)
 
     def add(self, pred: PDDLPredicate) -> None:
@@ -382,24 +388,35 @@ class PDDLBaseAction:
             return "    :parameters ()"
 
     @staticmethod
+    def _and_block(ordered: List[str], base_indent: str) -> str:
+        """Join already-sorted rendered items into a single PDDL expression.
+
+        A single item is returned bare; multiple items are wrapped in
+        `(and ...)`, indented two spaces deeper than base_indent and closed
+        back at base_indent. Shared by all four block-rendering wrappers
+        below, which differ only in keyword/timing syntax and indentation.
+        """
+        if not ordered:
+            return "()"
+        if len(ordered) == 1:
+            return ordered[0]
+        inner = f"\n{base_indent}  ".join(ordered)
+        return f"(and\n{base_indent}  {inner}\n{base_indent})"
+
+    @classmethod
     def _render_condition_block(
+        cls,
         keyword: str,
         items: Set[PDDLCondition],
         indent: str = "    ",
         extra_atoms: Optional[List[str]] = None,
     ) -> str:
-        ordered = sorted(str(c) for c in items)
-        if extra_atoms:
-            ordered = sorted(ordered + extra_atoms)
-        if not ordered:
-            return f"{indent}{keyword} ()"
-        if len(ordered) == 1:
-            return f"{indent}{keyword} {ordered[0]}"
-        inner = f"\n{indent}  ".join(ordered)
-        return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
+        ordered = sorted([str(c) for c in items] + (extra_atoms or []))
+        return f"{indent}{keyword} {cls._and_block(ordered, indent)}"
 
-    @staticmethod
+    @classmethod
     def _render_effect_block(
+        cls,
         keyword: str,
         items: List[PDDLEffect],
         indent: str = "    ",
@@ -408,31 +425,26 @@ class PDDLBaseAction:
         ordered = sorted(str(e) for e in items)
         if cost is not None:
             ordered.append(f"(increase (total-cost) {cost:.4f})")
-        if not ordered:
-            return f"{indent}{keyword} ()"
-        if len(ordered) == 1:
-            return f"{indent}{keyword} {ordered[0]}"
-        inner = f"\n{indent}  ".join(ordered)
-        return f"{indent}{keyword} (and\n{indent}  {inner}\n{indent})"
+        return f"{indent}{keyword} {cls._and_block(ordered, indent)}"
 
-    @staticmethod
-    def _render_timed_block(timing: str, items: Set[PDDLCondition], extra_atoms: Optional[List[str]] = None) -> str:
-        ordered = sorted(str(c) for c in items) + (sorted(extra_atoms) if extra_atoms else [])
-        if len(ordered) == 1:
-            return f"({timing} {ordered[0]})"
-        inner = "\n        ".join(ordered)
+    @classmethod
+    def _render_timed_block(
+        cls,
+        timing: str,
+        items: Set[PDDLCondition],
+        extra_atoms: Optional[List[str]] = None,
+    ) -> str:
+        ordered = sorted([str(c) for c in items] + (extra_atoms or []))
+        return f"({timing} {cls._and_block(ordered, '      ')})"
 
-        return f"({timing} (and\n        {inner}\n      ))"
-
-    @staticmethod
-    def _render_timed_effect_block(timing: str, items: List[PDDLEffect], cost: Optional[float] = None) -> str:
+    @classmethod
+    def _render_timed_effect_block(
+        cls, timing: str, items: List[PDDLEffect], cost: Optional[float] = None
+    ) -> str:
         ordered = sorted(str(e) for e in items)
         if cost is not None:
             ordered.append(f"(increase (total-cost) {cost:.4f})")
-        if len(ordered) == 1:
-            return f"({timing} {ordered[0]})"
-        inner = "\n        ".join(ordered)
-        return f"({timing} (and\n        {inner}\n      ))"
+        return f"({timing} {cls._and_block(ordered, '      ')})"
 
 
 @dataclass
@@ -461,6 +473,9 @@ class PDDLAction(PDDLBaseAction):
             "  )"
         ]
         return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.to_pddl()
 
 
 @dataclass
@@ -545,6 +560,9 @@ class PDDLDurativeAction(PDDLBaseAction):
         lines.append("  )")
         return "\n".join(lines)
 
+    def __str__(self) -> str:
+        return self.to_pddl()
+
 
 # ---------------------------------------------------------------------------
 # PDDL domain
@@ -566,6 +584,14 @@ class PDDLDomain:
     def __post_init__(self) -> None:
         if self.has_deadline:
             self.predicates.add(PDDLPredicate(self.deadline_predicate))
+
+    def write(self, path: Path) -> str:
+        """Serialize this domain to PDDL text, write it to path, and return the text."""
+        text = str(self)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        logger.info("Domain written to %s", path)
+        return text
 
     def __str__(self) -> str:
         sections = [
