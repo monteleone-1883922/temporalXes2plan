@@ -525,8 +525,8 @@ class PDDLDurativeAction(PDDLBaseAction):
         condition_parts = []
         if self.conditions_at_start:
             condition_parts.append(self._render_timed_block("at start", self.conditions_at_start))
-        if self.conditions_over_all:
-            condition_parts.append(self._render_timed_block("over all", self.conditions_over_all, [deadline_predicate] if has_deadline else []))
+        if self.conditions_over_all or has_deadline:
+            condition_parts.append(self._render_timed_block("over all", self.conditions_over_all, [f"({deadline_predicate})"] if has_deadline else []))
         if self.conditions_at_end:
             condition_parts.append(self._render_timed_block("at end", self.conditions_at_end))
 
