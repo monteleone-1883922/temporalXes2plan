@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field, fields as dataclass_fields
 from collections import defaultdict
-from typing import Any, DefaultDict, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, DefaultDict, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from pm4py import PetriNet, Marking
 from pm4py.objects.powl.obj import Transition
@@ -139,6 +139,46 @@ class Guard:
     attribute: str
     value: Optional[str]
     negated: bool = False
+
+    def conflicts_with(self, other: "Guard") -> bool:
+        """True when this guard and other can never both hold at once.
+
+        Two shapes of contradiction, both requiring the same attribute:
+        - same value, opposite negation (asserts both "is X" and "is not X"),
+        - two different non-negated values (a single-valued attribute can't
+          equal both at once).
+        """
+        if self.attribute != other.attribute:
+            return False
+        if self.value == other.value and self.negated != other.negated:
+            return True
+        if (self.value is not None and other.value is not None
+                and self.value != other.value
+                and not self.negated and not other.negated):
+            return True
+        return False
+
+    @staticmethod
+    def first_conflict(
+        guards: Iterable[Tuple["Guard", str]],
+    ) -> Optional[Tuple[Tuple["Guard", str], Tuple["Guard", str]]]:
+        """Find the first pair of mutually conflicting guards, if any.
+
+        Args:
+            guards: (guard, source_label) pairs — source_label is opaque to
+                Guard itself (e.g. which axis it came from); carried through
+                purely so the caller can build a meaningful log message.
+
+        Returns:
+            The two conflicting (guard, source_label) pairs, or None if the
+            whole collection is internally consistent.
+        """
+        items = list(guards)
+        for i, (g1, l1) in enumerate(items):
+            for g2, l2 in items[i + 1:]:
+                if g1.conflicts_with(g2):
+                    return (g1, l1), (g2, l2)
+        return None
 
 
 @dataclass
@@ -531,7 +571,7 @@ class AnalysisConfig:
     # branches are treated as "active" regardless of observed probability.
     xor_screen_prune_branches: bool = True
 
-    min_probability_for_fallbacks: float = 1e-3
+    lower_bound_prob_actions: float = 1e-3
 
     # --- Conditional effect screening ---
     # Attributes with presence_probability below never_threshold are not effects.
@@ -675,6 +715,7 @@ class XorBranchInfo:
             Values: "dt", "dt_orphan", "dt_low_prob", "deterministic",
             "deterministic_floor", "probabilistic", "equal_weight".
     """
+    place_name: str
     probability: float
     total_samples: int
     cascade_level: int
@@ -728,7 +769,7 @@ class TransitionInfo:
     activity_name: str
     input_places: List[str]
     total_firings: int
-    xor_branch: Optional[XorBranchInfo]
+    xor_branches: Optional[List[XorBranchInfo]]
     effects: Dict[str, EffectInfo]
     is_tau: bool = False
     duration: Optional[ActionDurationStats] = None
@@ -770,7 +811,6 @@ class ParseResult:
     end_place: str
     attribute_catalog: Dict[str, AttributeCatalogEntry]
     negated_attributes: Set[str] = field(default_factory=set)
-    xor_virtual_taus: Set[str] = field(default_factory=set)
     artificial_xor_places: Set[str] = field(default_factory=set)
     variant_to_art_place: Dict[str, str] = field(default_factory=dict)
     artificial_xor_data: Dict[str, Any] = field(default_factory=dict)
