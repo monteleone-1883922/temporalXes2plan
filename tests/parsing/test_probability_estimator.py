@@ -84,6 +84,7 @@ def _preprocessed(
     return PreprocessedLog(
         transition_firings=transition_firings or {},
         xor_firings=xor_firings or {},
+        static_attributes=set(),
     )
 
 
@@ -97,9 +98,9 @@ class TestComputeXorProbabilities:
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        fd_b1 = _fd("b", from_places={net["p_xor"]})
-        fd_b2 = _fd("b", from_places={net["p_xor"]})
-        fd_c1 = _fd("c", from_places={net["p_xor"]})
+        fd_b1 = _fd("B", from_places={net["p_xor"]})
+        fd_b2 = _fd("B", from_places={net["p_xor"]})
+        fd_c1 = _fd("C", from_places={net["p_xor"]})
 
         plog = _preprocessed(xor_firings={
             net["p_xor"].name: [fd_b1, fd_b2, fd_c1],
@@ -107,15 +108,15 @@ class TestComputeXorProbabilities:
         result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         stats = result[net["p_xor"].name]
-        assert abs(stats.probabilities["b"] - round(2 / 3, 2)) < 0.01
-        assert abs(stats.probabilities["c"] - round(1 / 3, 2)) < 0.01
+        assert abs(stats.probabilities["B"] - round(2 / 3, 2)) < 0.01
+        assert abs(stats.probabilities["C"] - round(1 / 3, 2)) < 0.01
 
     def test_total_executions_equals_number_of_xor_firings(self):
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
         plog = _preprocessed(xor_firings={
-            net["p_xor"].name: [_fd("b"), _fd("b"), _fd("c")],
+            net["p_xor"].name: [_fd("B"), _fd("B"), _fd("C")],
         })
         result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
@@ -139,8 +140,8 @@ class TestComputeXorProbabilities:
         result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         stats = result[net["p_xor"].name]
-        assert stats.probabilities["b"] == 0.5
-        assert stats.probabilities["c"] == 0.5
+        assert stats.probabilities["B"] == 0.5
+        assert stats.probabilities["C"] == 0.5
         assert stats.total_executions == 0
 
     def test_returns_xor_split_stats_instance(self):
@@ -148,7 +149,7 @@ class TestComputeXorProbabilities:
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
         plog = _preprocessed(xor_firings={
-            net["p_xor"].name: [_fd("b")],
+            net["p_xor"].name: [_fd("B")],
         })
         result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
@@ -160,13 +161,13 @@ class TestComputeXorProbabilities:
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
         plog = _preprocessed(xor_firings={
-            net["p_xor"].name: [_fd("b"), _fd("b")],
+            net["p_xor"].name: [_fd("B"), _fd("B")],
         })
         result = _make_estimator().compute_xor_probabilities(plog, decision_points)
 
         stats = result[net["p_xor"].name]
-        assert stats.probabilities["b"] == 1.0
-        assert stats.probabilities["c"] == 0.0
+        assert stats.probabilities["B"] == 1.0
+        assert stats.probabilities["C"] == 0.0
 
 
 # ===========================================================================
@@ -178,19 +179,19 @@ class TestNormalizeBranchCounts:
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        branch_counts = {net["p_xor"].name: {"b": 3, "c": 1}}
+        branch_counts = {net["p_xor"].name: {"B": 3, "C": 1}}
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         stats = result[net["p_xor"].name]
         assert isinstance(stats, XorSplitStats)
-        assert stats.probabilities["b"] == 0.75
-        assert stats.probabilities["c"] == 0.25
+        assert stats.probabilities["B"] == 0.75
+        assert stats.probabilities["C"] == 0.25
 
     def test_total_executions_equals_sum_of_branch_counts(self):
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        branch_counts = {net["p_xor"].name: {"b": 3, "c": 1}}
+        branch_counts = {net["p_xor"].name: {"B": 3, "C": 1}}
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         assert result[net["p_xor"].name].total_executions == 4
@@ -199,7 +200,7 @@ class TestNormalizeBranchCounts:
         net = _xor_net()
         decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
 
-        branch_counts = {net["p_xor"].name: {"b": 7, "c": 3}}
+        branch_counts = {net["p_xor"].name: {"B": 7, "C": 3}}
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         total = sum(result[net["p_xor"].name].probabilities.values())
@@ -213,8 +214,8 @@ class TestNormalizeBranchCounts:
         result = _make_estimator()._normalize_branch_counts(branch_counts, decision_points)
 
         stats = result[net["p_xor"].name]
-        assert stats.probabilities["b"] == 0.5
-        assert stats.probabilities["c"] == 0.5
+        assert stats.probabilities["B"] == 0.5
+        assert stats.probabilities["C"] == 0.5
         assert stats.total_executions == 0
 
 
@@ -223,9 +224,9 @@ class TestNormalizeBranchCounts:
 # ===========================================================================
 
 class TestGetActivityNameForTransition:
-    def test_labeled_transition_returns_sanitized_name(self):
+    def test_labeled_transition_returns_raw_label(self):
         t = _transition("t1", "ER Registration")
-        assert _make_estimator()._get_activity_name_for_transition(t) == "er_registration"
+        assert _make_estimator()._get_activity_name_for_transition(t) == "ER Registration"
 
     def test_silent_transition_returns_known_tau_name(self):
         t = _transition("t1", None)

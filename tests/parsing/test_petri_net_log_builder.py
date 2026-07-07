@@ -166,7 +166,9 @@ class TestBuildExecution:
         builder = _make_builder(net["arcs"], Marking({net["p_in"]: 1}))
         trace = make_trace(make_event("A"), make_event("B"))
 
-        execution = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
+        execution = builder._build_execution(
+            trace, builder._align_trace(trace, [net["t_a"], net["t_b"]])
+        )
 
         assert net["p_in"] in execution.steps[0].from_places
 
@@ -176,7 +178,9 @@ class TestBuildExecution:
         builder = _make_builder(net["arcs"], Marking({net["p_in"]: 1}))
         trace = make_trace(make_event("A"), make_event("B"))
 
-        execution = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
+        execution = builder._build_execution(
+            trace, builder._align_trace(trace, [net["t_a"], net["t_b"]])
+        )
 
         assert net["p_mid"] in execution.steps[1].from_places
 
@@ -185,7 +189,9 @@ class TestBuildExecution:
         builder = _make_builder(net["arcs"], Marking({net["p_in"]: 1}))
         trace = make_trace(make_event("A", crp=3.5), make_event("B", crp=9.1))
 
-        execution = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
+        execution = builder._build_execution(
+            trace, builder._align_trace(trace, [net["t_a"], net["t_b"]])
+        )
 
         assert execution.steps[0].attributes["crp"] == 3.5
         assert execution.steps[1].attributes["crp"] == 9.1
@@ -196,7 +202,7 @@ class TestBuildExecution:
         trace = make_trace(make_event("A"), make_event("B"))
 
         execution = builder._build_execution(
-            trace, _fake_replay([net["t_a"], net["t_tau"], net["t_b"]])
+            trace, builder._align_trace(trace, [net["t_a"], net["t_tau"], net["t_b"]])
         )
         tau_step = execution.steps[1]
 
@@ -209,7 +215,7 @@ class TestBuildExecution:
         trace = make_trace(make_event("A"), make_event("B"))
 
         execution = builder._build_execution(
-            trace, _fake_replay([net["t_a"], net["t_tau"], net["t_b"]])
+            trace, builder._align_trace(trace, [net["t_a"], net["t_tau"], net["t_b"]])
         )
 
         assert execution.steps[1].activity_name == "tau_1"
@@ -219,7 +225,9 @@ class TestBuildExecution:
         builder = _make_builder(net["arcs"], Marking({net["p_in"]: 1}))
         trace = make_trace(make_event("A"), make_event("B"))
 
-        execution = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
+        execution = builder._build_execution(
+            trace, builder._align_trace(trace, [net["t_a"], net["t_b"]])
+        )
 
         assert execution.steps[0].is_tau is False
         assert execution.steps[1].is_tau is False
@@ -229,7 +237,9 @@ class TestBuildExecution:
         builder = _make_builder(net["arcs"], Marking({net["p_in"]: 1}))
         trace = make_trace(make_event("A"), make_event("B"), case_id="case_xyz")
 
-        execution = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
+        execution = builder._build_execution(
+            trace, builder._align_trace(trace, [net["t_a"], net["t_b"]])
+        )
 
         assert execution.trace_id == "case_xyz"
 
@@ -239,7 +249,7 @@ class TestBuildExecution:
         trace = make_trace(make_event("A"), make_event("B"))
 
         execution = builder._build_execution(
-            trace, _fake_replay([net["t_a"], net["t_tau"], net["t_b"]])
+            trace, builder._align_trace(trace, [net["t_a"], net["t_tau"], net["t_b"]])
         )
 
         assert len(execution.steps) == 3
@@ -250,8 +260,8 @@ class TestBuildExecution:
         builder = _make_builder(net["arcs"], Marking({net["p_in"]: 1}))
         trace = make_trace(make_event("A"), make_event("B"))
 
-        ex1 = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
-        ex2 = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
+        ex1 = builder._build_execution(trace, builder._align_trace(trace, [net["t_a"], net["t_b"]]))
+        ex2 = builder._build_execution(trace, builder._align_trace(trace, [net["t_a"], net["t_b"]]))
 
         # Both should start from p_in, not from the state left by ex1
         assert net["p_in"] in ex1.steps[0].from_places
@@ -267,7 +277,7 @@ class TestNavigation:
         net = _seq_net()
         builder = _make_builder(net["arcs"], Marking({net["p_in"]: 1}))
         trace = make_trace(make_event("A"), make_event("B"))
-        ex = builder._build_execution(trace, _fake_replay([net["t_a"], net["t_b"]]))
+        ex = builder._build_execution(trace, builder._align_trace(trace, [net["t_a"], net["t_b"]]))
         return ex, net
 
     def test_steps_for_transition_returns_matching_step(self):
@@ -361,6 +371,121 @@ class TestBuild:
 
 
 # ===========================================================================
+# build() — alignments engine (config.replay_engine == "alignments")
+# ===========================================================================
+
+def _fake_alignment(moves, fitness: float = 1.0) -> Dict:
+    """moves: list of ((event_repr, transition_name), (activity_or_>>, label_or_>>))."""
+    return {"fitness": fitness, "alignment": moves}
+
+
+def _sync_move(activity: str, transition) -> tuple:
+    return ((activity, transition.name), (activity, transition.label))
+
+
+def _model_move(transition) -> tuple:
+    """A move-on-model (no matching log event) — tau or a forced visible move."""
+    return ((None, transition.name), (">>", transition.label))
+
+
+def _log_move(activity: str) -> tuple:
+    """A move-on-log (log event with no corresponding model transition)."""
+    return ((activity, None), (activity, ">>"))
+
+
+class TestBuildAlignments:
+    def _builder(self, config=None):
+        net = _seq_net()
+        config = config or AnalysisConfig(replay_engine="alignments")
+        return _make_builder(net["arcs"], Marking({net["p_in"]: 1}), config=config), net
+
+    def _log(self, n: int = 1):
+        return make_log(*[
+            make_trace(make_event("A"), make_event("B"), case_id=f"c{i}")
+            for i in range(n)
+        ])
+
+    def test_alignments_engine_returns_petri_net_log_instance(self):
+        builder, net = self._builder()
+        fake = [_fake_alignment([_sync_move("A", net["t_a"]), _sync_move("B", net["t_b"])])]
+        with patch("pm4py.conformance_diagnostics_alignments", return_value=fake):
+            result = builder.build(self._log())
+        assert isinstance(result, PetriNetLog)
+        assert len(result.executions[0].steps) == 2
+
+    def test_alignments_engine_low_fitness_trace_is_excluded(self):
+        builder, net = self._builder()
+        fake = [
+            _fake_alignment([_sync_move("A", net["t_a"]), _sync_move("B", net["t_b"])], fitness=1.0),
+            _fake_alignment([_sync_move("A", net["t_a"]), _sync_move("B", net["t_b"])], fitness=0.2),
+        ]
+        with patch("pm4py.conformance_diagnostics_alignments", return_value=fake):
+            result = builder.build(self._log(2))
+        assert len(result.executions) == 1
+
+    def test_alignments_engine_labeled_step_carries_event_attributes(self):
+        builder, net = self._builder()
+        log = make_log(make_trace(make_event("A", crp=3.5), make_event("B", crp=9.1), case_id="c1"))
+        fake = [_fake_alignment([_sync_move("A", net["t_a"]), _sync_move("B", net["t_b"])])]
+        with patch("pm4py.conformance_diagnostics_alignments", return_value=fake):
+            result = builder.build(log)
+        steps = result.executions[0].steps
+        assert steps[0].attributes["crp"] == 3.5
+        assert steps[1].attributes["crp"] == 9.1
+
+    def test_alignments_engine_distinguishes_multiple_silent_transitions(self):
+        """
+        Two tau transitions in sequence: with ret_tuple_as_trans_desc, each
+        move-on-model carries its own transition name, so both FiringSteps must
+        be produced (never collapsed just because both labels are None).
+        """
+        net = _tau_seq_net()
+        # Add a second silent transition in parallel structure isn't needed here —
+        # what matters is that _align_trace_via_alignment resolves each tau move
+        # to the *distinct* Transition object named in the alignment, not by label.
+        config = AnalysisConfig(replay_engine="alignments")
+        builder = _make_builder(
+            net["arcs"], Marking({net["p_in"]: 1}), silent_transitions=net["silent"], config=config
+        )
+        log = make_log(make_trace(make_event("A"), make_event("B"), case_id="c1"))
+        fake = [_fake_alignment([
+            _sync_move("A", net["t_a"]),
+            _model_move(net["t_tau"]),
+            _sync_move("B", net["t_b"]),
+        ])]
+        with patch("pm4py.conformance_diagnostics_alignments", return_value=fake):
+            result = builder.build(log)
+        steps = result.executions[0].steps
+        assert len(steps) == 3
+        assert steps[1].transition is net["t_tau"]
+        assert steps[1].is_tau is True
+        assert steps[1].attributes == {}
+
+    def test_alignments_engine_move_on_log_produces_no_firing_step(self):
+        """A log event with no corresponding model transition is a deviation —
+        it must not produce a FiringStep and must not desync the event iterator."""
+        builder, net = self._builder()
+        log = make_log(make_trace(make_event("A"), make_event("X"), make_event("B"), case_id="c1"))
+        fake = [_fake_alignment([
+            _sync_move("A", net["t_a"]),
+            _log_move("X"),
+            _sync_move("B", net["t_b"]),
+        ], fitness=0.9)]
+        with patch("pm4py.conformance_diagnostics_alignments", return_value=fake):
+            result = builder.build(log)
+        steps = result.executions[0].steps
+        assert len(steps) == 2
+        assert steps[0].transition is net["t_a"]
+        assert steps[1].transition is net["t_b"]
+
+    def test_unknown_alignment_variant_raises(self):
+        config = AnalysisConfig(replay_engine="alignments", replay_alignment_variant="not_a_variant")
+        builder, net = self._builder(config=config)
+        with pytest.raises(ValueError):
+            builder.build(self._log())
+
+
+# ===========================================================================
 # build() — lifecycle duration injection
 # ===========================================================================
 
@@ -385,7 +510,7 @@ class TestLifecycleDurations:
             result = builder.build(log)
 
         step_a = result.executions[0].steps[0]
-        assert step_a.activity_name == "a"
+        assert step_a.activity_name == "A"
         assert step_a.duration_seconds == pytest.approx(300.0)
 
     def test_activity_without_start_event_has_none_duration(self):
@@ -404,7 +529,7 @@ class TestLifecycleDurations:
             result = builder.build(log)
 
         step_b = result.executions[0].steps[1]
-        assert step_b.activity_name == "b"
+        assert step_b.activity_name == "B"
         assert step_b.duration_seconds is None
 
     def test_complete_only_log_has_no_duration_seconds(self):

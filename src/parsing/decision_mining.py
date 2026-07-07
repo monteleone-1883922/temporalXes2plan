@@ -581,8 +581,11 @@ class DecisionMiner:
             attr_screenings: Dict[str, EffectAttrScreening] = {}
 
             for attr, p in ae.presence_probabilities.items():
-                # ignored effect
-                if p < (never_thr and ae.total_firings > self.config.probability_min_samples) or ae.total_firings < self.config.probability_min_samples:
+                # ignored effect: enough samples to trust the estimate, and it's
+                # below the never-threshold. Too few samples falls through to the
+                # dt_min_samples/dt_min_prob_to_use fallback check below instead,
+                # so a low-data attribute isn't discarded outright.
+                if p < never_thr and ae.total_firings > self.config.probability_min_samples:
                     attr_screenings[attr] = EffectAttrScreening(
                         presence_probability=p,
                         appearance_action="never",
@@ -608,6 +611,7 @@ class DecisionMiner:
 
                 values: Dict[Any, EffectValueScreening] = {}
                 for val, vp in value_probs.items():
+                    # we need to trust probability in order to prune or confirm as certain
                     if vp < v_prune and ae.total_firings * vp > self.config.probability_min_samples:
                         vs = "pruned"
                     elif vp > v_certain and ae.total_firings * vp > self.config.probability_min_samples:
@@ -619,10 +623,10 @@ class DecisionMiner:
                     values[val] = EffectValueScreening(probability=vp, status=vs)
 
                 n_active = sum(1 for v in values.values() if v.status == "active")
-                if len(value_probs) <= 1 or n_active < 2 or any(v.status == "certain" for v in values.values()):
-                    val_action = "deterministic"
-                elif n_val_samples < self.config.dt_min_samples:
+                if n_val_samples < self.config.dt_min_samples:
                     val_action = "fallback"
+                elif len(value_probs) <= 1 or n_active < 2 or any(v.status == "certain" for v in values.values()):
+                    val_action = "deterministic"
                 else:
                     val_action = "dt"
 
@@ -818,7 +822,7 @@ class DecisionMiner:
 
         raw_guards, accuracy = self._train_and_extract(X, y)
         # no fallback for no guards, remove empty guards
-        raw_guards = {appearance: sop for appearance, sop in raw_guards if sop}
+        raw_guards = {appearance: sop for appearance, sop in raw_guards.items() if sop}
 
         if accuracy < self.config.dt_min_accuracy:
             logger.info(

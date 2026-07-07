@@ -459,11 +459,13 @@ class Parser:
           2 = statistical fallback (probabilities only)
           3 = effect removed
 
-        Two independent level-3 triggers:
+        Level-3 triggers:
           - total_firings < min_samples: the transition has too few data points to
             trust any effect probability → all attributes excluded for this transition.
-          - appearance_samples < min_samples: this specific attribute changed too
-            rarely → only that attribute's effect is excluded.
+          - appearance_action == "never": this specific attribute changes too rarely
+            to be a real effect → only that attribute's effect is excluded. A low
+            appearance_samples count alone does not exclude an attribute — it only
+            downgrades appearance_level to 2 (statistical fallback).
 
         Value level 3 → value_probabilities is empty, value_guards is None.
 

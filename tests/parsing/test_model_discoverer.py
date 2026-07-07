@@ -53,12 +53,12 @@ class TestExtractActivitiesAndSilent:
     def _call(self, transitions):
         return ModelDiscoverer()._extract_activities_and_silent(transitions)
 
-    def test_labeled_transitions_appear_sanitized_in_activities(self):
+    def test_labeled_transitions_appear_as_raw_labels_in_activities(self):
         t1 = _transition("t1", "ER Registration")
         t2 = _transition("t2", "CRP Measurement")
         acts, silent = self._call([t1, t2])
-        assert "er_registration" in acts
-        assert "crp_measurement" in acts
+        assert "ER Registration" in acts
+        assert "CRP Measurement" in acts
         assert silent == {}
 
     def test_silent_transition_gets_tau_name_and_appears_in_activities(self):
@@ -80,7 +80,7 @@ class TestExtractActivitiesAndSilent:
         t_labeled = _transition("tL", "Triage")
         t_silent = _transition("tS", None)
         acts, silent = self._call([t_labeled, t_silent])
-        assert "triage" in acts
+        assert "Triage" in acts
         assert t_silent in silent
         assert silent[t_silent] in acts
         assert t_labeled not in silent
@@ -109,11 +109,11 @@ class TestDiscover:
         assert len(result.initial_marking) > 0
         assert len(result.final_marking) > 0
 
-    def test_activities_contains_sanitized_log_activity_names(self, simple_log):
+    def test_activities_contains_raw_log_activity_names(self, simple_log):
         result = ModelDiscoverer().discover(simple_log)
-        assert "a" in result.activities
-        assert "b" in result.activities
-        assert "c" in result.activities
+        assert "A" in result.activities
+        assert "B" in result.activities
+        assert "C" in result.activities
 
     def test_silent_transitions_field_is_a_dict(self, simple_log):
         result = ModelDiscoverer().discover(simple_log)

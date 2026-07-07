@@ -467,8 +467,9 @@ class TestFilterEffectsLevel3:
         assert "act" in p._transition_effect_info
         assert "color" in p._transition_effect_info["act"]
 
-    def test_attr_below_min_appearance_samples_excluded(self):
-        """An attr whose appearance_samples < min_samples is excluded even if the transition passes."""
+    def test_attr_with_low_appearance_samples_is_kept_as_fallback(self):
+        """Only appearance_action == 'never' excludes an attribute; a low sample
+        count alone (action='fallback') keeps it, downgraded to level 2."""
         screening = {
             "act": _t_scr(
                 total_firings=50,
@@ -477,15 +478,17 @@ class TestFilterEffectsLevel3:
         }
         p = _make_parser_stub(screening, {}, {"act": _attr_effect(50)}, min_samples=10)
         p._filter_effects()
-        assert p._transition_effect_info.get("act", {}).get("color") is None
+        color_info = p._transition_effect_info.get("act", {}).get("color")
+        assert color_info is not None
+        assert color_info.appearance_level == 2
 
-    def test_other_attrs_kept_when_one_attr_excluded(self):
-        """Excluding one attr by appearance_samples does not remove other attrs."""
+    def test_other_attrs_kept_when_one_attr_is_never(self):
+        """A 'never' attr is excluded without affecting sibling attributes."""
         screening = {
             "act": _t_scr(
                 total_firings=50,
                 attrs={
-                    "rare": _attr_scr("fallback", samples=2),
+                    "rare": _attr_scr("never", samples=2),
                     "common": _attr_scr("fallback", samples=20),
                 },
             )

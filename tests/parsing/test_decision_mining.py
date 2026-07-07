@@ -55,6 +55,7 @@ def _preprocessed(
     return PreprocessedLog(
         transition_firings=transition_firings or {},
         xor_firings=xor_firings or {},
+        static_attributes=set(),
     )
 
 
@@ -166,10 +167,10 @@ class TestDecisionMinerInit:
 # ===========================================================================
 
 class TestActivityName:
-    def test_labeled_transition_returns_sanitized_label(self):
+    def test_labeled_transition_returns_raw_label(self):
         t = _transition("t1", "ER Registration")
         m = _miner()
-        assert m._activity_name(t) == "er_registration"
+        assert m._activity_name(t) == "ER Registration"
 
     def test_silent_transition_returns_tau_name(self):
         t = _transition("t1", None)
@@ -269,30 +270,30 @@ class TestScreenXorSplits:
 
     def test_all_branches_active_action_dt(self):
         _, t_B, t_C, _, p_xor = _xor_net()
-        stats = {"p_xor": XorSplitStats(probabilities={"b": 0.6, "c": 0.4}, total_executions=50)}
+        stats = {"p_xor": XorSplitStats(probabilities={"B": 0.6, "C": 0.4}, total_executions=50)}
         result = _miner(config=self._config()).screen_xor_splits({p_xor: [t_B, t_C]}, stats)
         scr = result["p_xor"]
         assert scr.action == "dt"
-        assert scr.branches["b"].status == "active"
-        assert scr.branches["c"].status == "active"
+        assert scr.branches["B"].status == "active"
+        assert scr.branches["C"].status == "active"
         assert scr.total_samples == 50
 
     def test_low_probability_branch_pruned(self):
         _, t_B, t_C, _, p_xor = _xor_net()
-        stats = {"p_xor": XorSplitStats(probabilities={"b": 0.95, "c": 0.05}, total_executions=100)}
+        stats = {"p_xor": XorSplitStats(probabilities={"B": 0.95, "C": 0.05}, total_executions=100)}
         result = _miner(config=self._config()).screen_xor_splits({p_xor: [t_B, t_C]}, stats)
-        assert result["p_xor"].branches["c"].status == "pruned"
+        assert result["p_xor"].branches["C"].status == "pruned"
 
     def test_single_active_branch_becomes_certain_and_deterministic(self):
         _, t_B, t_C, _, p_xor = _xor_net()
-        stats = {"p_xor": XorSplitStats(probabilities={"b": 0.95, "c": 0.05}, total_executions=100)}
+        stats = {"p_xor": XorSplitStats(probabilities={"B": 0.95, "C": 0.05}, total_executions=100)}
         result = _miner(config=self._config()).screen_xor_splits({p_xor: [t_B, t_C]}, stats)
         assert result["p_xor"].action == "deterministic"
-        assert result["p_xor"].branches["b"].status == "certain"
+        assert result["p_xor"].branches["B"].status == "certain"
 
     def test_insufficient_samples_action_fallback(self):
         _, t_B, t_C, _, p_xor = _xor_net()
-        stats = {"p_xor": XorSplitStats(probabilities={"b": 0.6, "c": 0.4}, total_executions=3)}
+        stats = {"p_xor": XorSplitStats(probabilities={"B": 0.6, "C": 0.4}, total_executions=3)}
         result = _miner(config=self._config(dt_min_samples=10)).screen_xor_splits(
             {p_xor: [t_B, t_C]}, stats
         )
@@ -310,8 +311,8 @@ class TestScreenXorSplits:
         t_D = _transition("t_D", "D")
         t_E = _transition("t_E", "E")
         stats = {
-            "p_xor": XorSplitStats(probabilities={"b": 0.5, "c": 0.5}, total_executions=40),
-            "p_xor2": XorSplitStats(probabilities={"d": 0.95, "e": 0.05}, total_executions=80),
+            "p_xor": XorSplitStats(probabilities={"B": 0.5, "C": 0.5}, total_executions=40),
+            "p_xor2": XorSplitStats(probabilities={"D": 0.95, "E": 0.05}, total_executions=80),
         }
         result = _miner(config=self._config()).screen_xor_splits(
             {p_xor: [t_B, t_C], p2: [t_D, t_E]}, stats
@@ -321,25 +322,25 @@ class TestScreenXorSplits:
 
     def test_probabilities_stored_in_branch_screening(self):
         _, t_B, t_C, _, p_xor = _xor_net()
-        stats = {"p_xor": XorSplitStats(probabilities={"b": 0.7, "c": 0.3}, total_executions=100)}
+        stats = {"p_xor": XorSplitStats(probabilities={"B": 0.7, "C": 0.3}, total_executions=100)}
         result = _miner(config=self._config()).screen_xor_splits({p_xor: [t_B, t_C]}, stats)
-        assert result["p_xor"].branches["b"].probability == 0.7
-        assert result["p_xor"].branches["c"].probability == 0.3
+        assert result["p_xor"].branches["B"].probability == 0.7
+        assert result["p_xor"].branches["C"].probability == 0.3
 
     def test_three_branches_one_pruned_two_active(self):
         _, t_B, t_C, _, p_xor = _xor_net()
         t_D = _transition("t_D", "D")
         stats = {"p_xor": XorSplitStats(
-            probabilities={"b": 0.5, "c": 0.45, "d": 0.05}, total_executions=200
+            probabilities={"B": 0.5, "C": 0.45, "D": 0.05}, total_executions=200
         )}
         result = _miner(config=self._config()).screen_xor_splits(
             {p_xor: [t_B, t_C, t_D]}, stats
         )
         scr = result["p_xor"]
         assert scr.action == "dt"
-        assert scr.branches["d"].status == "pruned"
-        assert scr.branches["b"].status == "active"
-        assert scr.branches["c"].status == "active"
+        assert scr.branches["D"].status == "pruned"
+        assert scr.branches["B"].status == "active"
+        assert scr.branches["C"].status == "active"
 
 
 # ===========================================================================
@@ -889,7 +890,10 @@ class TestScreenEffects:
         assert attr.appearance_action == "fallback"
 
     def test_value_below_prune_threshold_is_pruned(self):
-        ae = _ae(100, {"status": 0.6}, {"status": {"ok": 0.92, "rare": 0.05, "err": 0.03}})
+        """Pruning also requires enough absolute samples (total_firings * vp)
+        to trust the low probability, not just the ratio — hence total_firings
+        is high enough here that even the rare values clear probability_min_samples."""
+        ae = _ae(1000, {"status": 0.6}, {"status": {"ok": 0.92, "rare": 0.05, "err": 0.03}})
         result = _effect_miner(config=self._config()).screen_effects({"work": ae})
         vals = result["work"].attributes["status"].values
         assert vals["rare"].status == "pruned"
@@ -897,7 +901,8 @@ class TestScreenEffects:
         assert vals["ok"].status == "active"
 
     def test_value_above_certain_threshold_is_certain(self):
-        ae = _ae(100, {"status": 0.6}, {"status": {"always_val": 0.97, "rare": 0.03}})
+        """Same sample-size requirement as pruning applies to the certain check."""
+        ae = _ae(1000, {"status": 0.6}, {"status": {"always_val": 0.97, "rare": 0.03}})
         result = _effect_miner(config=self._config()).screen_effects({"work": ae})
         vals = result["work"].attributes["status"].values
         assert vals["always_val"].status == "certain"

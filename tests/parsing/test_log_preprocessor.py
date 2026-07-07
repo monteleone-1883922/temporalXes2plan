@@ -104,27 +104,27 @@ class TestPreprocessOutputStructure:
         assert result.transition_firings == {}
         assert result.xor_firings == {}
 
-    def test_transition_firings_keyed_by_sanitized_name(self):
+    def test_transition_firings_keyed_by_raw_activity_name(self):
         t = _transition("t1", "ER Registration")
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p})])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        assert "er_registration" in result.transition_firings
+        assert "ER Registration" in result.transition_firings
 
     def test_firing_data_has_correct_activity_name(self):
         t = _transition("t1", "Check CRP")
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p})])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["check_crp"][0]
-        assert fd.activity_name == "check_crp"
+        fd = result.transition_firings["Check CRP"][0]
+        assert fd.activity_name == "Check CRP"
 
     def test_firing_data_from_places_is_frozenset(self):
         t = _transition("t1", "A")
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p})])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["a"][0]
+        fd = result.transition_firings["A"][0]
         assert isinstance(fd.from_places, frozenset)
         assert p in fd.from_places
 
@@ -153,7 +153,7 @@ class TestTauExclusion:
             _step(t_work, {p}, attributes={"score": "1"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         assert "hidden" not in fd.pre_state
 
 
@@ -171,7 +171,7 @@ class TestCausalOrdering:
             _step(self.t_work, {self.p_mid}, attributes={"score": "1"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         assert fd.pre_state.get("risk") == "high"
 
     def test_pre_state_does_not_contain_own_step_new_attrs(self):
@@ -180,7 +180,7 @@ class TestCausalOrdering:
             _step(self.t_work, {self.p_mid}, attributes={"brand_new": "x"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         assert "brand_new" not in fd.pre_state
 
     def test_pre_state_contains_overwritten_value_from_earlier_step(self):
@@ -191,7 +191,7 @@ class TestCausalOrdering:
             _step(self.t_work, {self.p_mid}, attributes={"status": "new"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         assert fd.pre_state["status"] == "old"
 
     def test_state_accumulates_across_steps_in_execution(self):
@@ -206,7 +206,7 @@ class TestCausalOrdering:
             _step(t_c, {p}, attributes={"z": "3"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["c"][0]
+        fd = result.transition_firings["C"][0]
         assert fd.pre_state == {"x": "1", "y": "2"}
 
     def test_state_resets_between_executions(self):
@@ -219,8 +219,8 @@ class TestCausalOrdering:
         ]
         result = _preprocessor().preprocess(_pn_log(execs), {})
         # Second execution's firing must not see x from first execution.
-        fd1 = result.transition_firings["a"][0]
-        fd2 = result.transition_firings["a"][1]
+        fd1 = result.transition_firings["A"][0]
+        fd2 = result.transition_firings["A"][1]
         assert fd1.pre_state == {}
         assert "x" not in fd2.pre_state
 
@@ -234,7 +234,7 @@ class TestCausalOrdering:
             _step(t, {p}, attributes={"x": "second"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        firings = result.transition_firings["a"]
+        firings = result.transition_firings["A"]
         assert len(firings) == 2
         assert firings[0].pre_state == {}
         assert firings[1].pre_state == {"x": "first"}
@@ -250,7 +250,7 @@ class TestChangedAttrs:
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p}, attributes={"x": "new"})])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["a"][0]
+        fd = result.transition_firings["A"][0]
         assert fd.changed_attrs == {"x": "new"}
 
     def test_same_value_as_state_not_counted(self):
@@ -263,7 +263,7 @@ class TestChangedAttrs:
             _step(t_work, {p}, attributes={"x": "same"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         assert fd.changed_attrs == {}
 
     def test_different_value_counted_as_change(self):
@@ -275,7 +275,7 @@ class TestChangedAttrs:
             _step(t_work, {p}, attributes={"x": "new"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         assert fd.changed_attrs == {"x": "new"}
 
     def test_none_value_excluded_from_changed(self):
@@ -283,7 +283,7 @@ class TestChangedAttrs:
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p}, attributes={"x": None})])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["a"][0]
+        fd = result.transition_firings["A"][0]
         assert "x" not in fd.changed_attrs
 
     def test_multiple_attrs_some_changed_some_not(self):
@@ -295,7 +295,7 @@ class TestChangedAttrs:
             _step(t_work, {p}, attributes={"a": "1", "b": "3", "c": "new"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         # a unchanged, b changed, c first appearance
         assert "a" not in fd.changed_attrs
         assert fd.changed_attrs["b"] == "3"
@@ -316,7 +316,7 @@ class TestIgnoredAttributes:
             _step(t, {p}, attributes={}),
         ])]
         result = LogPreprocessor(config=cfg).preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["a"][1]
+        fd = result.transition_firings["A"][1]
         assert "secret" not in fd.pre_state
         assert "visible" in fd.pre_state
 
@@ -328,7 +328,7 @@ class TestIgnoredAttributes:
             _step(t, {p}, attributes={"secret": "hide", "visible": "show"}),
         ])]
         result = LogPreprocessor(config=cfg).preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["a"][0]
+        fd = result.transition_firings["A"][0]
         assert "secret" not in fd.changed_attrs
         assert "visible" in fd.changed_attrs
 
@@ -348,7 +348,7 @@ class TestDiscretizerIntegration:
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p}, attributes={"crp": 4.5})])]
         result = pp.preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["a"][0]
+        fd = result.transition_firings["A"][0]
         assert fd.changed_attrs["crp"] == "lte_6_0"
 
     def test_numeric_value_discretized_in_pre_state(self):
@@ -365,7 +365,7 @@ class TestDiscretizerIntegration:
             _step(t_work, {p}, attributes={}),
         ])]
         result = pp.preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["work"][0]
+        fd = result.transition_firings["Work"][0]
         assert fd.pre_state["crp"] == "lte_6_0"
 
     def test_attr_without_boundaries_kept_raw(self):
@@ -378,7 +378,7 @@ class TestDiscretizerIntegration:
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p}, attributes={"crp": 4.5})])]
         result = pp.preprocess(_pn_log(execs), {})
-        fd = result.transition_firings["a"][0]
+        fd = result.transition_firings["A"][0]
         assert fd.changed_attrs["crp"] == 4.5
 
 
@@ -424,7 +424,7 @@ class TestXorIndexing:
         ]
         result = _preprocessor().preprocess(_pn_log(execs), self.xor_splits)
         names = {fd.activity_name for fd in result.xor_firings["p_xor"]}
-        assert names == {"b", "c"}
+        assert names == {"B", "C"}
 
     def test_non_branch_transition_from_xor_place_not_indexed(self):
         """A transition that fires from the XOR place but is NOT one of its
@@ -442,7 +442,7 @@ class TestXorIndexing:
             _step(self.t_B, {self.p_xor}, attributes={"x": "1"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), self.xor_splits)
-        fd_trans = result.transition_firings["b"][0]
+        fd_trans = result.transition_firings["B"][0]
         fd_xor = result.xor_firings["p_xor"][0]
         assert fd_trans is fd_xor
 
@@ -484,14 +484,14 @@ class TestTransitionFiringCounts:
         p = _place("p")
         execs = [_execution("c1", [_step(t, {p})])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        assert len(result.transition_firings["a"]) == 1
+        assert len(result.transition_firings["A"]) == 1
 
     def test_multiple_firings_across_executions(self):
         t = _transition("t1", "A")
         p = _place("p")
         execs = [_execution(f"c{i}", [_step(t, {p})]) for i in range(7)]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        assert len(result.transition_firings["a"]) == 7
+        assert len(result.transition_firings["A"]) == 7
 
     def test_multiple_transitions_counted_independently(self):
         t_a = _transition("t_a", "A")
@@ -502,8 +502,8 @@ class TestTransitionFiringCounts:
             _execution("c2", [_step(t_a, {p})]),
         ]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        assert len(result.transition_firings["a"]) == 2
-        assert len(result.transition_firings["b"]) == 1
+        assert len(result.transition_firings["A"]) == 2
+        assert len(result.transition_firings["B"]) == 1
 
     def test_same_transition_fires_twice_in_one_execution(self):
         t = _transition("t1", "A")
@@ -513,4 +513,4 @@ class TestTransitionFiringCounts:
             _step(t, {p}, attributes={"x": "2"}),
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
-        assert len(result.transition_firings["a"]) == 2
+        assert len(result.transition_firings["A"]) == 2

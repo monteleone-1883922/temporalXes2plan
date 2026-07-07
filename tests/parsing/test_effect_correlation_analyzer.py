@@ -22,6 +22,7 @@ def _log(transition_firings: dict) -> PreprocessedLog:
     return PreprocessedLog(
         transition_firings=transition_firings,
         xor_firings={},
+        static_attributes=set(),
     )
 
 
