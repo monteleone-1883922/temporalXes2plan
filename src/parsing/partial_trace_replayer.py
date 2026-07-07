@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Set
 
 from pm4py.objects.log.importer.xes import importer as _xes_importer
+
+from core_utils import sanitize_value
 from parsing.csv_loader import csv_to_event_log
 from parsing.log_validator import validate_partial_trace
 
@@ -48,6 +50,7 @@ class TauSplitPoint:
     tau_fired_before: List[str]  # tau_fired list state at the moment of this split
     alternatives: List[TauPath]  # ordered by superfluous asc, then BFS discovery order
     tried_count: int = 0         # how many alternatives have already been attempted
+    pddl_state_before: Optional[Dict[str, str]] = None  # PDDL attr state snapshot for backtrack restore; None means sim was already stopped
 
 
 class PartialTraceReplayer:
@@ -118,25 +121,29 @@ class PartialTraceReplayer:
         tau_max_depth: int = 10,
         extra_warnings: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Replay a trace with lazy tau firing and backtracking.
+        """Replay a trace with lazy tau firing, backtracking, and PDDL state simulation.
+
+        Runs two parallel simulations:
+        - Token replay: marking-based, always completes, produces init_places.
+        - PDDL attribute simulation: checks preconditions and applies action effects
+          exactly as the PDDL planner would, producing init_effects and is_replayable.
 
         Args:
             events: All pm4py events of the full trace (or just the prefix when
                 called from the web endpoint with n_prefix == len(events)).
             n_prefix: Number of leading events that form the observed prefix.
-                Attributes are accumulated only for events[:n_prefix].
-                init_places is the marking snapshot taken after the last
-                prefix event fires.
+                init_places is the marking snapshot taken after the last prefix event.
+                init_effects is derived from the PDDL state at the prefix cut.
             current_data: Parsed current.json dict.
             tau_max_depth: Maximum tau chain depth for BFS path search.
             extra_warnings: Optional list prepended to output warnings.
 
         Returns:
             Dict with init_places, init_effects, replayed_activities, n_events,
-            warnings, tau_fired, tau_split_count, full_trace_validated.
+            warnings, tau_fired, tau_split_count, full_trace_validated, is_replayable.
 
         Raises:
-            PartialTraceError: If the trace cannot be replayed (unknown activity
+            PartialTraceError: If the trace cannot be token-replayed (unknown activity
                 or backtracking exhausted).
         """
         catalog: Dict[str, Any] = current_data.get("attribute_catalog", {})
@@ -159,28 +166,43 @@ class PartialTraceReplayer:
                 "tau_fired": [],
                 "tau_split_count": 0,
                 "full_trace_validated": True,
+                "is_replayable": True,
             }
 
-        activity_to_node, trans_outputs, silent_inputs, silent_outputs = (
+        activity_to_node, trans_outputs, silent_inputs, silent_outputs, tau_id_to_label = (
             self._build_graph_lookups(graph)
         )
 
-        # Phase 1 — accumulate attributes from prefix events only
-        accumulated_attrs: Dict[str, str] = {}
-        for event in events[:n_prefix]:
-            self._process_event_attributes(event, catalog, accumulated_attrs, warnings)
+        # Pre-pass: build per-event attribute snapshot from ALL events.
+        # attrs_at[i] = cumulative log-attribute state BEFORE event[i] fires.
+        # Used for best-match variant selection (observed vs PDDL effects).
+        acc: Dict[str, str] = {}
+        attrs_at: List[Dict[str, str]] = [{}]
+        for event in events:
+            self._process_event_attributes(event, catalog, acc, warnings)
+            attrs_at.append(dict(acc))
+        # attrs_at[n_prefix] is the log-attribute state after prefix — fallback for init_effects
 
-        # Phase 2 — token replay with lazy tau and backtracking
+        # Build XOR conditions lookup for PDDL precondition checking
+        xor_lookup = self._build_xor_conditions_lookup(
+            current_data.get("xor_splits", {})
+        )
+
+        # Token replay state
         marking: Set[str] = {start_place}
         split_stack: List[TauSplitPoint] = []
+        replayed: List[str] = []
+        tau_fired: List[str] = []
 
-        # Snapshot: marking + replayed + tau_fired captured at the prefix cut
+        # Snapshots captured at the prefix cut
         snapshot_marking: Optional[Set[str]] = None
         snapshot_replayed: Optional[List[str]] = None
         snapshot_tau_fired: Optional[List[str]] = None
 
-        replayed: List[str] = []
-        tau_fired: List[str] = []
+        # PDDL attribute simulation state — initialized to the log-observed state at the
+        # prefix cut, matching the init_effects given to the planner for the suffix.
+        pddl_state: Dict[str, str] = dict(attrs_at[n_prefix])
+        is_replayable: bool = True
 
         i = 0
         while i < len(events):
@@ -218,8 +240,8 @@ class PartialTraceReplayer:
                         activity, input_places, sorted(marking), missing,
                         len(replayed), replayed,
                     )
-                    marking, i, replayed, tau_fired = self._backtrack(
-                        split_stack, activity, replayed
+                    marking, i, replayed, tau_fired, is_replayable = self._backtrack(
+                        split_stack, activity, replayed, pddl_state
                     )
                     # Invalidate snapshot if we jumped back before the cut
                     if i < n_prefix:
@@ -230,8 +252,29 @@ class PartialTraceReplayer:
 
                 paths.sort(key=lambda p: p.superfluous)
 
-                # Record a split point only when multiple paths exist and none
-                # is uniquely best (i.e. the best still produces superfluous tokens).
+                # PDDL simulation: check tau preconditions before firing sequence.
+                # Only active for suffix events (i >= n_prefix); prefix taus are not checked.
+                if i >= n_prefix and is_replayable:
+                    for tau_node_id in paths[0].tau_sequence:
+                        tau_label = tau_id_to_label.get(tau_node_id, "")
+                        if not tau_label:
+                            continue
+                        tau_input_places = silent_inputs.get(tau_node_id, [])
+                        for place in tau_input_places:
+                            place_map = xor_lookup.get(place, {})
+                            tau_xor_clauses = place_map.get(tau_label, [])
+                            if tau_xor_clauses and not self._check_conditions(tau_xor_clauses, pddl_state):
+                                logger.debug(
+                                    "PartialTraceReplayer: PDDL precondition failed for tau '%s' "
+                                    "at place '%s'. pddl_state=%s",
+                                    tau_label, place, pddl_state,
+                                )
+                                is_replayable = False
+                                break
+                        if not is_replayable:
+                            break
+
+                # Record a split point only when multiple paths exist
                 if len(paths) > 1:
                     split_stack.append(TauSplitPoint(
                         event_index=i,
@@ -240,6 +283,7 @@ class PartialTraceReplayer:
                         tau_fired_before=list(tau_fired),
                         alternatives=paths,
                         tried_count=0,
+                        pddl_state_before=dict(pddl_state) if is_replayable else None,
                     ))
 
                 best = paths[0]
@@ -248,7 +292,39 @@ class PartialTraceReplayer:
                 # Do not advance i — retry the same activity with the updated marking
                 continue
 
-            # All required tokens present — fire the visible activity
+            # All required tokens present — PDDL simulation for visible activity.
+            # Only active for suffix events (i >= n_prefix); prefix activities are not checked.
+            if i >= n_prefix and is_replayable:
+                activity_preconditions = trans_info.get("preconditions", [])
+
+                xor_or_clauses: List[List[Dict[str, Any]]] = []
+                for place in input_places:
+                    place_map = xor_lookup.get(place, {})
+                    clauses = place_map.get(activity, [])
+                    if clauses:
+                        xor_or_clauses = clauses
+                        break
+
+                effect_groups = trans_info.get("effect_groups", [])
+                observed = attrs_at[i + 1] if (i + 1) < len(attrs_at) else attrs_at[-1]
+
+                chosen_variant = self._select_best_variant(
+                    effect_groups, activity_preconditions, xor_or_clauses,
+                    pddl_state, observed,
+                )
+
+                if chosen_variant is None:
+                    logger.debug(
+                        "PartialTraceReplayer: no executable PDDL variant for '%s'. "
+                        "pddl_state=%s xor_clauses=%s",
+                        activity, pddl_state, xor_or_clauses,
+                    )
+                    is_replayable = False
+                else:
+                    for assignment in chosen_variant.get("assignments", []):
+                        pddl_state[assignment["attribute"]] = sanitize_value(assignment["attribute"], assignment["value"])
+
+            # Fire the visible activity (token update)
             for p in input_places:
                 marking.remove(p)
             for p in trans_outputs.get(node_id, []):
@@ -262,22 +338,18 @@ class PartialTraceReplayer:
                 snapshot_replayed = list(replayed)
                 snapshot_tau_fired = list(tau_fired)
 
-                # Fast path: no tau splits up to the cut → validation not needed
-                if not split_stack:
-                    break
-
         full_trace_validated = (i >= len(events))
 
-        # If the loop ran to completion without hitting the fast path,
-        # snapshot may already be set; if n_prefix >= len(events), set it now.
         if snapshot_marking is None:
             snapshot_marking = copy(marking)
             snapshot_replayed = list(replayed)
             snapshot_tau_fired = list(tau_fired)
 
+        # init_effects always reflects the log-observed attribute state at the prefix cut.
+        # The PDDL simulation (pddl_state) is used only to compute is_replayable.
         init_effects = [
             {"attribute": attr, "value": value}
-            for attr, value in accumulated_attrs.items()
+            for attr, value in attrs_at[n_prefix].items()
         ]
 
         return {
@@ -289,7 +361,108 @@ class PartialTraceReplayer:
             "tau_fired": snapshot_tau_fired,
             "tau_split_count": len(split_stack),
             "full_trace_validated": full_trace_validated,
+            "is_replayable": is_replayable,
         }
+
+    # ------------------------------------------------------------------
+    # PDDL simulation helpers
+    # ------------------------------------------------------------------
+
+    def _build_xor_conditions_lookup(
+        self,
+        xor_splits_data: Dict[str, Any],
+    ) -> Dict[str, Dict[str, List]]:
+        """Return {place_id: {sanitized_activity_name: or_clauses}} from xor_splits.
+
+        or_clauses is the raw SOP list from current.json (outer OR, inner AND).
+        Empty list means no constraint — callers skip the check.
+        """
+        result: Dict[str, Dict[str, List]] = {}
+        for place_id, split_data in xor_splits_data.items():
+            branches: Dict[str, Any] = split_data.get("branches", {})
+            place_map: Dict[str, List] = {}
+            for activity_name, branch_data in branches.items():
+                sanitized = utils.sanitize_name(activity_name)
+                place_map[sanitized] = branch_data.get("conditions", [])
+            if place_map:
+                result[place_id] = place_map
+        return result
+
+    def _check_conditions(
+        self,
+        or_clauses: List[List[Dict[str, Any]]],
+        state: Dict[str, str],
+    ) -> bool:
+        """Return True if state satisfies at least one AND-clause in or_clauses.
+
+        Empty or_clauses means no constraint → always True.
+        "=" predicate: state.get(attr) == value (missing attr → fails).
+        "<>" predicate: attr is set AND state.get(attr) != value.
+        """
+        if not or_clauses:
+            return True
+        for and_clause in or_clauses:
+            satisfied = True
+            for cond in and_clause:
+                attr = cond.get("attribute", "")
+                pred = cond.get("predicate", "=")
+                value = cond.get("value", "")
+                current = state.get(attr)
+                if pred == "=":
+                    if current != value:
+                        satisfied = False
+                        break
+                elif pred == "<>":
+                    if current is None or current == value:
+                        satisfied = False
+                        break
+            if satisfied:
+                return True
+        return False
+
+    def _select_best_variant(
+        self,
+        effect_groups: List[Dict[str, Any]],
+        activity_preconditions: List[List[Dict[str, Any]]],
+        xor_or_clauses: List[List[Dict[str, Any]]],
+        pddl_state: Dict[str, str],
+        observed_attrs: Dict[str, str],
+    ) -> Optional[Dict[str, Any]]:
+        """Filter effect_groups by preconditions; return best match to observed_attrs.
+
+        Returns None when activity-level or XOR preconditions fail (no variant can fire).
+        Returns a synthetic empty variant dict when effect_groups is empty but
+        preconditions pass (action fires with no attribute effects).
+
+        Scoring: number of assignments in the variant that match observed_attrs.
+        Tie-break: variant probability descending.
+        """
+        if not self._check_conditions(activity_preconditions, pddl_state):
+            return None
+        if not self._check_conditions(xor_or_clauses, pddl_state):
+            return None
+
+        if not effect_groups:
+            return {"assignments": [], "guard": [], "probability": 1.0}
+
+        best: Optional[Dict[str, Any]] = None
+        best_score = -1
+        best_prob = -1.0
+
+        for variant in effect_groups:
+            if not self._check_conditions(variant.get("guard", []), pddl_state):
+                continue
+            score = sum(
+                1 for a in variant.get("assignments", [])
+                if observed_attrs.get(a["attribute"]) == a["value"]
+            )
+            prob = variant.get("probability", 0.0)
+            if score > best_score or (score == best_score and prob > best_prob):
+                best = variant
+                best_score = score
+                best_prob = prob
+
+        return best
 
     # ------------------------------------------------------------------
     # Tau search
@@ -369,13 +542,16 @@ class PartialTraceReplayer:
         split_stack: List[TauSplitPoint],
         blocked_activity: str,
         replayed: List[str],
-    ) -> Tuple[Set[str], int, List[str], List[str]]:
+        pddl_state: Dict[str, str],
+    ) -> Tuple[Set[str], int, List[str], List[str], bool]:
         """Restore the most recent tau split point and advance to its next alternative.
 
         Exhausted split points are popped from the stack before trying the next.
+        Restores pddl_state in place from the split point snapshot.
 
         Returns:
-            Tuple (restored_marking, event_index, restored_replayed, restored_tau_fired).
+            Tuple (restored_marking, event_index, restored_replayed, restored_tau_fired,
+            is_replayable_restored).
 
         Raises:
             PartialTraceError: When the entire split stack is exhausted.
@@ -395,11 +571,18 @@ class PartialTraceReplayer:
                     alt.superfluous,
                 )
                 restored_tau = list(split.tau_fired_before) + list(alt.tau_sequence)
+                if split.pddl_state_before is not None:
+                    pddl_state.clear()
+                    pddl_state.update(split.pddl_state_before)
+                    is_replayable_restored = True
+                else:
+                    is_replayable_restored = False
                 return (
                     copy(alt.marking_after),
                     split.event_index,
                     list(split.replayed_before),
                     restored_tau,
+                    is_replayable_restored,
                 )
 
             # All alternatives for this split exhausted — pop and try earlier split
@@ -468,8 +651,8 @@ class PartialTraceReplayer:
 
     def _build_graph_lookups(
         self, graph: Dict[str, Any]
-    ) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
-        """Build activity→node_id, node_id→output_places, and silent transition maps."""
+    ) -> Tuple[Dict[str, str], Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]], Dict[str, str]]:
+        """Build activity→node_id, node_id→output_places, silent transition maps, and tau_id→label."""
         nodes = graph.get("nodes", [])
         edges = graph.get("edges", [])
 
@@ -477,11 +660,16 @@ class PartialTraceReplayer:
         node_by_id = {n["id"]: n for n in nodes}
 
         activity_to_node: Dict[str, str] = {}
+        tau_id_to_label: Dict[str, str] = {}
         for node in nodes:
             if node.get("type") in visible_types:
                 label = node.get("label", "")
                 if label:
                     activity_to_node[utils.sanitize_name(label)] = node["id"]
+            elif node.get("type") == "silent":
+                label = node.get("label", "")
+                if label:
+                    tau_id_to_label[node["id"]] = utils.sanitize_name(label)
 
         trans_outputs: Dict[str, List[str]] = {}
         silent_inputs: Dict[str, List[str]] = {}
@@ -506,7 +694,7 @@ class PartialTraceReplayer:
             if tgt_node.get("type") == "silent":
                 silent_inputs.setdefault(tgt, []).append(src)
 
-        return activity_to_node, trans_outputs, silent_inputs, silent_outputs
+        return activity_to_node, trans_outputs, silent_inputs, silent_outputs, tau_id_to_label
 
     # ------------------------------------------------------------------
     # Full-trace attribute scan
@@ -568,7 +756,7 @@ class PartialTraceReplayer:
                 attr, raw_value, attr_type, possible_values, bin_boundaries, warnings
             )
             if value is not None:
-                accumulated[attr] = value
+                accumulated[attr] = sanitize_value(attr, value)
 
     def _normalize_value(
         self,

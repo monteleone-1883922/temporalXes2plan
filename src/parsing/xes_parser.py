@@ -19,6 +19,7 @@ downstream steps (pruning, filtering, ParseResult assembly) can access them.
 import json
 import os
 import random
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, List
 
@@ -262,22 +263,13 @@ class Parser:
         Populates self._xor_branch_info: Dict[str, XorBranchInfo] for every branch
         of every XOR-split place.
         """
-        self._xor_branch_info: Dict[str, XorBranchInfo] = {}
+        self._xor_branch_info: Dict[str, List[XorBranchInfo]] = defaultdict(list)
 
         for place, transitions in list(self.petri_net_model.xor_splits.items()):
             place_name = place.name
             screening = self.xor_screening.get(place_name)
             if screening is None:
                 continue
-
-            all_trans: Dict[str, PetriNet.Transition] = {}
-            for t in transitions:
-                if t.label:
-                    all_trans[t.label] = t
-                else:
-                    silent_name = self.petri_net_model.silent_transitions.get(t)
-                    if silent_name:
-                        all_trans[silent_name] = t
 
 
             pruned = set()
@@ -289,7 +281,9 @@ class Parser:
 
             elif screening.action == "fallback":
                 pruned = self._apply_fallback(screening, place_name)
-            #TODO remove pruned
+            # TODO remove pruned
+        self._xor_branch_info = dict(self._xor_branch_info)
+
 
     def _apply_dt_level(
         self,
@@ -310,32 +304,35 @@ class Parser:
             if xor_branch.status == "pruned":
                 pruned.add(act_name)
             elif xor_branch.status == "fallback":
-                self._xor_branch_info[act_name] = XorBranchInfo(
+                self._xor_branch_info[act_name].append(XorBranchInfo(
+                    place_name=place_name,
                     probability=xor_branch.probability if xor_branch else 0.0,
                     total_samples=screening.total_samples,
                     cascade_level=2,
                     guards=None,
                     routing_source="probabilistic",
-                )
+                ))
             else:
                 activity_guards = guards_obj.guards.get(act_name)
                 if activity_guards:
-                    self._xor_branch_info[act_name] = XorBranchInfo(
+                    self._xor_branch_info[act_name].append(XorBranchInfo(
+                        place_name=place_name,
                         probability=xor_branch.probability,
                         total_samples=screening.total_samples,
                         cascade_level=1,
                         guards=activity_guards,
                         routing_source="dt",
-                    )
+                    ))
                     summary[act_name] = f"DT(p={xor_branch.probability:.3f}, {len(activity_guards)} guard(s))"
-                else:
-                    self._xor_branch_info[act_name] = XorBranchInfo(
+                else: #probabilistic fallback for no guards
+                    self._xor_branch_info[act_name].append(XorBranchInfo(
+                        place_name=place_name,
                         probability=xor_branch.probability if xor_branch else 0.0,
                         total_samples=screening.total_samples,
                         cascade_level=2,
                         guards=None,
                         routing_source="probabilistic",
-                    )
+                    ))
 
         logger.debug(
             "[XOR '%s'] DT applied — branch decisions: %s",
@@ -358,13 +355,14 @@ class Parser:
         pruned = set()
         for act_name, xor_branch in screening.branches.items():
             if xor_branch.status == "certain":
-                self._xor_branch_info[act_name] = XorBranchInfo(
+                self._xor_branch_info[act_name].append(XorBranchInfo(
+                    place_name=place_name,
                     probability=xor_branch.probability,
                     total_samples=screening.total_samples,
                     cascade_level=1,
                     guards=None,
                     routing_source="deterministic",
-                )
+                ))
                 summary[act_name] = f"certain(p={xor_branch.probability:.3f}, level=1)"
             elif xor_branch.status == "pruned":
                 pruned.add(act_name)
@@ -399,13 +397,14 @@ class Parser:
                 if xor_branch.status == "pruned":
                     pruned.add(act_name)
                 else:
-                    self._xor_branch_info[act_name] = XorBranchInfo(
+                    self._xor_branch_info[act_name].append(XorBranchInfo(
+                        place_name=place_name,
                         probability=xor_branch.probability,
                         total_samples=screening.total_samples,
                         cascade_level=3,
                         guards=None,
                         routing_source="equal_weight",
-                    )
+                    ))
             return pruned
 
         mode = self.config.xor_statistical_mode
@@ -422,26 +421,28 @@ class Parser:
                     if prob > max_prob:
                         max_act = act_name
                         max_prob = prob
-            self._xor_branch_info[max_act] = XorBranchInfo(
+            self._xor_branch_info[max_act].append(XorBranchInfo(
+                place_name=place_name,
                 probability=max_prob,
                 total_samples=screening.total_samples,
                 cascade_level=2,
                 guards=None,
                 routing_source="probabilistic",
-            )
+            ))
 
         elif mode == "weighted":
             for act_name, xor_branch in screening.branches.items():
                 if xor_branch.status == "pruned":
                     pruned.add(act_name)
                 else:
-                    self._xor_branch_info[act_name] = XorBranchInfo(
+                    self._xor_branch_info[act_name].append(XorBranchInfo(
+                        place_name=place_name,
                         probability=xor_branch.probability,
                         total_samples=screening.total_samples,
                         cascade_level=2,
                         guards=None,
                         routing_source="probabilistic",
-                    )
+                    ))
 
         logger.debug(
             "[XOR '%s'] FALLBACK level=2, mode='%s' — branch decisions: %s",
@@ -562,7 +563,7 @@ class Parser:
         # whose output arcs lead into that place]
         place_predecessors: Dict[str, List[str]] = {
             p.name: [
-                utils.sanitize_name(t.label)
+                t.label
                 for t in trans_list if t.label
             ]
             for p, trans_list in pnm.place_inputs.items()
@@ -570,7 +571,7 @@ class Parser:
 
         # Transition predecessors: sanitized label → [input place names]
         transition_predecessors: Dict[str, List[str]] = {
-            utils.sanitize_name(t.label): [p.name for p in places]
+            t.label: [p.name for p in places]
             for t, places in pnm.trans_inputs.items()
             if t.label
         }
@@ -587,7 +588,7 @@ class Parser:
                 activity_name=act,
                 input_places=[p.name for p in input_places],
                 total_firings=attr_effects.total_firings if attr_effects else 0,
-                xor_branch=self._xor_branch_info.get(act),
+                xor_branches=self._xor_branch_info.get(act),
                 effects=self._transition_effect_info.get(act, {}),
                 duration=self.duration_stats.get(act),
                 related_effects=cooccurrence[0],
@@ -613,7 +614,7 @@ class Parser:
                 activity_name=tau_name,
                 input_places=[p.name for p in input_places_obj],
                 total_firings=tau_firings,
-                xor_branch=self._xor_branch_info[tau_name],
+                xor_branches=self._xor_branch_info[tau_name],
                 effects={},
                 is_tau=True,
             )
@@ -622,8 +623,6 @@ class Parser:
         # Start / end place names from markings (single-place markings assumed)
         start_place = next(iter(pnm.initial_marking)).name
         end_place = next(iter(pnm.final_marking)).name
-
-        xor_virtual_taus = self._inject_xor_taus(transitions, transition_predecessors)
 
         return ParseResult(
             petri_net_model=pnm,
@@ -634,65 +633,7 @@ class Parser:
             end_place=end_place,
             attribute_catalog=self._build_attribute_catalog(),
             negated_attributes=self._collect_negated_attributes(),
-            xor_virtual_taus=xor_virtual_taus,
         )
-
-
-    def _inject_xor_taus(
-        self,
-        transitions: Dict[str, TransitionInfo],
-        transition_predecessors: Dict[str, List[str]],
-    ) -> Set[str]:
-        """Inject virtual tau transitions for XOR cascade-level-2 branches that
-        also carry appearance-level-2 effects.
-
-        When both XOR-branch cost and effect-appearance cost apply to the same
-        transition, they would conflict if stored on a single action.  A virtual
-        tau is interposed to carry only the XOR cost, freeing the real transition
-        to carry only the effect costs.
-
-        The tau inherits the original transition's XOR branch info (so
-        XorBranchProcessor assigns the cost to it) while the original transition
-        has its xor_branch cleared and its input redirected through the tau.
-
-        Condition for injection:
-            cascade_level == 2  AND  any effect has appearance_level == 2
-
-        Args:
-            transitions: Mutable dict of TransitionInfo, modified in place.
-            transition_predecessors: Mutable predecessor map, modified in place.
-
-        Returns:
-            Set of injected tau names (empty if no injection occurred).
-        """
-        injected: Set[str] = set()
-
-        for trans_name, info in list(transitions.items()):
-            if info.xor_branch is None or info.xor_branch.cascade_level != 2:
-                continue
-            if not any(e.appearance_level == 2 for e in info.effects.values()):
-                continue
-
-            tau_name = f"xor_tau_{trans_name}"
-            logger.debug("Injecting XOR tau '%s' before '%s'", tau_name, trans_name)
-
-            transitions[tau_name] = TransitionInfo(
-                activity_name=tau_name,
-                input_places=list(info.input_places),
-                total_firings=info.total_firings,
-                xor_branch=info.xor_branch,
-                effects={},
-            )
-
-            info.xor_branch = None
-            info.input_places = [tau_name]
-
-            transition_predecessors[tau_name] = list(transition_predecessors[trans_name])
-            transition_predecessors[trans_name] = [tau_name]
-
-            injected.add(tau_name)
-
-        return injected
 
 
     def _build_attribute_catalog(self) -> Dict[str, AttributeCatalogEntry]:
@@ -749,9 +690,10 @@ class Parser:
                 _scan_effect_guards(eff.value_guards)
 
         # Collect from XOR branch guards (already filtered by _filter_xor_splits)
-        for branch_info in self._xor_branch_info.values():
-            if branch_info.guards is not None:
-                _scan_sop(branch_info.guards)
+        for branch_info_list in self._xor_branch_info.values():
+            for branch_info in branch_info_list:
+                if branch_info.guards is not None:
+                    _scan_sop(branch_info.guards)
 
         return {
             attr: AttributeCatalogEntry(
@@ -796,9 +738,10 @@ class Parser:
                 _scan_effect_guards(eff.appearance_guards)
                 _scan_effect_guards(eff.value_guards)
 
-        for branch_info in self._xor_branch_info.values():
-            if branch_info.guards is not None:
-                _scan_sop(branch_info.guards)
+        for branch_info_list in self._xor_branch_info.values():
+            for branch_info in branch_info_list:
+                if branch_info.guards is not None:
+                    _scan_sop(branch_info.guards)
 
         return negated
 

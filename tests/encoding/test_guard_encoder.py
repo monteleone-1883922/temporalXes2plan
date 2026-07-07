@@ -34,7 +34,7 @@ class TestGuardToCondition:
 
     def test_pddl_output_categorical_positive(self):
         g = Guard(attribute="diagnosis", value="flu", negated=False)
-        assert guard_to_condition(g).to_pddl() == "(diagnosis_is flu)"
+        assert guard_to_condition(g).to_pddl() == "(diagnosis_is diagnosis_val_flu)"
 
     def test_pddl_output_boolean_negative(self):
         g = Guard(attribute="urgent", value=None, negated=True)
@@ -79,5 +79,5 @@ class TestAndClauseToConditions:
             Guard("urgent", None, negated=True),
         ]
         result = [c.to_pddl() for c in and_clause_to_conditions(clause)]
-        assert "(diagnosis_is flu)" in result
+        assert "(diagnosis_is diagnosis_val_flu)" in result
         assert "(urgent_false)" in result

@@ -199,6 +199,7 @@ class DecisionMiner:
                 name for name, branch in screening.branches.items()
                 if branch.status == "active"
             }
+            fallback_branches = {name for name, branch in screening.branches.items() if branch.status == "fallback"}
 
             X, y = self._build_feature_matrix(
                 preprocessed_log, place_name, active_branches
@@ -223,6 +224,8 @@ class DecisionMiner:
                 )
                 screening.action = "fallback"
                 continue
+            for name in fallback_branches:
+                guards.pop(name, [])
             if not guards:
                 logger.debug(
                     "[XOR '%s'] DT produced no guards — falling back to probabilistic costs.",
@@ -449,6 +452,7 @@ class DecisionMiner:
             if self.config.dt_prune_orphan_mode == "fallback":
                 best_n = max(c[1] for c in candidates)
                 best_p = max(c[2] for c in candidates)
+                surviving.append((orphaned, [], best_n, best_p))
                 logger.debug(
                     "[DT orphan] branch '%s': all %d leaf/leaves below threshold "
                     "(best purity=%.3f, best n=%d; min_purity=%.2f, min_n=%d) — "
@@ -813,6 +817,8 @@ class DecisionMiner:
             return None, "fallback"
 
         raw_guards, accuracy = self._train_and_extract(X, y)
+        # no fallback for no guards, remove empty guards
+        raw_guards = {appearance: sop for appearance, sop in raw_guards if sop}
 
         if accuracy < self.config.dt_min_accuracy:
             logger.info(

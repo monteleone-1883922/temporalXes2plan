@@ -13,7 +13,7 @@ exactly as they arrive. The only place that sanitizes is
 encoding/pddl_model.py, in its rendering methods.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from models import (
@@ -98,7 +98,7 @@ class PreparedXorBranch:
 class PreparedTransition:
     activity_name: str
     input_places: List[str]
-    preconditions: List[List[Guard]]
+    preconditions: List[List[Guard]] # confirmed preconditions directly for the transition (not due to effects or xors)
     effect_groups: List[PreparedEffectGroup]
     cost: float = 0.0
     duration: Optional[ActionDurationStats] = None
@@ -152,6 +152,13 @@ class PreparedTransition:
         )
 
 
+# GraphNode.type values that represent a Petri net place vs a transition.
+# Shared by any code that needs to classify nodes without re-deriving these
+# sets (e.g. graph indexing, PDDL types/constants construction).
+PLACE_NODE_TYPES = frozenset({"place", "xor_split"})
+TRANS_NODE_TYPES = frozenset({"transition", "and_split", "silent"})
+
+
 @dataclass(frozen=True)
 class GraphNode:
     id: str
@@ -181,16 +188,16 @@ class GraphEdge:
 
 @dataclass
 class PreparedDomainInput:
-    nodes: List[GraphNode]
-    edges: List[GraphEdge]
     transitions: Dict[str, PreparedTransition]
     xor_branches: Dict[str, List[PreparedXorBranch]]  # place_name -> branches
     attribute_catalog: Dict[str, AttributeCatalogEntry]
+    nodes: List[GraphNode] = field(default_factory=list)
+    edges: List[GraphEdge] = field(default_factory=list)
 
     @classmethod
     def build_graph_from_petri_net(
         cls, pnm: PetriNetModel
-    ) -> None:
+    ) -> Tuple[List["GraphNode"], List["GraphEdge"]]:
         """Build the GraphNode/GraphEdge lists directly from a discovered Petri net.
 
         Mirrors the node classification already done by
@@ -245,8 +252,7 @@ class PreparedDomainInput:
             source_id = source.name if hasattr(source, "name") else str(id(source))
             target_id = target.name if hasattr(target, "name") else str(id(target))
             edges.append(GraphEdge(source=source_id, target=target_id))
-        cls.nodes = nodes
-        cls.edges = edges
+        return nodes, edges
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize into a dict with the same shape as today's current.json."""

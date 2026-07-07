@@ -159,25 +159,22 @@ class Guard:
         return False
 
     @staticmethod
-    def first_conflict(
-        guards: Iterable[Tuple["Guard", str]],
-    ) -> Optional[Tuple[Tuple["Guard", str], Tuple["Guard", str]]]:
-        """Find the first pair of mutually conflicting guards, if any.
+    def first_conflict(guards: Iterable["Guard"]) -> Optional[Tuple["Guard", "Guard"]]:
+        """Find the first pair of mutually conflicting guards in a flat collection.
 
-        Args:
-            guards: (guard, source_label) pairs — source_label is opaque to
-                Guard itself (e.g. which axis it came from); carried through
-                purely so the caller can build a meaningful log message.
+        Reusable anywhere a set of Guard conditions needs to be checked for
+        internal contradictions before being merged/combined (e.g. combining
+        SOP clauses from different sources into one action's preconditions).
 
         Returns:
-            The two conflicting (guard, source_label) pairs, or None if the
-            whole collection is internally consistent.
+            The two conflicting Guard objects, or None if the whole
+            collection is internally consistent.
         """
         items = list(guards)
-        for i, (g1, l1) in enumerate(items):
-            for g2, l2 in items[i + 1:]:
+        for i, g1 in enumerate(items):
+            for g2 in items[i + 1:]:
                 if g1.conflicts_with(g2):
-                    return (g1, l1), (g2, l2)
+                    return g1, g2
         return None
 
 
@@ -775,7 +772,6 @@ class TransitionInfo:
     duration: Optional[ActionDurationStats] = None
     related_effects: Set[FrozenSet[str]] = field(default_factory=set)
     incompatible_effects: Set[FrozenSet[str]] = field(default_factory=set)
-    attribute_preconditions: List[Guard] = field(default_factory=list)
     effect_groups: List[List[Tuple[str, str]]] = field(default_factory=list)
 
 

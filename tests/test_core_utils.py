@@ -1,7 +1,7 @@
-"""Unit tests for core_utils — sanitize_name, convert_interval_to_lte_gte, discretize_value."""
+"""Unit tests for core_utils — sanitize_name, sanitize_value, convert_interval_to_lte_gte, discretize_value."""
 import pytest
 
-from core_utils import sanitize_name, convert_interval_to_lte_gte, discretize_value
+from core_utils import sanitize_name, sanitize_value, convert_interval_to_lte_gte, discretize_value
 
 
 # ---------------------------------------------------------------------------
@@ -16,26 +16,33 @@ class TestSanitizeName:
         assert sanitize_name("ER Registration") == "er_registration"
 
     def test_strips_case_prefix(self):
-        assert sanitize_name("case:concept:name") == "concept_name"
+        # "case:" stripped; remaining ":" → ascii58
+        assert sanitize_name("case:concept:name") == "conceptascii58name"
 
     def test_strips_case_prefix_case_insensitive(self):
         assert sanitize_name("CASE:status") == "status"
 
-    def test_colon_to_underscore(self):
-        assert sanitize_name("concept:name") == "concept_name"
+    def test_colon_to_ascii(self):
+        assert sanitize_name("concept:name") == "conceptascii58name"
 
-    def test_dash_to_underscore(self):
-        assert sanitize_name("my-activity") == "my_activity"
+    def test_dash_to_ascii(self):
+        assert sanitize_name("my-activity") == "myascii45activity"
 
-    def test_parens_removed(self):
-        # parens stripped (no placeholder), space→_, /→_
-        assert sanitize_name("CRP (mg/L)") == "crp_mg_l"
+    def test_parens_to_ascii(self):
+        # '(' → ascii40, ')' → ascii41, '/' → ascii47, space → '_'
+        assert sanitize_name("CRP (mg/L)") == "crp_ascii40mgascii47lascii41"
 
-    def test_slash_to_underscore(self):
-        assert sanitize_name("a/b") == "a_b"
+    def test_slash_to_ascii(self):
+        assert sanitize_name("a/b") == "aascii47b"
 
-    def test_backslash_to_underscore(self):
-        assert sanitize_name("a\\b") == "a_b"
+    def test_backslash_to_ascii(self):
+        assert sanitize_name("a\\b") == "aascii92b"
+
+    def test_hash_to_ascii(self):
+        assert sanitize_name("#") == "ascii35"
+
+    def test_at_to_ascii(self):
+        assert sanitize_name("@risk") == "ascii64risk"
 
     def test_empty_string_returns_empty(self):
         assert sanitize_name("") == ""
@@ -44,8 +51,44 @@ class TestSanitizeName:
         assert sanitize_name("register_patient") == "register_patient"
 
     def test_mixed_complex(self):
-        result = sanitize_name("case:concept:name")
-        assert result == "concept_name"
+        # Same as test_strips_case_prefix
+        assert sanitize_name("case:concept:name") == "conceptascii58name"
+
+    def test_consecutive_underscores_collapsed(self):
+        assert sanitize_name("a  b") == "a_b"
+
+
+# ---------------------------------------------------------------------------
+# sanitize_value
+# ---------------------------------------------------------------------------
+
+class TestSanitizeValue:
+    def test_simple_categorical(self):
+        assert sanitize_value("costo", "alto") == "costo_val_alto"
+
+    def test_discretized_bin(self):
+        assert sanitize_value("expense", "lte_6_0") == "expense_val_lte_6_0"
+
+    def test_hash_value(self):
+        assert sanitize_value("dismissal", "#") == "dismissal_val_ascii35"
+
+    def test_at_value(self):
+        assert sanitize_value("dismissal", "@") == "dismissal_val_ascii64"
+
+    def test_digit_value(self):
+        assert sanitize_value("amount", "2") == "amount_val_2"
+
+    def test_dot_in_value(self):
+        assert sanitize_value("x", "A.B") == "x_val_aascii46b"
+
+    def test_empty_value_fallback(self):
+        assert sanitize_value("x", "") == "x_val_empty"
+
+    def test_whitespace_only_value(self):
+        assert sanitize_value("x", "   ") == "x_val_empty"
+
+    def test_uppercase_lowercased(self):
+        assert sanitize_value("status", "HIGH") == "status_val_high"
 
 
 # ---------------------------------------------------------------------------
