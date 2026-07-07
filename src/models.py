@@ -605,6 +605,16 @@ class AnalysisConfig:
     # Traces below this threshold are skipped and logged.
     replay_min_fitness: float = 0.8
 
+    # --- Replay engine (Fase 1: costruzione del PetriNetLog) ---
+    # token_based_replay: greedy, fast, suited to whole-log replay (automatic pipeline).
+    # alignments: optimal search (A*/Dijkstra), more expensive, needed when an exact
+    # alignment is required (e.g. single-trace replay in the future trace replayer).
+    replay_engine: str = "token_based_replay"  # "token_based_replay" | "alignments"
+    # Used only when replay_engine == "alignments". See Variants in
+    # pm4py.algo.conformance.alignments.petri_net.algorithm.
+    replay_alignment_variant: str = "state_equation_a_star"
+    # "state_equation_a_star" | "dijkstra_no_heuristics" | "dijkstra_less_memory" | "discounted_a_star"
+
     # --- Attribute filtering ---
     # Raw attribute names (as they appear in the XES log) to exclude from all
     # mining steps (CorrelationMiner, ProbabilityEstimator effect analysis).

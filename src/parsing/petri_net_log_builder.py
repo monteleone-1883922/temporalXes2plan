@@ -3,6 +3,7 @@ from typing import Any, DefaultDict, Dict, List, Optional, Set, Tuple
 
 import pm4py
 from pm4py import PetriNet, Marking
+from pm4py.algo.conformance.alignments.petri_net import algorithm as pn_alignments
 from pm4py.objects.powl.obj import Transition
 
 import core_utils as utils
@@ -10,15 +11,34 @@ from models import AnalysisConfig, FiringStep, PetriNetLog, TraceExecution
 
 logger = utils.get_logger(__name__)
 
+# config.replay_alignment_variant -> pm4py Variants enum member, used only when
+# config.replay_engine == "alignments".
+_ALIGNMENT_VARIANTS = {
+    "state_equation_a_star": pn_alignments.Variants.VERSION_STATE_EQUATION_A_STAR,
+    "dijkstra_no_heuristics": pn_alignments.Variants.VERSION_DIJKSTRA_NO_HEURISTICS,
+    "dijkstra_less_memory": pn_alignments.Variants.VERSION_DIJKSTRA_LESS_MEMORY,
+    "discounted_a_star": pn_alignments.Variants.VERSION_DISCOUNTED_A_STAR,
+}
+
 
 class PetriNetLogBuilder:
     """
-    Builds a PetriNetLog by aligning a pm4py EventLog with token-based replay.
+    Builds a PetriNetLog by aligning a pm4py EventLog with the model, via either
+    token-based replay or optimal alignments (config.replay_engine).
 
     Each log trace is mapped to a TraceExecution: an ordered sequence of
     FiringSteps where every activated transition (including tau) becomes one step.
-    Labeled transitions are paired with the corresponding log event via lockstep
-    alignment; tau transitions receive empty attributes {}.
+    Labeled transitions are paired with the corresponding log event; tau
+    transitions receive empty attributes {}.
+
+    - "token_based_replay" (default): greedy replay, fast, well suited to whole-log
+      replay. Transitions are paired to log events via lockstep alignment
+      (_align_trace).
+    - "alignments": pm4py.conformance_diagnostics_alignments, an optimal
+      A*/Dijkstra search (config.replay_alignment_variant selects the variant).
+      Slower, but resolves each move exactly — including distinguishing between
+      multiple silent transitions, which lockstep alignment cannot do — via
+      ret_tuple_as_trans_desc=True (_align_trace_via_alignment).
 
     The marking is simulated step by step so each FiringStep records the exact
     input places that held tokens (from_places) at the moment of firing.
@@ -34,10 +54,6 @@ class PetriNetLogBuilder:
 
     trans_inputs and trans_outputs are available directly from PetriNetModel
     (built by ModelDiscoverer.discover()) and must be passed in at construction.
-
-    Extensibility for optimal alignment (Approach B): override _align_trace to use
-    pm4py.conformance_diagnostics_alignments instead of the lockstep assumption.
-    The rest of the builder (marking simulation, FiringStep construction) is unchanged.
     """
 
     def __init__(
@@ -82,8 +98,8 @@ class PetriNetLogBuilder:
             )
             replay_log = self._filter_and_annotate_lifecycle(log)
 
-        pairs = self._replay_log(replay_log)
-        executions = [self._build_execution(trace, result) for trace, result in pairs]
+        pairs = self._resolve_alignment(replay_log)
+        executions = [self._build_execution(trace, aligned) for trace, aligned in pairs]
         return PetriNetLog(
             executions=executions,
             net=self.petrinet,
@@ -169,16 +185,31 @@ class PetriNetLogBuilder:
 
         return filtered
 
-    def _replay_log(self, log: Any) -> List[Tuple[Any, Dict]]:
+    def _resolve_alignment(
+        self, log: Any
+    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
         """
-        Run token-based replay and return (trace, replay_result) pairs for traces
+        Dispatch to the configured replay engine (config.replay_engine) and return,
+        for each accepted trace, its (trace, aligned) pair — aligned already being
+        the final List[(Transition, attributes)] sequence, engine-agnostic.
+        """
+        if self.config.replay_engine == "alignments":
+            return self._replay_log_alignments(log)
+        return self._replay_log_token_based(log)
+
+    def _replay_log_token_based(
+        self, log: Any
+    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
+        """
+        Run token-based replay and return (trace, aligned) pairs for traces
         that meet the minimum fitness threshold.
 
         Args:
             log: A pm4py EventLog.
 
         Returns:
-            List of (original_trace, replay_result) pairs above the fitness threshold.
+            List of (original_trace, aligned) pairs above the fitness threshold,
+            aligned being the lockstep-paired List[(Transition, attributes)].
         """
         logger.info("Running token-based replay to build PetriNetLog...")
         replayed = pm4py.conformance_diagnostics_token_based_replay(
@@ -193,7 +224,8 @@ class PetriNetLogBuilder:
             if fitness < self.config.replay_min_fitness:
                 skipped += 1
             else:
-                pairs.append((trace, result))
+                activated_transitions = result.get("activated_transitions", [])
+                pairs.append((trace, self._align_trace(trace, activated_transitions)))
         if skipped > 0:
             skip_pct = 100.0 * skipped / total if total > 0 else 0.0
             logger.warning(
@@ -204,26 +236,129 @@ class PetriNetLogBuilder:
             logger.info(f"PetriNetLog: all {total} traces accepted.")
         return pairs
 
-    def _build_execution(self, trace: Any, replay_result: Dict) -> TraceExecution:
+    def _replay_log_alignments(
+        self, log: Any
+    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
         """
-        Build a TraceExecution from a single trace and its replay result.
+        Run optimal alignments (config.replay_alignment_variant) and return
+        (trace, aligned) pairs for traces that meet the minimum fitness threshold.
 
-        Aligns the trace events with activated_transitions via lockstep, then
-        simulates the token marking to determine from_places for each firing.
+        Unlike token-based replay, alignments resolve each move exactly (including
+        which silent transition fired, via ret_tuple_as_trans_desc=True), so no
+        separate lockstep pass is needed — _align_trace_via_alignment converts the
+        alignment directly into the final List[(Transition, attributes)] sequence.
+
+        Args:
+            log: A pm4py EventLog.
+
+        Returns:
+            List of (original_trace, aligned) pairs above the fitness threshold.
+        """
+        variant = _ALIGNMENT_VARIANTS.get(self.config.replay_alignment_variant)
+        if variant is None:
+            raise ValueError(
+                f"Unknown replay_alignment_variant "
+                f"{self.config.replay_alignment_variant!r}; expected one of "
+                f"{sorted(_ALIGNMENT_VARIANTS)}"
+            )
+
+        logger.info(
+            "Running alignments (%s) to build PetriNetLog...",
+            self.config.replay_alignment_variant,
+        )
+        aligned_results = pm4py.conformance_diagnostics_alignments(
+            log, self.petrinet, self.initial_marking, self.final_marking,
+            variant_str=variant, ret_tuple_as_trans_desc=True,
+        )
+        total = len(aligned_results)
+        skipped = 0
+        pairs = []
+        for trace, result in zip(log, aligned_results):
+            fitness = result.get("fitness", 0.0)
+            if fitness < self.config.replay_min_fitness:
+                skipped += 1
+            else:
+                pairs.append(
+                    (trace, self._align_trace_via_alignment(trace, result.get("alignment", [])))
+                )
+        if skipped > 0:
+            skip_pct = 100.0 * skipped / total if total > 0 else 0.0
+            logger.warning(
+                f"PetriNetLog: skipped {skipped}/{total} traces ({skip_pct:.1f}%) "
+                f"with fitness < {self.config.replay_min_fitness}"
+            )
+        else:
+            logger.info(f"PetriNetLog: all {total} traces accepted.")
+        return pairs
+
+    def _align_trace_via_alignment(
+        self,
+        trace: Any,
+        alignment: List[Tuple[Tuple[Any, Any], Tuple[Any, Any]]],
+    ) -> List[Tuple[Transition, Dict[str, Any]]]:
+        """
+        Convert a pm4py alignment (obtained with ret_tuple_as_trans_desc=True) into
+        the same List[(Transition, attributes)] shape produced by _align_trace.
+
+        Each move is ((event_repr, transition_name), (activity_or_>>, transition_label_or_>>)).
+        - transition_name in (None, '>>'): move-on-log (a log event with no
+          corresponding model transition) — a deviation, already reflected in the
+          trace's fitness. No FiringStep is produced and the event iterator is not
+          advanced (the event itself is the unmatched one, not an extra to skip).
+        - otherwise: a model move. If event_repr is not in (None, '>>') it is a sync
+          move — the next log event is consumed and its attributes carried, exactly
+          like _align_trace. Otherwise it's a move-on-model (including tau) and
+          receives empty attributes {}, without consuming the event iterator.
+
+        Args:
+            trace: A pm4py Trace (iterable of Event dicts).
+            alignment: The 'alignment' list from conformance_diagnostics_alignments.
+
+        Returns:
+            List of (transition, attributes) pairs, one per model move.
+        """
+        # Built from _trans_inputs/_trans_outputs (not self.petrinet.transitions):
+        # these dicts are the source of truth for "all transitions" everywhere
+        # else in this class (see _build_execution), and callers are only
+        # required to pass a populated PetriNet object, not populated maps.
+        transitions_by_name = {
+            t.name: t for t in set(self._trans_inputs) | set(self._trans_outputs)
+        }
+        event_iter = iter(trace)
+        result: List[Tuple[Transition, Dict[str, Any]]] = []
+        for (event_repr, transition_name), _ in alignment:
+            if transition_name in (None, ">>"):
+                continue
+            transition = transitions_by_name[transition_name]
+            if event_repr not in (None, ">>"):
+                attrs = dict(next(event_iter))
+            else:
+                attrs = {}
+            result.append((transition, attrs))
+        return result
+
+    def _build_execution(
+        self, trace: Any, aligned: List[Tuple[Transition, Dict[str, Any]]]
+    ) -> TraceExecution:
+        """
+        Build a TraceExecution from a single trace and its already-resolved
+        alignment (transition, attributes) sequence.
+
+        Simulates the token marking to determine from_places for each firing.
         If a complete event carries a __duration_seconds__ attribute (injected by
         _filter_and_annotate_lifecycle), it is extracted into FiringStep.duration_seconds
         and removed from the step's attributes dict.
 
         Args:
             trace: A pm4py Trace (iterable of Event dicts).
-            replay_result: Token replay result dict with 'activated_transitions'.
+            aligned: Ordered List[(Transition, attributes)], one per activated
+                transition — produced by either _align_trace (token-based replay)
+                or _align_trace_via_alignment (alignments).
 
         Returns:
             TraceExecution with one FiringStep per activated transition.
         """
         trace_id = trace.attributes.get("concept:name", "unknown")
-        activated_transitions = replay_result.get("activated_transitions", [])
-        aligned = self._align_trace(trace, activated_transitions)
 
         steps: List[FiringStep] = []
         marking: Dict[PetriNet.Place, int] = dict(self.initial_marking)
@@ -277,9 +412,8 @@ class PetriNetLogBuilder:
         Labeled transitions consume the next log event and carry its attributes
         as a fresh copy (dict). Tau transitions receive empty attributes {}.
 
-        This method is the single extension point for Approach B: override it to
-        use pm4py.conformance_diagnostics_alignments (move_both / move_model /
-        move_log) for exact alignment on low-fitness traces.
+        Used only for the token_based_replay engine; see
+        _align_trace_via_alignment for the alignments engine's counterpart.
 
         Args:
             trace: A pm4py Trace (iterable of Event dicts).
