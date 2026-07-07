@@ -177,6 +177,33 @@ class Guard:
                     return g1, g2
         return None
 
+    def holds(self, state: Dict[str, str]) -> bool:
+        """True if this atomic condition is satisfied by state.
+
+        value=None is the boolean-style guard (PDDL "=true"/"<>true"), so it
+        compares against the literal string "true" like the rest of the guard
+        machinery (see prepared_input._guard_to_dict). A missing attribute in
+        state never satisfies a negated guard, matching PartialTraceReplayer
+        ._check_conditions's "current is None or current == value → fails".
+        """
+        value = self.value if self.value is not None else "true"
+        current = state.get(self.attribute)
+        if not self.negated:
+            return current == value
+        return current is not None and current != value
+
+
+def sop_holds(sop: List[List["Guard"]], state: Dict[str, str]) -> bool:
+    """True if state satisfies at least one AND-clause (OR of ANDs) in sop.
+
+    Empty sop means "no constraint" and is vacuously True, matching the
+    convention used throughout prepared_input/transition_action_builder where
+    an empty guard list means the axis contributes no restriction.
+    """
+    if not sop:
+        return True
+    return any(all(g.holds(state) for g in clause) for clause in sop)
+
 
 @dataclass
 class XorSplitGuards:

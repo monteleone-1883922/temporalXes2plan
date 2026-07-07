@@ -73,6 +73,21 @@ class PreparedEffectGroup:
 
 
 @dataclass(frozen=True)
+class VariantInfo:
+    """Metadata for one PDDL action variant, keyed by its final variant name.
+
+    Produced as a byproduct of the axis A x B x C Cartesian product in
+    transition_action_builder._build_prepared_transition_actions, so that a
+    plan replayer can look up "which effect group did variant execute_x_v2
+    apply" directly by name instead of regenerating the Cartesian product at
+    runtime (see docs/trace_replayer_analysis.md §6.3).
+    """
+    activity_name: str
+    preconditions: List[List[Guard]]
+    effect_group: Optional[PreparedEffectGroup]
+
+
+@dataclass(frozen=True)
 class PreparedXorBranch:
     activity_name: str
     conditions: Optional[List[List[Guard]]]

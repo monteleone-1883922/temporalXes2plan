@@ -19,7 +19,9 @@ from encoding.guard_encoder import and_clause_to_conditions
 from encoding.pddl_model import (
     PDDLAction, PDDLBaseAction, PDDLCondition, PDDLDurativeAction, PDDLEffect,
 )
-from encoding.prepared_input import PreparedEffectGroup, PreparedTransition, PreparedXorBranch
+from encoding.prepared_input import (
+    PreparedEffectGroup, PreparedTransition, PreparedXorBranch, VariantInfo,
+)
 from models import AttributeCatalogEntry, Guard
 
 logger = utils.get_logger(__name__)
@@ -88,18 +90,26 @@ def _combine_xor_branches(
 
 
 def _deduplicate_variants(
-    variants: List[PDDLBaseAction],
-) -> List[PDDLBaseAction]:
-    """Remove duplicate variants, keeping the one with the highest effect_probability."""
-    groups: Dict[tuple, List[PDDLBaseAction]] = {}
-    for v in variants:
+    variants: List[Tuple[PDDLBaseAction, VariantInfo]],
+) -> List[Tuple[PDDLBaseAction, VariantInfo]]:
+    """Remove duplicate variants, keeping the one with the highest effect_probability.
+
+    Operates on (action, info) pairs so the VariantInfo metadata (§2.2 of
+    claude_plans/trace_replayer_implementation_plan.md) survives dedup
+    alongside the action it describes.
+    """
+    groups: Dict[tuple, List[Tuple[PDDLBaseAction, VariantInfo]]] = {}
+    for v, info in variants:
         key = (
             frozenset(_get_preconditions(v)),
             frozenset(v.effect_attributes),
             frozenset(_get_effects(v)),
         )
-        groups.setdefault(key, []).append(v)
-    return [max(group, key=lambda v: v.effect_probability) for group in groups.values()]
+        groups.setdefault(key, []).append((v, info))
+    return [
+        max(group, key=lambda pair: pair[0].effect_probability)
+        for group in groups.values()
+    ]
 
 
 def _get_preconditions(action: PDDLBaseAction) -> Set[PDDLCondition]:
@@ -134,12 +144,21 @@ def _build_prepared_transition_actions(
     use_durative: bool,
     xor_branches: Optional[List[PreparedXorBranch]] = None,
     lower_bound_prob_actions: float = 1e-3
-) -> List[PDDLBaseAction]:
+) -> Tuple[List[PDDLBaseAction], Dict[str, VariantInfo]]:
     """Build every PDDLBaseAction variant for one transition.
 
     Enumerates the Cartesian product of axis A (preconditions) x axis B (XOR
     routing) x axis C (effect-group guards), skipping any combination that is
     internally contradictory, then deduplicates and names the survivors.
+
+    Returns:
+        (variants, variant_map) where variant_map maps each survivor's final
+        name to a VariantInfo capturing exactly which combined guard (axes
+        A+B+C, as a single-clause SOP) and effect group produced it — the
+        lookup table a plan replayer needs to identify "which effect group
+        did the planner's chosen variant apply" by name alone, without
+        regenerating this Cartesian product at runtime (see
+        docs/trace_replayer_analysis.md §6.3).
     """
     in_places = transition.input_places
 
@@ -172,7 +191,7 @@ def _build_prepared_transition_actions(
         effect_axis = [(None, None)]
 
     base_cost = transition.cost + xor_cost
-    variants: List[PDDLBaseAction] = []
+    variants: List[Tuple[PDDLBaseAction, VariantInfo]] = []
 
     _AXIS_A = "axis A (structural preconditions)"
     _AXIS_B = "axis B (XOR branch)"
@@ -251,17 +270,24 @@ def _build_prepared_transition_actions(
                         effects=effects,
                         base_cost=cost if cost != 0.0 else None,
                     )
-                variants.append(action)
+                info = VariantInfo(
+                    activity_name=act_name,
+                    preconditions=[list(combined_guards)],
+                    effect_group=eff_group,
+                )
+                variants.append((action, info))
 
     variants = _deduplicate_variants(variants)
     # Only give variants a "_v{i}" suffix when there's more than one — a
     # single surviving variant keeps the plain "execute_{act_name}" name.
     if len(variants) == 1:
-        variants = [dataclasses.replace(variants[0], name=f"execute_{act_name}")]
+        action, info = variants[0]
+        named = [(dataclasses.replace(action, name=f"execute_{act_name}"), info)]
     else:
-        variants = [
-            dataclasses.replace(v, name=f"execute_{act_name}_v{i}")
-            for i, v in enumerate(variants)
+        named = [
+            (dataclasses.replace(action, name=f"execute_{act_name}_v{i}"), info)
+            for i, (action, info) in enumerate(variants)
         ]
 
-    return variants
+    variant_map = {action.name: info for action, info in named}
+    return [action for action, _ in named], variant_map

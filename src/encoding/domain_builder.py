@@ -18,13 +18,15 @@ The heavy lifting is delegated to sibling modules, one per build phase:
     encoding/transition_action_builder.py — the 3-axis action-variant engine
 This file only orchestrates them and assembles the final PDDLDomain.
 """
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from encoding.effect_group_builder import _prepared_effect_groups
 from encoding.prepared_graph_utils import (
     _prepared_graph_index, _prepared_negated_attributes, _prepared_xor_branch_of,
 )
-from encoding.prepared_input import GraphNode, PreparedDomainInput, PreparedTransition, PreparedXorBranch
+from encoding.prepared_input import (
+    GraphNode, PreparedDomainInput, PreparedTransition, PreparedXorBranch, VariantInfo,
+)
 from encoding.prepared_schema_builder import _prepared_constants, _prepared_predicates, _prepared_types
 from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLCondition, PDDLDomain, PDDLDurativeAction, PDDLEffect
 from encoding.transition_action_builder import _build_prepared_transition_actions
@@ -104,6 +106,35 @@ def build_domain_from_prepared_info(
     Returns:
         A fully populated PDDLDomain.
     """
+    domain, _ = build_domain_with_variant_map(
+        prepared, config=config, domain_name=domain_name,
+        use_durative=use_durative, use_costs=use_costs, has_deadline=has_deadline,
+    )
+    return domain
+
+
+def build_domain_with_variant_map(
+    prepared: PreparedDomainInput,
+    config: Optional[AnalysisConfig] = None,
+    domain_name: str = "test_process",
+    use_durative: bool = False,
+    use_costs: bool = False,
+    has_deadline: bool = False,
+) -> Tuple[PDDLDomain, Dict[str, VariantInfo]]:
+    """Same build as build_domain_from_prepared_info, plus the variant lookup.
+
+    variant_map maps every generated action's exact name (e.g.
+    "execute_register_v2") to the VariantInfo (combined precondition guard +
+    effect group) that produced it — the lookup a plan replayer needs to
+    identify exactly which effect group the planner's chosen variant applies,
+    without regenerating the axis A x B x C Cartesian product at runtime (see
+    docs/trace_replayer_analysis.md §6.3,
+    claude_plans/trace_replayer_implementation_plan.md §2.2-2.3).
+
+    build_domain_from_prepared_info is a thin wrapper around this function
+    that discards variant_map, kept as the stable public entry point for
+    callers that only need the PDDLDomain.
+    """
     config = config or AnalysisConfig()
     out_places_by_label, in_places_by_label = _prepared_graph_index(prepared)
     xor_branch_of = _prepared_xor_branch_of(prepared)
@@ -114,11 +145,14 @@ def build_domain_from_prepared_info(
     predicates = _prepared_predicates(prepared.attribute_catalog, negated_attributes)
 
     actions: List[PDDLBaseAction] = []
+    variant_map: Dict[str, VariantInfo] = {}
     for act_name, transition in prepared.transitions.items():
-        actions.extend(_build_prepared_transition_actions(
+        trans_actions, trans_variant_map = _build_prepared_transition_actions(
             act_name, transition, prepared.attribute_catalog,
             negated_attributes, use_durative, xor_branch_of.get(act_name), config.lower_bound_prob_actions
-        ))
+        )
+        actions.extend(trans_actions)
+        variant_map.update(trans_variant_map)
 
     # Silent (tau) transitions that never appear as a keyed PreparedTransition
     # (e.g. pure routing steps with no effects) still need a direct
@@ -144,7 +178,7 @@ def build_domain_from_prepared_info(
         isinstance(a, PDDLDurativeAction) for a in actions
     )
 
-    return PDDLDomain(
+    domain = PDDLDomain(
         name=domain_name,
         requirements=requirements,
         types=types,
@@ -154,6 +188,7 @@ def build_domain_from_prepared_info(
         has_costs=has_costs,
         has_deadline=effective_deadline,
     )
+    return domain, variant_map
 
 
 # ------------------------------------------------------------------
