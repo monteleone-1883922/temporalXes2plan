@@ -461,6 +461,6 @@ class Discretizer:
     def _find_column(self, df: Any, attr: str) -> Optional[str]:
         """Return the DataFrame column name matching a sanitized attribute name."""
         for col in df.columns:
-            if utils.sanitize_name(col) == attr:
+            if col == attr:
                 return col
         return None

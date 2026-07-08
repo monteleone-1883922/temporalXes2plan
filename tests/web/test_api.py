@@ -606,7 +606,7 @@ class TestBuildProblemRequireCompletion:
             },
         )
         text = resp.get_json()["problem_text"]
-        assert "(status_is discharged)" in text
+        assert "(status_is status_val_discharged)" in text
         assert "(marked p_end)" in text
 
     def test_require_completion_uses_metadata_end_place(self, client, data_dir):
@@ -663,7 +663,9 @@ class TestBuildProblemDeadline:
             "/api/test_cfg/build-problem",
             json={"goal": self._GOAL, "deadline": 3600},
         )
-        assert "(at 3600.0 (deadline_exceeded))" in resp.get_json()["problem_text"]
+        problem_text = resp.get_json()["problem_text"]
+        assert "(deadline_ok)" in problem_text
+        assert "(at 3600.0 (not (deadline_ok)))" in problem_text
 
     def test_deadline_rebuilds_domain_with_deadline_predicate(self, client, data_dir):
         client.post(
@@ -671,14 +673,14 @@ class TestBuildProblemDeadline:
             json={"goal": self._GOAL, "deadline": 3600, "planner": "optic"},
         )
         domain_text = (data_dir / "test_cfg" / "pddl" / "domain.pddl").read_text()
-        assert "(deadline_exceeded)" in domain_text
+        assert "(deadline_ok)" in domain_text
 
     def test_no_deadline_domain_has_no_deadline_predicate(self, client, data_dir):
         # First build with deadline (creates domain with predicate), then remove it.
         client.post("/api/test_cfg/build-problem", json={"goal": self._GOAL, "deadline": 3600, "planner": "optic"})
         client.post("/api/test_cfg/build-problem", json={"goal": self._GOAL, "planner": "optic"})
         domain_text = (data_dir / "test_cfg" / "pddl" / "domain.pddl").read_text()
-        assert "deadline_exceeded" not in domain_text
+        assert "deadline_ok" not in domain_text
 
     def test_deadline_zero_not_in_problem(self, client):
         resp = client.post(

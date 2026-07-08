@@ -163,21 +163,26 @@ class TestReplayPartialTrace:
         assert resp.status_code == 400
         assert ".xes" in resp.get_json()["error"]
 
-    def test_returns_400_when_unknown_activity(self, client):
+    def test_returns_200_with_low_fitness_warning_for_unknown_activity(self, client):
+        # The new engine (replay.trace_replayer.TraceReplayer.replay_partial_trace)
+        # does not pre-emptively verify PDDL feasibility like the deleted
+        # parsing/partial_trace_replayer.py did -- an activity Phase 1 cannot
+        # align to the net is surfaced as a low-fitness warning, not a 400.
         resp = _upload(client, _xes([{"concept:name": "ghost_activity"}]))
-        assert resp.status_code == 400
-        assert "not found in the Petri net" in resp.get_json()["error"]
+        assert resp.status_code == 200
+        assert any("fitness" in w.lower() for w in resp.get_json()["warnings"])
 
-    def test_returns_400_when_replay_stuck(self, client):
+    def test_returns_200_with_low_fitness_warning_when_replay_stuck(self, client):
         # register requires p_start; if we pass two events that expect different places
         # we simulate a stuck scenario by sending two 'register' events — second one
-        # expects p_start but token is at p_end.
+        # expects p_start but token is at p_end. Same as above: surfaced as a
+        # low-fitness warning, not a 400.
         resp = _upload(client, _xes([
             {"concept:name": "register"},
             {"concept:name": "register"},
         ]))
-        assert resp.status_code == 400
-        assert "Replay stuck" in resp.get_json()["error"]
+        assert resp.status_code == 200
+        assert any("fitness" in w.lower() for w in resp.get_json()["warnings"])
 
     def test_returns_400_when_multiple_traces(self, client):
         resp = _upload(client, _xes_two_traces())
@@ -191,13 +196,16 @@ class TestReplayPartialTrace:
         assert data["init_places"] == ["p_end"]
         assert {"attribute": "status", "value": "admitted"} in data["init_effects"]
         assert data["n_events"] == 1
-        assert data["replayed_activities"] == ["register"]
 
-    def test_returns_200_with_warnings_for_unknown_attributes(self, client):
+    def test_unknown_attributes_are_silently_ignored(self, client):
+        # Not every log column feeds the PDDL domain -- an attribute absent
+        # from attribute_catalog is dropped without a warning, by design
+        # (replay/trace_replayer.py::_extract_event_attributes).
         resp = _upload(client, _xes([{"concept:name": "register", "ward": "icu"}]))
         assert resp.status_code == 200
         data = resp.get_json()
-        assert any("not in attribute catalog" in w for w in data["warnings"])
+        assert data["warnings"] == []
+        assert all(eff["attribute"] != "ward" for eff in data["init_effects"])
 
     def test_empty_trace_returns_start_place(self, client):
         resp = _upload(client, _xes_empty_trace())

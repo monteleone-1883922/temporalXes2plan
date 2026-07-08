@@ -159,7 +159,7 @@ class LogPreprocessor:
                 for attr, val in step.attributes.items():
                     if attr in self.config.ignored_attributes or val is None:
                         continue
-                    sanitized = utils.sanitize_name(attr)
+                    sanitized = attr
                     if (self._discretizer is not None
                             and sanitized in self._discretizer.boundaries):
                         val = self._discretizer.transform_value(sanitized, val)

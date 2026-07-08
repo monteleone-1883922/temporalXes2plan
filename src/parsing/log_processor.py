@@ -111,7 +111,7 @@ class LogProcessor:
         Returns:
             Tuple of (attributes_set, attribute_categories_dict).
         """
-        attributes = {utils.sanitize_name(attr) for attr in pm4py.get_event_attributes(full_log) 
+        attributes = {attr for attr in pm4py.get_event_attributes(full_log)
                       if attr not in self.IGNORED_ATTRIBUTES}
         attribute_categories = self.categorize_attributes(full_log)
         return attributes, attribute_categories

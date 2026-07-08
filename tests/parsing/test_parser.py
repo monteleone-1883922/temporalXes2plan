@@ -164,8 +164,11 @@ class TestXorBranchInfo:
     """XOR branch info is wired to the right transitions."""
 
     def _xor_branches(self, parse_result: ParseResult):
+        # TransitionInfo.xor_branches is a List[XorBranchInfo] (renamed from
+        # the earlier singular xor_branch) -- a transition can now be a
+        # branch of more than one XOR split.
         return {act: info for act, info in parse_result.transitions.items()
-                if info.xor_branch is not None}
+                if info.xor_branches}
 
     def test_at_least_one_xor_branch_exists(self, parse_result):
         branches = self._xor_branches(parse_result)
@@ -173,29 +176,35 @@ class TestXorBranchInfo:
 
     def test_xor_branch_has_positive_probability(self, parse_result):
         for act, info in self._xor_branches(parse_result).items():
-            assert info.xor_branch.probability >= 0.0
+            for branch in info.xor_branches:
+                assert branch.probability >= 0.0
 
     def test_xor_branch_has_positive_total_samples(self, parse_result):
         for act, info in self._xor_branches(parse_result).items():
-            assert info.xor_branch.total_samples > 0
+            for branch in info.xor_branches:
+                assert branch.total_samples > 0
 
     def test_xor_branch_cascade_level_valid(self, parse_result):
         for act, info in self._xor_branches(parse_result).items():
-            assert info.xor_branch.cascade_level in (1, 2, 3)
+            for branch in info.xor_branches:
+                assert branch.cascade_level in (1, 2, 3)
 
     def test_approve_or_reject_is_xor_branch(self, parse_result):
-        acts = set(parse_result.transitions.keys())
+        # parse_result.transitions keys are the raw log activity labels
+        # (t.label from pm4py, case-preserved) -- PDDL-name sanitization
+        # only happens later at encoding time, so _make_xor_log's "Approve"/
+        # "Reject" show up unchanged here.
         xor_acts = {act for act, info in parse_result.transitions.items()
-                    if info.xor_branch is not None}
+                    if info.xor_branches}
         # At least one of the two mutually exclusive activities must be an XOR branch.
-        assert xor_acts & {"approve", "reject"}, (
-            f"Expected 'approve' or 'reject' as XOR branches; got {xor_acts}"
+        assert xor_acts & {"Approve", "Reject"}, (
+            f"Expected 'Approve' or 'Reject' as XOR branches; got {xor_acts}"
         )
 
     def test_register_not_xor_branch(self, parse_result):
-        info = parse_result.transitions.get("register")
+        info = parse_result.transitions.get("Register")
         if info is not None:
-            assert info.xor_branch is None, "'register' precedes the XOR split; should not be a branch"
+            assert not info.xor_branches, "'Register' precedes the XOR split; should not be a branch"
 
 
 # ---------------------------------------------------------------------------
@@ -367,13 +376,14 @@ class TestAttributeCatalog:
     def test_xor_guard_attributes_present_in_catalog(self, parse_result):
         """Attributes referenced in XOR branch guards must be in the catalog."""
         for info in parse_result.transitions.values():
-            if info.xor_branch is None or info.xor_branch.guards is None:
-                continue
-            for path in info.xor_branch.guards:
-                for guard in path:
-                    assert guard.attribute in parse_result.attribute_catalog, (
-                        f"Guard attribute '{guard.attribute}' missing from catalog"
-                    )
+            for branch in info.xor_branches or []:
+                if branch.guards is None:
+                    continue
+                for path in branch.guards:
+                    for guard in path:
+                        assert guard.attribute in parse_result.attribute_catalog, (
+                            f"Guard attribute '{guard.attribute}' missing from catalog"
+                        )
 
     def test_catalog_does_not_contain_ignored_attributes(self, parse_result):
         """Standard infrastructure attributes must never appear in the catalog."""

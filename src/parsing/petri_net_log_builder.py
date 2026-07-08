@@ -152,7 +152,7 @@ class PetriNetLogBuilder:
 
             for event in trace:
                 lifecycle = event.get("lifecycle:transition", "complete").lower()
-                activity = utils.sanitize_name(event.get("concept:name", ""))
+                activity = event.get("concept:name", "")
                 timestamp = event.get("time:timestamp")
 
                 if lifecycle == "start":

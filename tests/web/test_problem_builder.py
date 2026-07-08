@@ -66,7 +66,11 @@ class TestProblemBuilderStructure:
 
 class TestProblemBuilderInit:
     def test_empty_init_has_no_atoms(self):
-        result = _build(init_effects=[])
+        # attribute_catalog=CATALOG_EMPTY -- with CATALOG_MIXED, every
+        # categorical/numerical attribute not set by init_effects gets a
+        # default "_val_none" atom (see _build_init_atoms's fill-in loop),
+        # so this only holds for a genuinely empty catalog.
+        result = _build(init_effects=[], attribute_catalog=CATALOG_EMPTY)
         lines = [l.strip() for l in result.splitlines()]
         init_idx = next(i for i, l in enumerate(lines) if "(:init" in l)
         end_idx = next(i for i, l in enumerate(lines) if i > init_idx and l == ")")
@@ -78,17 +82,33 @@ class TestProblemBuilderInit:
         assert "(marked place_start)" in result
 
     def test_multiple_init_places_add_multiple_marked_atoms(self):
+        # Place ids go through PDDLEffect.to_pddl()'s sanitize_name() same as
+        # any other attribute/place name -- "p_A"/"p_B" come out lowercased.
         result = _build(init_places=["p_A", "p_B"])
-        assert "(marked p_A)" in result
-        assert "(marked p_B)" in result
+        assert "(marked p_a)" in result
+        assert "(marked p_b)" in result
 
     def test_categorical_init_effect(self):
+        # Values go through sanitize_value(attr, value), which prefixes with
+        # "{attr}_val_" -- the same PDDL constant name the domain encoder
+        # uses (core_utils.sanitize_value), not the bare log value.
         result = _build(
             init_effects=[{"attribute": "status", "value": "admitted"}],
             attribute_catalog=CATALOG_MIXED,
         )
-        assert "(status_is admitted)" in result
+        assert "(status_is status_val_admitted)" in result
 
+    @pytest.mark.xfail(
+        reason=(
+            "Known bug in ProblemBuilder._build_init_atoms: `value` is "
+            "assigned from utils.sanitize_value(attr, ...) (e.g. "
+            "'critical_val_true') before the `value == \"true\"` check, "
+            "which can now never match -- boolean init effects always "
+            "resolve to set_attr_false regardless of the actual value. "
+            "Flagged to the user, not fixed here (tests-only task)."
+        ),
+        strict=True,
+    )
     def test_boolean_true_init_effect(self):
         result = _build(
             init_effects=[{"attribute": "critical", "value": "true"}],
@@ -108,8 +128,15 @@ class TestProblemBuilderInit:
             init_effects=[{"attribute": "crp", "value": "lt_50"}],
             attribute_catalog=CATALOG_MIXED,
         )
-        assert "(crp_is lt_50)" in result
+        assert "(crp_is crp_val_lt_50)" in result
 
+    @pytest.mark.xfail(
+        reason=(
+            "Same known bug as test_boolean_true_init_effect: the boolean "
+            "'critical' effect always resolves to set_attr_false."
+        ),
+        strict=True,
+    )
     def test_multiple_init_effects(self):
         result = _build(
             init_effects=[
@@ -118,7 +145,7 @@ class TestProblemBuilderInit:
             ],
             attribute_catalog=CATALOG_MIXED,
         )
-        assert "(status_is admitted)" in result
+        assert "(status_is status_val_admitted)" in result
         assert "(critical_true)" in result
 
     def test_init_places_before_effects(self):
@@ -128,9 +155,20 @@ class TestProblemBuilderInit:
             attribute_catalog=CATALOG_MIXED,
         )
         marked_idx = result.index("(marked p_start)")
-        effect_idx = result.index("(status_is admitted)")
+        effect_idx = result.index("(status_is status_val_admitted)")
         assert marked_idx < effect_idx
 
+    @pytest.mark.xfail(
+        reason=(
+            "Known bug in ProblemBuilder._build_init_atoms: `value` is "
+            "already the sanitized '{attr}_val_empty' string (sanitize_value "
+            "never returns an empty string, even for raw_value='') by the "
+            "time `if not value: continue` runs, so the empty-value skip "
+            "never actually triggers for non-bool attributes. Flagged to "
+            "the user, not fixed here (tests-only task)."
+        ),
+        strict=True,
+    )
     def test_effect_without_value_skipped_for_non_bool(self, tmp_path):
         # Use a catalog where "flag" is categorical and goal uses a different attr
         catalog = {"flag": {"type": "categorical", "possible_values": ["on", "off"]}}
@@ -155,8 +193,8 @@ class TestProblemBuilderGoal:
         result = _build(
             goal_sop=[[{"attribute": "status", "predicate": "=", "value": "discharged"}]],
         )
-        assert "(status_is discharged)" in result
-        assert "(and (status_is discharged))" not in result
+        assert "(status_is status_val_discharged)" in result
+        assert "(and (status_is status_val_discharged))" not in result
 
     def test_and_clause_multiple_conditions(self):
         result = _build(
@@ -166,7 +204,7 @@ class TestProblemBuilderGoal:
             ]],
             attribute_catalog=CATALOG_MIXED,
         )
-        assert "(and (status_is discharged) (critical_false))" in result
+        assert "(and (status_is status_val_discharged) (critical_false))" in result
 
     def test_or_clauses_multiple_clauses(self):
         result = _build(
@@ -177,7 +215,7 @@ class TestProblemBuilderGoal:
             attribute_catalog=CATALOG_MIXED,
         )
         assert "(or " in result
-        assert "(status_is discharged)" in result
+        assert "(status_is status_val_discharged)" in result
         assert "(critical_false)" in result
 
     def test_boolean_goal_true_predicate(self):
@@ -199,7 +237,7 @@ class TestProblemBuilderGoal:
             goal_sop=[[{"attribute": "status", "predicate": "<>", "value": "admitted"}]],
             attribute_catalog=CATALOG_MIXED,
         )
-        assert "(status_is_not admitted)" in result
+        assert "(status_is_not status_val_admitted)" in result
 
     def test_not_equal_bool_becomes_opposite(self):
         result = _build(
@@ -260,7 +298,7 @@ class TestProblemBuilderMetric:
             init_effects=[{"attribute": "status", "value": "admitted"}],
         )
         cost_pos = result.index("(= (total-cost) 0)")
-        effect_pos = result.index("(status_is admitted)")
+        effect_pos = result.index("(status_is status_val_admitted)")
         assert cost_pos < effect_pos
 
     def test_parentheses_balanced_with_metric(self):
@@ -315,7 +353,7 @@ class TestProblemBuilderRequireCompletion:
         )
         goal_section = result.split("(:goal")[1]
         assert "(or" not in goal_section
-        assert "(and (status_is discharged) (marked p_end))" in goal_section
+        assert "(and (status_is status_val_discharged) (marked p_end))" in goal_section
 
 
 # ---------------------------------------------------------------------------
@@ -330,11 +368,12 @@ class TestProblemBuilderDeadline:
 
     def test_deadline_til_in_init(self):
         result = _build(deadline=3600.0)
-        assert "(at 3600.0 (deadline_exceeded))" in result
+        assert "(deadline_ok)" in result
+        assert "(at 3600.0 (not (deadline_ok)))" in result
 
     def test_deadline_format_one_decimal(self):
         result = _build(deadline=120.0)
-        assert "(at 120.0 (deadline_exceeded))" in result
+        assert "(at 120.0 (not (deadline_ok)))" in result
 
     def test_deadline_til_before_attribute_effects(self):
         result = _build(
@@ -342,7 +381,7 @@ class TestProblemBuilderDeadline:
             init_effects=[{"attribute": "status", "value": "admitted"}],
         )
         til_pos = result.index("(at 300.0")
-        effect_pos = result.index("(status_is admitted)")
+        effect_pos = result.index("(status_is status_val_admitted)")
         assert til_pos < effect_pos
 
     def test_deadline_zero_not_emitted(self):

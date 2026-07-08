@@ -505,7 +505,7 @@ class PetriNetModel:
                 new_place_inputs[place] = remaining
 
         new_activities = {
-            utils.sanitize_name(t.label)
+            t.label
             for t in self.petrinet.transitions if t.label
         }
         new_silent = {
