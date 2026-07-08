@@ -22,11 +22,15 @@ from planning.planner_config import (
     load_planner_config, save_planner_config, config_to_dict,
     FastDownwardConfig, OpticConfig, _merge,
 )
-from encoding.domain_rebuilder import DomainRebuilder
-from encoding.pddl_writer import PDDLWriter
+from encoding import build_domain_with_variant_map
+from encoding.prepared_input import PreparedDomainInput
+from encoding.prepared_graph_utils import build_petrinet_model_from_prepared
 from dataclasses import asdict
 
-from parsing.partial_trace_replayer import PartialTraceError, PartialTraceReplayer
+from pm4py.objects.log.importer.xes import importer as _xes_importer
+from parsing.csv_loader import csv_to_event_log
+from parsing.log_validator import validate_partial_trace
+from replay.trace_replayer import TraceReplayer
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 
@@ -489,14 +493,14 @@ def build_problem(config_name: str):
         or has_deadline != bool(saved_state.get("has_deadline", False))
     )
     if need_rebuild:
-        rebuilt = DomainRebuilder().rebuild(
-            data, domain_name=config_name,
+        rebuilt, _variant_map = build_domain_with_variant_map(
+            PreparedDomainInput.from_dict(data),
+            domain_name=config_name,
             use_durative=use_durative,
             use_costs=use_costs,
             has_deadline=has_deadline,
         )
-        Path(pddl_out).mkdir(parents=True, exist_ok=True)
-        PDDLWriter().write_domain(rebuilt, Path(pddl_out) / "domain.pddl")
+        rebuilt.write(Path(pddl_out) / "domain.pddl")
         _save_domain_state(pddl_out, current_hash, use_durative, use_costs, has_deadline)
 
     problem_text = ProblemBuilder().build(
@@ -543,9 +547,55 @@ def build_problem(config_name: str):
 # Partial trace replay
 # ---------------------------------------------------------------------------
 
+class PartialTraceError(Exception):
+    """Raised when the uploaded partial-trace file cannot be parsed."""
+
+
+def _parse_uploaded_trace(file_bytes: bytes, file_type: str, mapping: Optional[Dict[str, Optional[str]]]):
+    """Parse a single-trace XES or CSV upload into one pm4py Trace.
+
+    Recreated from the deleted parsing/partial_trace_replayer.py — the
+    parsing/validation logic itself never depended on the removed
+    ActionRegistry-era modules, only on csv_loader/log_validator, still
+    present and untouched.
+    """
+    try:
+        if file_type == "csv":
+            with tempfile.NamedTemporaryFile(suffix=".csv", delete=True) as tmp:
+                tmp.write(file_bytes)
+                tmp.flush()
+                log = csv_to_event_log(tmp.name, mapping)
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".xes", delete=True) as tmp:
+                tmp.write(file_bytes)
+                tmp.flush()
+                log = _xes_importer.apply(tmp.name)
+    except Exception as exc:
+        raise PartialTraceError(f"Invalid {file_type.upper()} file: {exc}") from exc
+
+    if len(log) == 0:
+        raise PartialTraceError(f"{file_type.upper()} file contains no traces.")
+    if len(log) > 1:
+        raise PartialTraceError(
+            f"Expected a single-trace {file_type.upper()} file, found {len(log)} traces."
+        )
+    trace = log[0]
+    errors = validate_partial_trace(trace)
+    if errors:
+        raise PartialTraceError("; ".join(errors))
+    return trace
+
+
 @api.route("/<config_name>/replay-partial-trace", methods=["POST"])
 def replay_partial_trace(config_name: str):
-    """Replay a single-trace XES or CSV file and return the derived init state."""
+    """Replay a single-trace XES or CSV file and return the derived init state.
+
+    Uses replay.trace_replayer.TraceReplayer.replay_partial_trace (caso 3 of
+    docs/trace_replayer_analysis.md) — the raw log-observed snapshot (marking
+    + attributes), no guard/effect-group interpretation. Unlike the old
+    parsing/partial_trace_replayer.py, this does not pre-emptively verify PDDL
+    feasibility; only the warnings Phase 1 itself produces are surfaced.
+    """
 
     current_path = _current_path(config_name)
     if not os.path.isfile(current_path):
@@ -585,13 +635,25 @@ def replay_partial_trace(config_name: str):
             "start_place": _detect_source_place(current_data.get("graph", {})) or "",
             "end_place": _detect_sink_place(current_data.get("graph", {})) or "",
         }
+    start_place = current_data["metadata"].get("start_place") or _detect_source_place(current_data.get("graph", {}))
+    end_place = current_data["metadata"].get("end_place") or _detect_sink_place(current_data.get("graph", {}))
 
     try:
-        result = PartialTraceReplayer().replay(f.read(), current_data, fmt=file_type, mapping=mapping)
+        trace = _parse_uploaded_trace(f.read(), file_type, mapping)
     except PartialTraceError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    return jsonify(result)
+    prepared = PreparedDomainInput.from_dict(current_data)
+    pnm = build_petrinet_model_from_prepared(prepared, start_place, end_place)
+    replayer = TraceReplayer(prepared, pnm, config=AnalysisConfig())
+    snapshot = replayer.replay_partial_trace(trace)
+
+    return jsonify({
+        "init_places": sorted(snapshot.marking),
+        "init_effects": [{"attribute": k, "value": v} for k, v in snapshot.attributes.items()],
+        "n_events": len(trace),
+        "warnings": snapshot.warnings,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -783,12 +845,12 @@ def rebuild_domain(config_name: str):
         return jsonify({"status": "ok", "skipped": True})
 
     data = _read_json(current_path)
-    domain = DomainRebuilder().rebuild(
-        data, domain_name=config_name, use_durative=use_durative, use_costs=use_costs
+    domain, _variant_map = build_domain_with_variant_map(
+        PreparedDomainInput.from_dict(data),
+        domain_name=config_name, use_durative=use_durative, use_costs=use_costs,
     )
     pddl_dir_path = _pddl_dir(config_name)
-    Path(pddl_dir_path).mkdir(parents=True, exist_ok=True)
-    PDDLWriter().write_domain(domain, Path(pddl_dir_path) / "domain.pddl")
+    domain.write(Path(pddl_dir_path) / "domain.pddl")
     _save_domain_state(pddl_dir_path, current_hash, use_durative, use_costs)
     return jsonify({"status": "ok", "skipped": False})
 

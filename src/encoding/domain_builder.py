@@ -36,7 +36,7 @@ from models import AnalysisConfig, ParseResult
 class DomainBuilder:
     """Builds a PDDLDomain from a ParseResult."""
 
-    def _build_prepared_domain_input(
+    def build_prepared_input(
         self, parse_result: ParseResult, config: Optional[AnalysisConfig] = None,
     ) -> PreparedDomainInput:
         """Convert a XES-pipeline ParseResult into a PreparedDomainInput.

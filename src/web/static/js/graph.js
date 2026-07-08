@@ -195,7 +195,7 @@ function renderGraph(data) {
                 id:           node.id,
                 label:        node.label,
                 type:         node.type,
-                is_silent:    node.is_silent || false,
+                is_silent:    node.type === "silent",
             },
         });
     }

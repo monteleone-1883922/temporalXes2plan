@@ -28,7 +28,6 @@ function enterEditMode() {
 
 // ── Section icons ──────────────────────────────────────────────────────────
 const SECTION_ICONS = {
-    "Analysis Info":      "bi-bar-chart-line",
     "Duration":           "bi-clock",
     "Preconditions":      "bi-funnel",
     "Effects":            "bi-lightning-charge",
@@ -55,7 +54,6 @@ function showTransitionPanel(activityName) {
     const content = document.getElementById("panel-content");
     content.innerHTML = "";
 
-    content.appendChild(buildMetaSection(t));
     content.appendChild(buildDurationSection(t.duration));
     content.appendChild(buildPreconditionsSection(t.preconditions));
     content.appendChild(buildEffectsSection(t.effect_groups));
@@ -64,36 +62,6 @@ function showTransitionPanel(activityName) {
     _panelEntity = { type: "transition", id: activityName };
     _showEditBtn(true);
     document.getElementById("detail-panel").classList.remove("d-none");
-}
-
-function buildMetaSection(t) {
-    const section = createSection("Analysis Info", true);
-    const grid = document.createElement("div");
-    grid.className = "meta-block";
-
-    const rows = [
-        ["Firings", t._meta.total_firings],
-    ];
-
-    for (const [k, v] of rows) {
-        const key = document.createElement("span");
-        key.className = "meta-key";
-        key.textContent = k;
-
-        const val = document.createElement("span");
-        val.className = "meta-val";
-        if (typeof v === "string" && v.startsWith("<")) {
-            val.innerHTML = v;
-        } else {
-            val.textContent = v;
-        }
-
-        grid.appendChild(key);
-        grid.appendChild(val);
-    }
-
-    section.appendChild(grid);
-    return section;
 }
 
 function buildDurationSection(dur) {
@@ -209,16 +177,6 @@ function buildCostSection(cost) {
 // XOR split panel
 // ─────────────────────────────────────────────────────────────────────────────
 
-const _ROUTING_SOURCE_LABEL = {
-    "dt":                  null,
-    "dt_orphan":           "Fallback — DT orphan (all leaves pruned)",
-    "dt_low_prob":         "Fallback — low probability (excluded from DT)",
-    "deterministic":       "Deterministic (certain branch)",
-    "deterministic_floor": "Fallback — floor cost (non-certain branch)",
-    "probabilistic":       "Probabilistic fallback",
-    "equal_weight":        "Fallback — equal weight (insufficient samples)",
-};
-
 function showXorSplitPanel(placeId) {
     if (!currentData) return;
     const xor = currentData.xor_splits[placeId];
@@ -256,22 +214,8 @@ function showXorSplitPanel(placeId) {
             card.appendChild(label);
             renderConditionGroups(card, branch.conditions);
         } else {
-            const src = branch._meta && branch._meta.routing_source;
-            const noteText = (src && src in _ROUTING_SOURCE_LABEL && _ROUTING_SOURCE_LABEL[src] !== null)
-                ? _ROUTING_SOURCE_LABEL[src]
-                : "No guards — statistical fallback";
-            card.appendChild(emptyNote(noteText));
+            card.appendChild(emptyNote("No guards"));
         }
-
-        const meta = document.createElement("div");
-        meta.className = "branch-meta";
-        meta.innerHTML = `
-            <span class="meta-key">Cascade</span> ${cascadeBadge(branch._meta.cascade_level)}
-            <span style="color:#cbd5e1">·</span>
-            <span class="meta-key">Samples</span>
-            <span>${branch._meta.total_samples}</span>
-        `;
-        card.appendChild(meta);
 
         content.appendChild(card);
     }
@@ -551,10 +495,6 @@ function orSeparator() {
     sep.className = "or-separator";
     sep.textContent = "OR";
     return sep;
-}
-
-function cascadeBadge(level) {
-    return `<span class="cascade-badge cascade-${level}">${["", "DT", "stat.", "none"][level] || level}</span>`;
 }
 
 function emptyNote(text) {

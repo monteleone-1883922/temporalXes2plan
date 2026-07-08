@@ -2,10 +2,12 @@
 
 Orchestrates:
   1. Parsing        — Parser (xes_parser) produces a ParseResult
-  2. Encoding       — DomainBuilder.build() builds the PDDLDomain
-  3. Serialization  — serialize_parse_result() produces the UI JSON dict
-  4. Persistence    — save_original_and_current() writes original.json / current.json
-  5. PDDL write     — PDDLWriter.write_domain() writes the .pddl file
+  2. Encoding       — DomainBuilder.build_prepared_input() + build_domain_with_variant_map()
+                       build the shared PreparedDomainInput and the PDDLDomain from it
+  3. Serialization  — PreparedDomainInput.to_dict() (+ start/end place metadata)
+                       produces the UI JSON dict — the same object used to build the domain
+  4. Persistence    — core_utils.save_original_and_current() writes original.json / current.json
+  5. PDDL write     — PDDLDomain.write() writes the .pddl file
 """
 
 import os
@@ -15,10 +17,7 @@ from typing import Optional
 import core_utils as utils
 from models import AnalysisConfig
 from parsing.xes_parser import Parser
-from encoding.domain_builder import DomainBuilder
-from encoding.graph_updater import save_original_and_current, update_parse_result
-from encoding.pddl_writer import PDDLWriter
-from web.serializer import serialize_parse_result
+from encoding.domain_builder import DomainBuilder, build_domain_with_variant_map
 
 logger = utils.get_logger(__name__)
 
@@ -88,22 +87,28 @@ class Pipeline:
         # 2 — Encode
         logger.info("Step 2/4: Building PDDL domain")
         builder = DomainBuilder()
-        domain, registry = builder.build_with_registry(
-            parse_result=parse_result,
+        prepared = builder.build_prepared_input(parse_result, config=config)
+        domain, variant_map = build_domain_with_variant_map(
+            prepared,
+            config=config,
             domain_name=domain_name,
             use_durative=use_durative,
             use_costs=use_costs,
-            config=config,
         )
-        update_parse_result(registry, parse_result)
 
-        # 3 — Serialize
+        # 3 — Serialize (same PreparedDomainInput used to build the domain,
+        # plus the start/end place metadata the GUI needs and that
+        # PreparedDomainInput itself has no reason to carry)
         logger.info("Step 3/4: Serializing to UI JSON")
-        ui_data = serialize_parse_result(parse_result)
+        ui_data = prepared.to_dict()
+        ui_data["metadata"] = {
+            "start_place": parse_result.start_place,
+            "end_place": parse_result.end_place,
+        }
 
         # 4 — Persist JSON (original + current, skipped if already exist)
         logger.info("Step 4/4: Saving JSON to %s", config_dir)
-        orig_written, curr_written = save_original_and_current(config_dir, ui_data)
+        orig_written, curr_written = utils.save_original_and_current(config_dir, ui_data)
         if orig_written:
             logger.info("original.json created")
         else:
@@ -115,7 +120,7 @@ class Pipeline:
 
         # Write PDDL
         logger.info("Writing PDDL domain to %s", pddl_path)
-        PDDLWriter().write_domain(domain, pddl_path)
+        domain.write(pddl_path)
 
         logger.info("=== Pipeline complete: %s ===", stem)
         return pddl_path

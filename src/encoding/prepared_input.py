@@ -148,7 +148,7 @@ class PreparedTransition:
             duration = ActionDurationStats(
                 effective_min=raw_duration["effective_min"],
                 effective_max=raw_duration["effective_max"],
-                source=raw_duration["source"],
+                source=raw_duration.get("source", "external"),
                 mean=raw_duration.get("mean"),
                 std_dev=raw_duration.get("std_dev"),
                 observed_min=raw_duration.get("observed_min"),

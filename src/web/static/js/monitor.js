@@ -94,8 +94,7 @@ function _applyPartialTraceInit() {
     const banner = document.getElementById("partial-trace-banner");
     const summary = document.getElementById("partial-trace-summary");
     if (banner && summary) {
-        const activities = (data.replayed_activities || []).join(" → ") || "(none)";
-        summary.textContent = `${data.n_events} event(s) replayed: ${activities}`;
+        summary.textContent = `${data.n_events} event(s) replayed`;
         banner.classList.remove("js-hidden");
     }
 
