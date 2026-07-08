@@ -1,6 +1,8 @@
 """End-to-end pipeline coordinator: XES event log → PDDL domain + UI JSON files.
 
 Orchestrates:
+  0. Config search  — (optional, search=True) network_search.runner.find_best_config()
+                       picks the AnalysisConfig used by steps 1-4, see docs/network_improvement_loop.md
   1. Parsing        — Parser (xes_parser) produces a ParseResult
   2. Encoding       — DomainBuilder.build_prepared_input() + build_domain_with_variant_map()
                        build the shared PreparedDomainInput and the PDDLDomain from it
@@ -18,6 +20,8 @@ import core_utils as utils
 from models import AnalysisConfig
 from parsing.xes_parser import Parser
 from encoding.domain_builder import DomainBuilder, build_domain_with_variant_map
+from network_search.runner import find_best_config
+from network_search.scoring import ScoreWeights
 
 logger = utils.get_logger(__name__)
 
@@ -38,6 +42,11 @@ class Pipeline:
         use_costs: bool = False,
         use_activity_classifier: bool = False,
         config: Optional[AnalysisConfig] = None,
+        search: bool = False,
+        search_n_trials: int = 30,
+        search_test_pct: float = 0.2,
+        search_seed: int = 42,
+        search_weights: Optional[ScoreWeights] = None,
     ) -> Path:
         """Run the full pipeline for a single XES log file.
 
@@ -54,7 +63,19 @@ class Pipeline:
             use_durative: Encode durative actions when True.
             use_costs: Include action cost effects and functions section when True.
             use_activity_classifier: Combine concept:name + lifecycle:transition as label.
-            config: Analysis configuration; defaults to AnalysisConfig().
+            config: Analysis configuration; defaults to AnalysisConfig(). Ignored
+                when search=True (network_search picks the config instead).
+            search: When True, run network_search.runner.find_best_config() to
+                pick the AnalysisConfig instead of using `config` directly — see
+                docs/network_improvement_loop.md/docs/network_improvement_loop_plan.md §0.
+                Every candidate is scored on a held-out split of log_path, but the
+                final network below is still built on the complete log_path with
+                the winning config, not on that split.
+            search_n_trials: Number of candidate configs to evaluate when search=True.
+            search_test_pct: Fraction of traces held out to score candidates when search=True.
+            search_seed: Random seed for the search's train/test split.
+            search_weights: ScoreWeights for the search; defaults to ScoreWeights()
+                (placeholder values, docs/network_improvement_loop.md §8).
 
         Returns:
             Path to the written PDDL domain file.
@@ -67,8 +88,23 @@ class Pipeline:
         config_dir = os.path.join(data_dir, stem)
         pddl_path = Path(pddl_output_dir) / "domain.pddl"
 
+        if search:
+            logger.info("Step 0/5: Searching for the best AnalysisConfig (%d trials)", search_n_trials)
+            original_activity_names = utils.activity_names(log_path)
+            with utils.split(log_path, test_pct=search_test_pct, seed=search_seed) as split_result:
+                config, _trial_records = find_best_config(
+                    training_log_path=str(split_result.train_path),
+                    test_traces=split_result.test_cases,
+                    n_trials=search_n_trials,
+                    original_activity_names=original_activity_names,
+                    weights=search_weights,
+                    coverage_percentage=coverage_percentage,
+                    discovery_algorithm=discovery_algorithm,
+                )
+        else:
+            config = config or AnalysisConfig()
+
         # Route per-config debug output to data/<stem>/analysis_debug/
-        config = config or AnalysisConfig()
         config.snapshot_dir = os.path.join(config_dir, "analysis_debug")
 
         logger.info("=== Pipeline start: %s ===", stem)

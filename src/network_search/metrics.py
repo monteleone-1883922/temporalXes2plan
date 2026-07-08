@@ -34,7 +34,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Set
 
-from models import ParseResult, TransitionInfo, TransitionScreening, XorSplitScreening
+from encoding.prepared_input import PreparedTransition
+from models import ParseResult, TransitionScreening, XorSplitScreening
 from replay.trace_replayer import ReplayOutcome
 
 from network_search.scoring import ScoreWeights
@@ -100,8 +101,16 @@ def compute_fallback_score(
     return total_weight / n_decisions
 
 
-def compute_duplication_penalty(transitions: Dict[str, TransitionInfo]) -> float:
+def compute_duplication_penalty(transitions: Dict[str, PreparedTransition]) -> float:
     """docs/network_improvement_loop.md §3.3 — mean excess effect-group count.
+
+    Takes PreparedDomainInput.transitions (PreparedTransition, built by
+    DomainBuilder), not ParseResult.transitions (TransitionInfo) — the
+    latter's own `effect_groups` field is never populated by Parser (always
+    `[]`, see xes_parser.py's TransitionInfo construction); the actual
+    Cartesian-combined effect groups used to generate PDDL variant actions
+    only exist on PreparedTransition, produced later by
+    DomainBuilder.build_prepared_input().
 
     max(0, len(effect_groups) - 1) per transition (a single effect group is
     not a duplication — it is the normal case), averaged over all

@@ -21,3 +21,4 @@ dependencies:
     - rustxes
     - jenkspy==0.4.1
     - flask
+    - optuna==4.9.0

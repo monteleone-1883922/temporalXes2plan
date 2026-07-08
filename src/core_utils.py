@@ -355,6 +355,18 @@ def _load_log(log_path: str, log_fmt: str, mapping: Optional[dict]) -> Any:
     return pm4py.objects.log.importer.xes.importer.apply(log_path)
 
 
+def activity_names(log_path: str, log_fmt: str = "xes", mapping: Optional[dict] = None) -> Set[str]:
+    """All distinct activity names in a log — e.g. network_search's
+    compute_coverage denominator.
+
+    Uses the same _load_log helper as split(), so XES logs go through the
+    classic importer (EventLog of Trace/Event objects) rather than
+    pm4py.read_xes's rustxes/DataFrame backend.
+    """
+    log = _load_log(log_path, log_fmt, mapping)
+    return {event["concept:name"] for trace in log for event in trace}
+
+
 def _stratified_sample_indices(
     traces: List[Any],
     n_test_cases: int,

@@ -3,10 +3,10 @@ fixtures, no dependency on a real log (docs/network_improvement_loop_plan.md
 §9 phase 2)."""
 import pytest
 
+from encoding.prepared_input import PreparedEffectGroup, PreparedTransition
 from models import (
     EffectAttrScreening,
     EffectValueScreening,
-    TransitionInfo,
     TransitionScreening,
     XorBranchScreening,
     XorSplitScreening,
@@ -42,14 +42,15 @@ def _effect_attr(appearance_action: str, value_action: str) -> EffectAttrScreeni
     )
 
 
-def _transition_info(n_effect_groups: int) -> TransitionInfo:
-    return TransitionInfo(
+def _prepared_transition(n_effect_groups: int) -> PreparedTransition:
+    return PreparedTransition(
         activity_name="act",
         input_places=["p1"],
-        total_firings=10,
-        xor_branches=None,
-        effects={},
-        effect_groups=[[("attr", "val")] for _ in range(n_effect_groups)],
+        preconditions=[],
+        effect_groups=[
+            PreparedEffectGroup(assignments=[("attr", "val")], guard=[], probability=1.0)
+            for _ in range(n_effect_groups)
+        ],
     )
 
 
@@ -222,20 +223,20 @@ class TestComputeDuplicationPenalty:
         assert compute_duplication_penalty({}) == 0.0
 
     def test_single_effect_group_is_not_penalized(self):
-        transitions = {"act": _transition_info(1)}
+        transitions = {"act": _prepared_transition(1)}
         assert compute_duplication_penalty(transitions) == 0.0
 
     def test_no_effect_groups_is_not_penalized(self):
-        transitions = {"act": _transition_info(0)}
+        transitions = {"act": _prepared_transition(0)}
         assert compute_duplication_penalty(transitions) == 0.0
 
     def test_multiple_effect_groups_penalized_by_excess(self):
-        transitions = {"act": _transition_info(3)}
+        transitions = {"act": _prepared_transition(3)}
         # excess = 3 - 1 = 2, averaged over 1 transition
         assert compute_duplication_penalty(transitions) == pytest.approx(2.0)
 
     def test_averaged_over_all_transitions(self):
-        transitions = {"a": _transition_info(3), "b": _transition_info(1)}
+        transitions = {"a": _prepared_transition(3), "b": _prepared_transition(1)}
         # excess = (3-1) + 0 = 2, averaged over 2 transitions
         assert compute_duplication_penalty(transitions) == pytest.approx(1.0)
 
