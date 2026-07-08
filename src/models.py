@@ -622,7 +622,6 @@ class AnalysisConfig:
     # appearance (2A): threshold | always | duplicate | duplicate_no_cost
     # "duplicate_no_cost" creates variant actions without probability cost tracking.
     effect_appearance_mode: str = "duplicate"
-    effect_appearance_threshold: float = 0.20
     # value (2B): majority_only | duplicate | duplicate_no_cost
     # "duplicate_no_cost" creates value variants without probability cost tracking.
     effect_value_mode: str = "duplicate"

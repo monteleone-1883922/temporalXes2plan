@@ -1,4 +1,4 @@
-"""Tests for encoding.domain_builder.DomainBuilder._build_prepared_domain_input
+"""Tests for encoding.domain_builder.DomainBuilder.build_prepared_input
 and the effect-group derivation helper (_prepared_effect_groups).
 
 Builds TransitionInfo/EffectInfo/XorBranchInfo/ParseResult by hand, using the
@@ -282,7 +282,7 @@ class TestBuildPreparedDomainInputEndToEnd:
         )
 
         builder = DomainBuilder()
-        prepared = builder._build_prepared_domain_input(parse_result)
+        prepared = builder.build_prepared_input(parse_result)
 
         assert set(prepared.transitions.keys()) == {"activity_a", "activity_b"}
 
