@@ -194,13 +194,16 @@ def _build_summary(
     q1_solved: List[float] = []
     q1_within: List[float] = []
     q1_plan_time: List[float] = []
+    q1_real_duration: List[float] = []
     q2_solved: List[float] = []
     q2_within: List[float] = []
     q2_plan_time: List[float] = []
+    q2_real_duration: List[float] = []
     q3_solved: List[float] = []
     q3_correct: List[float] = []
     q3_within: List[float] = []
     q3_plan_time: List[float] = []
+    q3_real_duration: List[float] = []
 
     # Replayability cross-check: solved despite the trace not being
     # replayable, and not-solved despite the trace being replayable —
@@ -261,6 +264,9 @@ def _build_summary(
             v = q.metrics.get("plan_time_s")
             if v is not None:
                 q1_plan_time.append(v)
+            budget = q.metrics.get("budget_s")
+            if v is not None and budget is not None:
+                q1_real_duration.append(budget)
 
         if q2_sr is not None:
             q2_solved.append(q2_sr)
@@ -270,6 +276,9 @@ def _build_summary(
             v = q.metrics.get("plan_time_s")
             if v is not None:
                 q2_plan_time.append(v)
+            budget = q.metrics.get("budget_s")
+            if v is not None and budget is not None:
+                q2_real_duration.append(budget)
 
         q3_sr = _ratio(log_q3, "solved")
         if q3_sr is not None:
@@ -283,6 +292,9 @@ def _build_summary(
             v = q.metrics.get("plan_time_s")
             if v is not None:
                 q3_plan_time.append(v)
+            budget = q.metrics.get("budget_s")
+            if v is not None and budget is not None:
+                q3_real_duration.append(budget)
 
     return {
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -295,6 +307,7 @@ def _build_summary(
             "within_budget_ratio_mean": _mean(q1_within),
             "plan_time_mean": _mean(q1_plan_time),
             "plan_time_std": _std(q1_plan_time),
+            "real_duration_mean": _mean(q1_real_duration),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q1"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q1"]),
         },
@@ -303,6 +316,7 @@ def _build_summary(
             "within_budget_ratio_mean": _mean(q2_within),
             "plan_time_mean": _mean(q2_plan_time),
             "plan_time_std": _std(q2_plan_time),
+            "real_duration_mean": _mean(q2_real_duration),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q2"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q2"]),
         },
@@ -312,6 +326,7 @@ def _build_summary(
             "within_budget_ratio_mean": _mean(q3_within),
             "plan_time_mean": _mean(q3_plan_time),
             "plan_time_std": _std(q3_plan_time),
+            "real_duration_mean": _mean(q3_real_duration),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q3"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q3"]),
         },
