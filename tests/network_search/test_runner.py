@@ -255,7 +255,7 @@ class TestSuccessiveHalvingPromotion:
             n_remaining = n_total - r.metrics.n_test_replayed
             best_possible_repro = (n_success + n_remaining) / n_total
             best_possible = combine(
-                TrialMetrics(r.metrics.fallback_score, r.metrics.duplication_penalty,
+                TrialMetrics(r.metrics.xor_score, r.metrics.effect_score, r.metrics.duplication_score,
                              best_possible_repro, n_total, r.metrics.coverage),
                 ScoreWeights(),
             )
@@ -267,11 +267,12 @@ class TestSuccessiveHalvingPromotion:
             assert math.isfinite(r.score)
 
     def test_promoted_trials_are_the_best_by_partial_score(self, sh_records):
-        # Every promoted trial's fallback_score/duplication_penalty-only
-        # partial score must be >= every discarded trial's -- that is what
-        # "promote the top fraction" means (docs/network_improvement_loop_plan.md §7.c).
+        # Every promoted trial's xor/effect/duplication-only partial score
+        # must be >= every discarded trial's -- that is what "promote the
+        # top fraction" means (docs/network_improvement_loop_plan.md §7.c).
         def partial(r):
-            m = TrialMetrics(r.metrics.fallback_score, r.metrics.duplication_penalty, None, 0, r.metrics.coverage)
+            m = TrialMetrics(r.metrics.xor_score, r.metrics.effect_score,
+                              r.metrics.duplication_score, None, 0, r.metrics.coverage)
             return combine(m, ScoreWeights())
 
         promoted = [r for r in sh_records if r.promoted_to_rung2]

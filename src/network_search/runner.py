@@ -52,8 +52,9 @@ from parsing.xes_parser import Parser
 
 from network_search.metrics import (
     compute_coverage,
-    compute_duplication_penalty,
-    compute_fallback_score,
+    compute_duplication_score,
+    compute_xor_score,
+    compute_effect_score,
 )
 from network_search.scoring import ScoreWeights, TrialMetrics, combine, max_reachable_score
 from network_search.search_space import suggest_config
@@ -93,8 +94,9 @@ class _Rung1Result:
     config: AnalysisConfig
     parse_result: ParseResult
     prepared: PreparedDomainInput
-    fallback_score: float
-    duplication_penalty: float
+    xor_score: float
+    effect_score: float
+    duplication_score: float
     coverage: float
     partial_score: float
 
@@ -125,15 +127,17 @@ def _evaluate_rung1(
     parse_result = parser.parse_result
     prepared = DomainBuilder().build_prepared_input(parse_result, config=config)
 
-    fallback_score = compute_fallback_score(parser.xor_screening, parser.effect_screening, weights)
-    duplication_penalty = compute_duplication_penalty(prepared.transitions)
+    xor_score = compute_xor_score(parser.xor_screening, weights)
+    effect_score = compute_effect_score(parser.effect_screening, weights)
+    duplication_score = compute_duplication_score(prepared.transitions)
     coverage = (
         compute_coverage(parse_result, original_activity_names)
         if original_activity_names is not None else 1.0
     )
     partial_metrics = TrialMetrics(
-        fallback_score=fallback_score,
-        duplication_penalty=duplication_penalty,
+        xor_score=xor_score,
+        effect_score=effect_score,
+        duplication_score=duplication_score,
         reproducibility_score=None,
         n_test_replayed=0,
         coverage=coverage,
@@ -145,8 +149,9 @@ def _evaluate_rung1(
         config=config,
         parse_result=parse_result,
         prepared=prepared,
-        fallback_score=fallback_score,
-        duplication_penalty=duplication_penalty,
+        xor_score=xor_score,
+        effect_score=effect_score,
+        duplication_score=duplication_score,
         coverage=coverage,
         partial_score=partial_score,
     )
@@ -155,8 +160,9 @@ def _evaluate_rung1(
 def _discarded_record(rung1: _Rung1Result) -> TrialRecord:
     """Not promoted to rung 2 — score stays the rung-1-only partial_score."""
     metrics = TrialMetrics(
-        fallback_score=rung1.fallback_score,
-        duplication_penalty=rung1.duplication_penalty,
+        xor_score=rung1.xor_score,
+        effect_score=rung1.effect_score,
+        duplication_score=rung1.duplication_score,
         reproducibility_score=None,
         n_test_replayed=0,
         coverage=rung1.coverage,
@@ -196,7 +202,7 @@ def _evaluate_rung2(
             n_success += 1
         bound = max_reachable_score(
             n_success, n_processed, len(test_traces),
-            rung1.fallback_score, rung1.duplication_penalty, weights,
+            rung1.xor_score, rung1.effect_score, rung1.duplication_score, weights,
         )
         if bound <= best_score_so_far:
             stopped_early = True
@@ -209,8 +215,9 @@ def _evaluate_rung2(
     reproducibility_score = n_success / len(test_traces) if test_traces else 0.0
 
     metrics = TrialMetrics(
-        fallback_score=rung1.fallback_score,
-        duplication_penalty=rung1.duplication_penalty,
+        xor_score=rung1.xor_score,
+        effect_score=rung1.effect_score,
+        duplication_score=rung1.duplication_score,
         reproducibility_score=reproducibility_score,
         n_test_replayed=n_processed,
         coverage=rung1.coverage,
@@ -218,9 +225,9 @@ def _evaluate_rung2(
     score = combine(metrics, weights)
 
     logger.info(
-        "Trial %d: score=%.4f (fallback=%.4f, duplication=%.4f, reproducibility=%.4f, "
+        "Trial %d: score=%.4f (xor=%.4f, effect=%.4f, duplication=%.4f, reproducibility=%.4f, "
         "coverage=%.4f, stopped_early=%s, n_test_replayed=%d/%d)",
-        rung1.trial.number, score, rung1.fallback_score, rung1.duplication_penalty,
+        rung1.trial.number, score, rung1.xor_score, rung1.effect_score, rung1.duplication_score,
         reproducibility_score, rung1.coverage, stopped_early, n_processed, len(test_traces),
     )
 

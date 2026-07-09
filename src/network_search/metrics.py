@@ -46,39 +46,79 @@ from network_search.scoring import ScoreWeights
 _EFFECT_NEVER = "never"
 
 
-def compute_fallback_score(
+def _bounded_reward(weight: float) -> float:
+    """0.5 + 0.5*weight -- maps a reward weight in [0,1] to [0.5, 1]."""
+    return 0.5 + 0.5 * weight
+
+
+def _bounded_penalty(weight: float) -> float:
+    """0.5 - 0.5*weight -- maps a penalty weight in [0,1] to [0, 0.5]."""
+    return 0.5 - 0.5 * weight
+
+
+def compute_xor_score(
     xor_screening: Dict[str, XorSplitScreening],
-    effect_screening: Dict[str, TransitionScreening],
     weights: ScoreWeights,
 ) -> float:
-    """Asse A (routing XOR) + Asse B (effetti) — docs/network_improvement_loop.md §3.2.
+    """Asse A (routing XOR) — docs/network_improvement_loop.md §3.2.
 
-    Returns 0.0 (neutral) when there are no decisions to classify at all
-    (e.g. a net with no XOR splits and no conditional effects) rather than
-    dividing by zero.
+    Every decision contributes a value in [0, 1], with 0.5 as the neutral
+    point (0 = worst possible, 1 = best possible) — see
+    docs/network_search_score_formula.md.
+    weights.w_det_xor/w_fb_xor/w_prune_xor must themselves be in [0, 1]: a
+    reward contributes 0.5 + 0.5*w_det_xor, a penalty contributes
+    0.5 - 0.5*w_prune_xor (or w_fb_xor), so the average over all decisions
+    always stays in [0, 1].
+
+    Returns 0.5 (neutral) when there are no XOR splits to classify at all,
+    rather than dividing by zero.
     """
-    total_weight = 0.0
+    total = 0.0
     n_decisions = 0
 
     for split_screening in xor_screening.values():
         for branch in split_screening.branches.values():
             if branch.status == "pruned":
-                total_weight -= weights.w_prune_xor
+                value = _bounded_penalty(weights.w_prune_xor)
             elif branch.status == "certain":
-                total_weight += weights.w_det
+                value = _bounded_reward(weights.w_det_xor)
             elif branch.status == "active":
                 if split_screening.action == "fallback":
                     #todo change this kind of fallback, its weight should be less than normal fallback
-                    total_weight -= weights.w_fb_xor
-                # action == "dt" (or, defensively, any other action while
-                # status is "active"): neutral — see module docstring's
-                # first caveat for the DT-guard-missing edge case this
-                # simplification does not distinguish.
+                    value = _bounded_penalty(weights.w_fb_xor)
+                else:
+                    # action == "dt" (or, defensively, any other action while
+                    # status is "active"): neutral — see module docstring's
+                    # first caveat for the DT-guard-missing edge case this
+                    # simplification does not distinguish.
+                    value = 0.5
             elif branch.status == "fallback":
-                total_weight -= weights.w_fb_xor
+                value = _bounded_penalty(weights.w_fb_xor)
             else:
                 raise ValueError(f"Unexpected XorBranchScreening.status: {branch.status!r}")
+            total += value
             n_decisions += 1
+
+    if n_decisions == 0:
+        return 0.5
+    return total / n_decisions
+
+
+def compute_effect_score(
+    effect_screening: Dict[str, TransitionScreening],
+    weights: ScoreWeights,
+) -> float:
+    """Asse B (effetti) — docs/network_improvement_loop.md §3.2.
+
+    Every decision contributes a value in [0, 1], with 0.5 as the neutral
+    point, exactly like compute_xor_score — weights.w_det_eff/w_fb_eff must
+    themselves be in [0, 1].
+
+    Returns 0.5 (neutral) when there are no conditional effects to classify
+    at all, rather than dividing by zero.
+    """
+    total = 0.0
+    n_decisions = 0
 
     for transition_screening in effect_screening.values():
         for attr_screening in transition_screening.attributes.values():
@@ -87,22 +127,23 @@ def compute_fallback_score(
                 if action == _EFFECT_NEVER:
                     continue
                 if action == "deterministic":
-                    total_weight += weights.w_det
+                    value = _bounded_reward(weights.w_det_eff)
                 elif action == "dt":
-                    pass  # neutral
+                    value = 0.5  # neutral
                 elif action == "fallback":
-                    total_weight -= weights.w_fb_eff
+                    value = _bounded_penalty(weights.w_fb_eff)
                 else:
                     raise ValueError(f"Unexpected effect action: {action!r}")
+                total += value
                 n_decisions += 1
 
     if n_decisions == 0:
-        return 0.0
-    return total_weight / n_decisions
+        return 0.5
+    return total / n_decisions
 
 
-def compute_duplication_penalty(transitions: Dict[str, PreparedTransition]) -> float:
-    """docs/network_improvement_loop.md §3.3 — mean excess effect-group count.
+def compute_duplication_score(transitions: Dict[str, PreparedTransition]) -> float:
+    """docs/network_improvement_loop.md §3.3 — inverse mean effect-group count.
 
     Takes PreparedDomainInput.transitions (PreparedTransition, built by
     DomainBuilder), not ParseResult.transitions (TransitionInfo) — the
@@ -112,15 +153,19 @@ def compute_duplication_penalty(transitions: Dict[str, PreparedTransition]) -> f
     only exist on PreparedTransition, produced later by
     DomainBuilder.build_prepared_input().
 
-    max(0, len(effect_groups) - 1) per transition (a single effect group is
-    not a duplication — it is the normal case), averaged over all
-    transitions so the penalty is comparable across nets of different
-    sizes rather than growing with the number of activities.
+    len(transitions) / max(1, total_groups), where total_groups is the sum
+    over all transitions of len(effect_groups). This is a *reward*, not a
+    penalty: fewer effect groups relative to the size of the net yields a
+    higher score. Every real transition has at least one effect group, so
+    total_groups is normally >= len(transitions), keeping the result in
+    (0, 1] — max(1, total_groups) only guards the degenerate case where no
+    transition has any effect group at all (total_groups == 0), which would
+    otherwise divide by zero.
     """
     if not transitions:
         return 0.0
-    excess = sum(max(0, len(t.effect_groups) - 1) for t in transitions.values())
-    return excess / len(transitions)
+    total_groups = sum(len(t.effect_groups) for t in transitions.values())
+    return len(transitions) / max(1, total_groups)
 
 
 def compute_reproducibility(replay_outcomes: List[ReplayOutcome]) -> float:

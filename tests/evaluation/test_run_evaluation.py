@@ -644,26 +644,30 @@ class TestCLIParsing:
 
     def test_cli_parses_score_weights(self):
         args = build_parser().parse_args([
-            "--w-det", "2.0", "--w-fb-xor", "1.5", "--w-fb-eff", "1.2",
-            "--w-prune-xor", "4.0", "--w-dup", "0.3", "--w-repro", "6.0",
+            "--w-det-xor", "0.9", "--w-det-eff", "0.7", "--w-fb-xor", "1.5", "--w-fb-eff", "1.2",
+            "--w-prune-xor", "4.0", "--w-xor", "0.8", "--w-eff", "0.9", "--w-dup", "0.3",
         ])
-        assert args.w_det == pytest.approx(2.0)
+        assert args.w_det_xor == pytest.approx(0.9)
+        assert args.w_det_eff == pytest.approx(0.7)
         assert args.w_fb_xor == pytest.approx(1.5)
         assert args.w_fb_eff == pytest.approx(1.2)
         assert args.w_prune_xor == pytest.approx(4.0)
+        assert args.w_xor == pytest.approx(0.8)
+        assert args.w_eff == pytest.approx(0.9)
         assert args.w_dup == pytest.approx(0.3)
-        assert args.w_repro == pytest.approx(6.0)
 
     def test_cli_score_weight_defaults_match_score_weights(self):
         from network_search.scoring import ScoreWeights
         args = build_parser().parse_args([])
         defaults = ScoreWeights()
-        assert args.w_det == pytest.approx(defaults.w_det)
+        assert args.w_det_xor == pytest.approx(defaults.w_det_xor)
+        assert args.w_det_eff == pytest.approx(defaults.w_det_eff)
         assert args.w_fb_xor == pytest.approx(defaults.w_fb_xor)
         assert args.w_fb_eff == pytest.approx(defaults.w_fb_eff)
         assert args.w_prune_xor == pytest.approx(defaults.w_prune_xor)
+        assert args.w_xor == pytest.approx(defaults.w_xor)
+        assert args.w_eff == pytest.approx(defaults.w_eff)
         assert args.w_dup == pytest.approx(defaults.w_dup)
-        assert args.w_repro == pytest.approx(defaults.w_repro)
 
 
 # ---------------------------------------------------------------------------

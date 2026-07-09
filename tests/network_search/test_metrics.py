@@ -13,14 +13,15 @@ from models import (
 )
 from network_search.metrics import (
     compute_coverage,
-    compute_duplication_penalty,
-    compute_fallback_score,
+    compute_duplication_score,
+    compute_xor_score,
+    compute_effect_score,
     compute_reproducibility,
 )
 from network_search.scoring import ScoreWeights
 from replay.trace_replayer import ReplayOutcome
 
-WEIGHTS = ScoreWeights(w_det=1.0, w_fb_xor=1.0, w_fb_eff=1.0, w_prune_xor=3.0, w_dup=0.2, w_repro=5.0)
+WEIGHTS = ScoreWeights(w_det_xor=1.0, w_det_eff=1.0, w_fb_xor=0.5, w_fb_eff=0.5, w_prune_xor=1.0, w_xor=1.0, w_eff=1.0, w_dup=0.2)
 
 
 # ---------------------------------------------------------------------------
@@ -55,12 +56,12 @@ def _prepared_transition(n_effect_groups: int) -> PreparedTransition:
 
 
 # ---------------------------------------------------------------------------
-# compute_fallback_score — Asse A (XOR)
+# compute_xor_score — Asse A (XOR)
 # ---------------------------------------------------------------------------
 
-class TestComputeFallbackScoreXor:
-    def test_empty_inputs_return_zero(self):
-        assert compute_fallback_score({}, {}, WEIGHTS) == 0.0
+class TestComputeXorScore:
+    def test_empty_inputs_return_neutral(self):
+        assert compute_xor_score({}, WEIGHTS) == 0.5
 
     def test_certain_branch_is_rewarded(self):
         xor_screening = {
@@ -69,7 +70,8 @@ class TestComputeFallbackScoreXor:
                 branches={"a": _xor_branch("certain", "a")},
             )
         }
-        assert compute_fallback_score(xor_screening, {}, WEIGHTS) == pytest.approx(WEIGHTS.w_det)
+        expected = 0.5 + 0.5 * WEIGHTS.w_det_xor
+        assert compute_xor_score(xor_screening, WEIGHTS) == pytest.approx(expected)
 
     def test_pruned_branch_is_penalized_more_than_fallback(self):
         pruned_screening = {
@@ -84,9 +86,9 @@ class TestComputeFallbackScoreXor:
                 branches={"a": _xor_branch("fallback", "a")},
             )
         }
-        pruned_score = compute_fallback_score(pruned_screening, {}, WEIGHTS)
-        fallback_score = compute_fallback_score(fallback_screening, {}, WEIGHTS)
-        assert pruned_score < fallback_score < 0
+        pruned_score = compute_xor_score(pruned_screening, WEIGHTS)
+        fallback_score = compute_xor_score(fallback_screening, WEIGHTS)
+        assert pruned_score < fallback_score < 0.5
 
     def test_active_branch_under_dt_action_is_neutral(self):
         xor_screening = {
@@ -95,7 +97,7 @@ class TestComputeFallbackScoreXor:
                 branches={"a": _xor_branch("active", "a")},
             )
         }
-        assert compute_fallback_score(xor_screening, {}, WEIGHTS) == 0.0
+        assert compute_xor_score(xor_screening, WEIGHTS) == 0.5
 
     def test_active_branch_under_fallback_action_is_penalized(self):
         xor_screening = {
@@ -104,7 +106,8 @@ class TestComputeFallbackScoreXor:
                 branches={"a": _xor_branch("active", "a")},
             )
         }
-        assert compute_fallback_score(xor_screening, {}, WEIGHTS) == pytest.approx(-WEIGHTS.w_fb_xor)
+        expected = 0.5 - 0.5 * WEIGHTS.w_fb_xor
+        assert compute_xor_score(xor_screening, WEIGHTS) == pytest.approx(expected)
 
     def test_branch_level_fallback_status_penalized_regardless_of_place_action(self):
         # Branch-level "fallback" status (insufficient prob/samples for DT
@@ -124,7 +127,7 @@ class TestComputeFallbackScoreXor:
                 branches={"a": _xor_branch("fallback", "a")},
             )
         }
-        assert compute_fallback_score(under_dt, {}, WEIGHTS) == compute_fallback_score(under_fallback, {}, WEIGHTS)
+        assert compute_xor_score(under_dt, WEIGHTS) == compute_xor_score(under_fallback, WEIGHTS)
 
     def test_unexpected_status_raises(self):
         xor_screening = {
@@ -134,10 +137,11 @@ class TestComputeFallbackScoreXor:
             )
         }
         with pytest.raises(ValueError):
-            compute_fallback_score(xor_screening, {}, WEIGHTS)
+            compute_xor_score(xor_screening, WEIGHTS)
 
     def test_multiple_branches_average_correctly(self):
-        # One rewarded (certain), one penalized (fallback) -> average is (w_det - w_fb_xor) / 2.
+        # One rewarded (certain), one penalized (pruned) -> average of the
+        # two bounded [0,1] values.
         xor_screening = {
             "p1": XorSplitScreening(
                 total_samples=100, action="deterministic",
@@ -147,15 +151,17 @@ class TestComputeFallbackScoreXor:
                 },
             )
         }
-        expected = (WEIGHTS.w_det - WEIGHTS.w_prune_xor) / 2
-        assert compute_fallback_score(xor_screening, {}, WEIGHTS) == pytest.approx(expected)
+        certain_value = 0.5 + 0.5 * WEIGHTS.w_det_xor
+        pruned_value = 0.5 - 0.5 * WEIGHTS.w_prune_xor
+        expected = (certain_value + pruned_value) / 2
+        assert compute_xor_score(xor_screening, WEIGHTS) == pytest.approx(expected)
 
 
 # ---------------------------------------------------------------------------
-# compute_fallback_score — Asse B (effetti)
+# compute_effect_score — Asse B (effetti)
 # ---------------------------------------------------------------------------
 
-class TestComputeFallbackScoreEffects:
+class TestComputeEffectScore:
     def test_never_action_excluded_from_score(self):
         effect_screening = {
             "act": TransitionScreening(
@@ -163,7 +169,7 @@ class TestComputeFallbackScoreEffects:
                 attributes={"attr": _effect_attr("never", "never")},
             )
         }
-        assert compute_fallback_score({}, effect_screening, WEIGHTS) == 0.0
+        assert compute_effect_score(effect_screening, WEIGHTS) == 0.5
 
     def test_deterministic_appearance_and_value_both_rewarded(self):
         effect_screening = {
@@ -172,7 +178,8 @@ class TestComputeFallbackScoreEffects:
                 attributes={"attr": _effect_attr("deterministic", "deterministic")},
             )
         }
-        assert compute_fallback_score({}, effect_screening, WEIGHTS) == pytest.approx(WEIGHTS.w_det)
+        expected = 0.5 + 0.5 * WEIGHTS.w_det_eff
+        assert compute_effect_score(effect_screening, WEIGHTS) == pytest.approx(expected)
 
     def test_dt_action_is_neutral(self):
         effect_screening = {
@@ -181,7 +188,7 @@ class TestComputeFallbackScoreEffects:
                 attributes={"attr": _effect_attr("dt", "dt")},
             )
         }
-        assert compute_fallback_score({}, effect_screening, WEIGHTS) == 0.0
+        assert compute_effect_score(effect_screening, WEIGHTS) == 0.5
 
     def test_fallback_action_penalized(self):
         effect_screening = {
@@ -190,18 +197,21 @@ class TestComputeFallbackScoreEffects:
                 attributes={"attr": _effect_attr("fallback", "fallback")},
             )
         }
-        assert compute_fallback_score({}, effect_screening, WEIGHTS) == pytest.approx(-WEIGHTS.w_fb_eff)
+        expected = 0.5 - 0.5 * WEIGHTS.w_fb_eff
+        assert compute_effect_score(effect_screening, WEIGHTS) == pytest.approx(expected)
 
     def test_mixed_appearance_and_value_averaged_over_two_decisions(self):
-        # appearance=deterministic (+w_det), value=fallback (-w_fb_eff) -> mean of the two.
+        # appearance=deterministic (reward), value=fallback (penalty) -> mean of the two.
         effect_screening = {
             "act": TransitionScreening(
                 transition_name="act", total_firings=10,
                 attributes={"attr": _effect_attr("deterministic", "fallback")},
             )
         }
-        expected = (WEIGHTS.w_det - WEIGHTS.w_fb_eff) / 2
-        assert compute_fallback_score({}, effect_screening, WEIGHTS) == pytest.approx(expected)
+        deterministic_value = 0.5 + 0.5 * WEIGHTS.w_det_eff
+        fallback_value = 0.5 - 0.5 * WEIGHTS.w_fb_eff
+        expected = (deterministic_value + fallback_value) / 2
+        assert compute_effect_score(effect_screening, WEIGHTS) == pytest.approx(expected)
 
     def test_unexpected_action_raises(self):
         effect_screening = {
@@ -211,34 +221,36 @@ class TestComputeFallbackScoreEffects:
             )
         }
         with pytest.raises(ValueError):
-            compute_fallback_score({}, effect_screening, WEIGHTS)
+            compute_effect_score(effect_screening, WEIGHTS)
 
 
 # ---------------------------------------------------------------------------
-# compute_duplication_penalty
+# compute_duplication_score
 # ---------------------------------------------------------------------------
 
-class TestComputeDuplicationPenalty:
+class TestComputeDuplicationScore:
     def test_empty_transitions_returns_zero(self):
-        assert compute_duplication_penalty({}) == 0.0
+        assert compute_duplication_score({}) == 0.0
 
-    def test_single_effect_group_is_not_penalized(self):
+    def test_single_effect_group_is_max_reward(self):
+        # excess = 0 -> max(1, 0) = 1 -> len(transitions) / 1
         transitions = {"act": _prepared_transition(1)}
-        assert compute_duplication_penalty(transitions) == 0.0
+        assert compute_duplication_score(transitions) == pytest.approx(1.0)
 
-    def test_no_effect_groups_is_not_penalized(self):
+    def test_no_effect_groups_is_max_reward(self):
+        # excess = max(0, 0 - 1) = 0 -> same as the single-group case
         transitions = {"act": _prepared_transition(0)}
-        assert compute_duplication_penalty(transitions) == 0.0
+        assert compute_duplication_score(transitions) == pytest.approx(1.0)
 
-    def test_multiple_effect_groups_penalized_by_excess(self):
+    def test_multiple_effect_groups_reduce_the_reward(self):
+        # total_groups = 3, reward = len(transitions) / total_groups = 1 / 3
         transitions = {"act": _prepared_transition(3)}
-        # excess = 3 - 1 = 2, averaged over 1 transition
-        assert compute_duplication_penalty(transitions) == pytest.approx(2.0)
+        assert compute_duplication_score(transitions) == pytest.approx(1 / 3)
 
-    def test_averaged_over_all_transitions(self):
+    def test_reward_grows_with_transition_count_at_fixed_total_groups(self):
+        # total_groups = 3 + 1 = 4, reward = len(transitions) / total_groups = 2 / 4
         transitions = {"a": _prepared_transition(3), "b": _prepared_transition(1)}
-        # excess = (3-1) + 0 = 2, averaged over 2 transitions
-        assert compute_duplication_penalty(transitions) == pytest.approx(1.0)
+        assert compute_duplication_score(transitions) == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------

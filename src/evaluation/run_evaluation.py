@@ -86,12 +86,14 @@ class EvalConfig:
     # fields the optimizer doesn't tune (see network_search/search_space.py).
     use_optimizer: bool = True
     search_n_trials: int = 30
-    w_det: float = 1.0
-    w_fb_xor: float = 1.0
-    w_fb_eff: float = 1.0
-    w_prune_xor: float = 3.0
+    w_det_xor: float = 1.0
+    w_det_eff: float = 1.0
+    w_fb_xor: float = 0.5
+    w_fb_eff: float = 0.5
+    w_prune_xor: float = 1.0
+    w_xor: float = 1.0
+    w_eff: float = 1.0
     w_dup: float = 0.2
-    w_repro: float = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +245,10 @@ def evaluate_log(
                         jenks_sample_size=cfg.jenks_sample_size,
                     )
                     search_weights = ScoreWeights(
-                        w_det=cfg.w_det, w_fb_xor=cfg.w_fb_xor, w_fb_eff=cfg.w_fb_eff,
-                        w_prune_xor=cfg.w_prune_xor, w_dup=cfg.w_dup, w_repro=cfg.w_repro,
+                        w_det_xor=cfg.w_det_xor, w_det_eff=cfg.w_det_eff,
+                        w_fb_xor=cfg.w_fb_xor, w_fb_eff=cfg.w_fb_eff,
+                        w_prune_xor=cfg.w_prune_xor, w_xor=cfg.w_xor, w_eff=cfg.w_eff,
+                        w_dup=cfg.w_dup,
                     ) if cfg.use_optimizer else None
 
                     build_result = api.build_network(
@@ -604,18 +608,22 @@ def build_parser() -> argparse.ArgumentParser:
                         "The optimizer is used by default.")
     p.add_argument("--search-n-trials", dest="search_n_trials", type=int, default=30,
                    help="Number of candidate AnalysisConfigs the optimizer evaluates per log.")
-    p.add_argument("--w-det", dest="w_det", type=float, default=1.0,
-                   help="ScoreWeights.w_det for the optimizer.")
-    p.add_argument("--w-fb-xor", dest="w_fb_xor", type=float, default=1.0,
-                   help="ScoreWeights.w_fb_xor for the optimizer.")
-    p.add_argument("--w-fb-eff", dest="w_fb_eff", type=float, default=1.0,
-                   help="ScoreWeights.w_fb_eff for the optimizer.")
-    p.add_argument("--w-prune-xor", dest="w_prune_xor", type=float, default=3.0,
-                   help="ScoreWeights.w_prune_xor for the optimizer.")
+    p.add_argument("--w-det-xor", dest="w_det_xor", type=float, default=1.0,
+                   help="ScoreWeights.w_det_xor (must be in [0,1]) for the optimizer.")
+    p.add_argument("--w-det-eff", dest="w_det_eff", type=float, default=1.0,
+                   help="ScoreWeights.w_det_eff (must be in [0,1]) for the optimizer.")
+    p.add_argument("--w-fb-xor", dest="w_fb_xor", type=float, default=0.5,
+                   help="ScoreWeights.w_fb_xor (must be in [0,1]) for the optimizer.")
+    p.add_argument("--w-fb-eff", dest="w_fb_eff", type=float, default=0.5,
+                   help="ScoreWeights.w_fb_eff (must be in [0,1]) for the optimizer.")
+    p.add_argument("--w-prune-xor", dest="w_prune_xor", type=float, default=1.0,
+                   help="ScoreWeights.w_prune_xor (must be in [0,1]) for the optimizer.")
+    p.add_argument("--w-xor", dest="w_xor", type=float, default=1.0,
+                   help="ScoreWeights.w_xor — weight of the XOR-axis score in the final score.")
+    p.add_argument("--w-eff", dest="w_eff", type=float, default=1.0,
+                   help="ScoreWeights.w_eff — weight of the effect-axis score in the final score.")
     p.add_argument("--w-dup", dest="w_dup", type=float, default=0.2,
                    help="ScoreWeights.w_dup for the optimizer.")
-    p.add_argument("--w-repro", dest="w_repro", type=float, default=5.0,
-                   help="ScoreWeights.w_repro for the optimizer.")
     p.add_argument("--csv-mapping", dest="csv_mapping", type=str, default=None,
                    help="JSON string mapping CSV columns, e.g. '{\"case_id\": \"col_a\"}'.")
     p.add_argument("--log-level", dest="log_level", type=str, default="INFO",
@@ -667,12 +675,14 @@ def main(args: argparse.Namespace) -> None:
         jenks_sample_size=args.jenks_sample_size,
         use_optimizer=not args.no_optimizer,
         search_n_trials=args.search_n_trials,
-        w_det=args.w_det,
+        w_det_xor=args.w_det_xor,
+        w_det_eff=args.w_det_eff,
         w_fb_xor=args.w_fb_xor,
         w_fb_eff=args.w_fb_eff,
         w_prune_xor=args.w_prune_xor,
+        w_xor=args.w_xor,
+        w_eff=args.w_eff,
         w_dup=args.w_dup,
-        w_repro=args.w_repro,
     )
 
     selection = get_log_selection(Path(args.metadata), log_ids=cfg.log_ids)

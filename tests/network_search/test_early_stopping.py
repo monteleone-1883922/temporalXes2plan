@@ -43,14 +43,15 @@ class _FakeReplayer:
         return next(self._outcomes)
 
 
-def _rung1(fallback_score: float = 0.0, duplication_penalty: float = 0.0) -> _Rung1Result:
+def _rung1(xor_score: float = 0.0, effect_score: float = 0.0, duplication_score: float = 0.0) -> _Rung1Result:
     return _Rung1Result(
         trial=optuna.trial.FixedTrial({}),
         config=None,
         parse_result=types.SimpleNamespace(petri_net_model=None),
         prepared=None,
-        fallback_score=fallback_score,
-        duplication_penalty=duplication_penalty,
+        xor_score=xor_score,
+        effect_score=effect_score,
+        duplication_score=duplication_score,
         coverage=1.0,
         partial_score=0.0,
     )
@@ -58,9 +59,9 @@ def _rung1(fallback_score: float = 0.0, duplication_penalty: float = 0.0) -> _Ru
 
 @pytest.fixture
 def weights() -> ScoreWeights:
-    # w_repro=5.0, w_dup=0.2, everything else irrelevant when
-    # fallback_score=duplication_penalty=0.0 -- combine() reduces to
-    # 5.0 * reproducibility_score, easy to reason about by hand.
+    # xor_score=effect_score=duplication_score=0.0 -- combine() reduces to
+    # reproducibility_score itself (implicit coefficient 1, no weight of its
+    # own), easy to reason about by hand.
     return ScoreWeights()
 
 
@@ -72,9 +73,9 @@ def test_stops_as_soon_as_the_bound_can_no_longer_beat_the_best_score(monkeypatc
     rung1 = _rung1()
     test_traces = list(range(len(outcomes)))
     # Chosen so the bound drops to exactly best_score_so_far after the 4th
-    # trace (2 successes + 2 failures): 5*(2+6)/10 == 4.0 -- see the
-    # by-hand derivation in the module's design doc §5.4.2.
-    record = _evaluate_rung2(rung1, test_traces, weights, best_score_so_far=4.0)
+    # trace (2 successes + 2 failures): (2+6)/10 == 0.8 -- see the by-hand
+    # derivation in the module's design doc §5.4.2.
+    record = _evaluate_rung2(rung1, test_traces, weights, best_score_so_far=0.8)
 
     assert fake.calls == 4
     assert record.stopped_early is True
@@ -107,21 +108,22 @@ def test_never_stops_early_a_trial_that_would_go_on_to_win(monkeypatch, weights)
     for _ in range(200):
         n = rng.randint(1, 20)
         outcomes = [rng.random() < 0.5 for _ in range(n)]
-        fallback_score = rng.uniform(-1.0, 1.0)
-        duplication_penalty = rng.uniform(0.0, 3.0)
+        xor_score = rng.uniform(-1.0, 1.0)
+        effect_score = rng.uniform(-1.0, 1.0)
+        duplication_score = rng.uniform(0.0, 3.0)
         best_score_so_far = rng.uniform(-5.0, 10.0)
 
         n_success = 0
         for k, success in enumerate(outcomes, start=1):
             n_success += success
             bound = max_reachable_score(
-                n_success, k, n, fallback_score, duplication_penalty, weights,
+                n_success, k, n, xor_score, effect_score, duplication_score, weights,
             )
             # The bound at any point must be >= the score this trial would
             # get if every remaining trace also replayed successfully.
             best_case_final_repro = (n_success + (n - k)) / n
             best_case_final_score = combine(
-                TrialMetrics(fallback_score, duplication_penalty, best_case_final_repro, n, 0.0),
+                TrialMetrics(xor_score, effect_score, duplication_score, best_case_final_repro, n, 0.0),
                 weights,
             )
             assert bound >= best_case_final_score - 1e-9
@@ -133,7 +135,7 @@ def test_never_stops_early_a_trial_that_would_go_on_to_win(monkeypatch, weights)
                 # here scores <= best_score_so_far too.
                 actual_final_repro = (n_success + (n - k)) / n
                 actual_final_score = combine(
-                    TrialMetrics(fallback_score, duplication_penalty, actual_final_repro, n, 0.0),
+                    TrialMetrics(xor_score, effect_score, duplication_score, actual_final_repro, n, 0.0),
                     weights,
                 )
                 assert actual_final_score <= best_score_so_far + 1e-9
