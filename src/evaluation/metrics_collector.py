@@ -7,6 +7,7 @@ of such dicts to mean/std/median across numeric fields, ignoring None values.
 
 from __future__ import annotations
 
+import difflib
 import statistics
 from typing import Any, Dict, List, Optional
 
@@ -124,6 +125,20 @@ def q3_metrics(
         "ground_truth_reachable": ground_truth_reachable,
         "correct": correct,
     }
+
+
+# ---------------------------------------------------------------------------
+# Plan-vs-trace sequence alignment
+# ---------------------------------------------------------------------------
+
+def sequence_alignment_score(plan_steps: List[str], suffix_activities: List[str]) -> float:
+    """Similarity in [0,1] between the plan's activity sequence and the
+    activity sequence actually observed in the trace's remaining suffix.
+
+    Uses difflib.SequenceMatcher (standard library, no new dependency).
+    1.0 means the two sequences are identical.
+    """
+    return difflib.SequenceMatcher(None, plan_steps, suffix_activities).ratio()
 
 
 # ---------------------------------------------------------------------------

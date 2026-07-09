@@ -24,7 +24,7 @@ from models import AnalysisConfig
 from evaluation.test_case_selector import split as _split_log
 from evaluation.trace_sampler import sample_prefix as _sample_prefix
 from evaluation.query_builder import build_q1, build_q2, build_q3, is_q3_reachable, QuerySpec
-from evaluation.metrics_collector import q1_metrics, q2_metrics, q3_metrics
+from evaluation.metrics_collector import q1_metrics, q2_metrics, q3_metrics, sequence_alignment_score
 from evaluation.planner_runner_with_retry import RetryConfig, run_with_retry as _run_with_retry
 from evaluation.log_downloader import download_if_needed, get_log_selection
 from evaluation.report_generator import (
@@ -36,7 +36,7 @@ from replay.plan_replayer import replay_plan
 from encoding.prepared_input import PreparedDomainInput
 from encoding.prepared_graph_utils import build_petrinet_model_from_prepared
 from encoding.domain_builder import build_domain_with_variant_map
-from core_utils import save_original_and_current
+from core_utils import save_original_and_current, sanitize_name
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +464,14 @@ def _run_query(
             "error_reason": outcome.error_reason,
             "steps_executed": len(outcome.steps),
         }
+
+        suffix_activities = [
+            sanitize_name(str(e.get("concept:name")))
+            for e in prefix.suffix_events
+        ]
+        metrics["alignment_score"] = sequence_alignment_score(result.plan_steps, suffix_activities)
+    else:
+        metrics["alignment_score"] = None
 
     return QueryResult(
         query_id=query_id,

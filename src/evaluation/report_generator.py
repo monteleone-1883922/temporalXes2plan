@@ -196,17 +196,20 @@ def _build_summary(
     q1_plan_time: List[float] = []
     q1_real_duration: List[float] = []
     q1_search_time: List[float] = []
+    q1_alignment: List[float] = []
     q2_solved: List[float] = []
     q2_within: List[float] = []
     q2_plan_time: List[float] = []
     q2_real_duration: List[float] = []
     q2_search_time: List[float] = []
+    q2_alignment: List[float] = []
     q3_solved: List[float] = []
     q3_correct: List[float] = []
     q3_within: List[float] = []
     q3_plan_time: List[float] = []
     q3_real_duration: List[float] = []
     q3_search_time: List[float] = []
+    q3_alignment: List[float] = []
 
     # Replayability cross-check: solved despite the trace not being
     # replayable, and not-solved despite the trace being replayable —
@@ -273,6 +276,9 @@ def _build_summary(
             st = q.metrics.get("search_time_s")
             if st is not None:
                 q1_search_time.append(st)
+            align = q.metrics.get("alignment_score")
+            if align is not None:
+                q1_alignment.append(align)
 
         if q2_sr is not None:
             q2_solved.append(q2_sr)
@@ -288,6 +294,9 @@ def _build_summary(
             st = q.metrics.get("search_time_s")
             if st is not None:
                 q2_search_time.append(st)
+            align = q.metrics.get("alignment_score")
+            if align is not None:
+                q2_alignment.append(align)
 
         q3_sr = _ratio(log_q3, "solved")
         if q3_sr is not None:
@@ -307,6 +316,9 @@ def _build_summary(
             st = q.metrics.get("search_time_s")
             if st is not None:
                 q3_search_time.append(st)
+            align = q.metrics.get("alignment_score")
+            if align is not None:
+                q3_alignment.append(align)
 
     return {
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -322,6 +334,8 @@ def _build_summary(
             "real_duration_mean": _mean(q1_real_duration),
             "search_time_mean": _mean(q1_search_time),
             "search_time_std": _std(q1_search_time),
+            "alignment_mean": _mean(q1_alignment),
+            "alignment_std": _std(q1_alignment),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q1"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q1"]),
         },
@@ -333,6 +347,8 @@ def _build_summary(
             "real_duration_mean": _mean(q2_real_duration),
             "search_time_mean": _mean(q2_search_time),
             "search_time_std": _std(q2_search_time),
+            "alignment_mean": _mean(q2_alignment),
+            "alignment_std": _std(q2_alignment),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q2"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q2"]),
         },
@@ -345,6 +361,8 @@ def _build_summary(
             "real_duration_mean": _mean(q3_real_duration),
             "search_time_mean": _mean(q3_search_time),
             "search_time_std": _std(q3_search_time),
+            "alignment_mean": _mean(q3_alignment),
+            "alignment_std": _std(q3_alignment),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q3"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q3"]),
         },
