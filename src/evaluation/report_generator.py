@@ -56,6 +56,7 @@ class QueryResult:
     planner_duration_s: Optional[float]
     metrics: Dict[str, Any]
     validation: Optional[Dict[str, Any]]
+    is_replayable: bool = True
 
 
 @dataclass
@@ -72,6 +73,10 @@ class LogResult:
         pipeline_ok: False if parsing/domain-building failed.
         pipeline_error: Error message when pipeline_ok is False.
         queries: List of QueryResult objects.
+        used_optimizer: True when network_search's optimizer picked the
+            AnalysisConfig for this log instead of the fixed CLI config.
+        search_summary: {"n_trials", "best_score", "best_trial_number"} when
+            used_optimizer is True, else None.
     """
 
     log_id: str
@@ -83,6 +88,8 @@ class LogResult:
     pipeline_ok: bool
     pipeline_error: Optional[str]
     queries: List[QueryResult] = field(default_factory=list)
+    used_optimizer: bool = False
+    search_summary: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +156,10 @@ def _log_result_to_dict(lr: LogResult) -> Dict[str, Any]:
         "n_activities": lr.n_activities,
         "pipeline_ok": lr.pipeline_ok,
         "pipeline_error": lr.pipeline_error,
+        "replayability": _replayability_stats(lr.queries),
         "queries": [_query_result_to_dict(q) for q in lr.queries],
+        "used_optimizer": lr.used_optimizer,
+        "search_summary": lr.search_summary,
     }
 
 
@@ -165,6 +175,7 @@ def _query_result_to_dict(qr: QueryResult) -> Dict[str, Any]:
         "planner_duration_s": qr.planner_duration_s,
         "metrics": qr.metrics,
         "validation": qr.validation,
+        "is_replayable": qr.is_replayable,
     }
 
 
@@ -202,6 +213,7 @@ def _build_summary(
         q2_wr = _ratio_metric(log_q2, "within_budget")
         q3_cr = _ratio_metric(log_q3, "correct")
 
+        replay_stats = _replayability_stats(lr.queries)
         per_log_rows.append({
             "log_id": lr.log_id,
             "log_name": lr.log_name,
@@ -211,6 +223,15 @@ def _build_summary(
             "q2_solved_ratio": q2_sr,
             "q2_within_budget_ratio": q2_wr,
             "q3_correct_ratio": q3_cr,
+            "n_traces_replayable": replay_stats["n_traces_replayable"],
+            "n_traces_not_replayable": replay_stats["n_traces_not_replayable"],
+            "pct_traces_replayable": replay_stats["pct_traces_replayable"],
+            "q1_solved_replayable": replay_stats["q1_solved_replayable"],
+            "q1_solved_not_replayable": replay_stats["q1_solved_not_replayable"],
+            "q2_solved_replayable": replay_stats["q2_solved_replayable"],
+            "q2_solved_not_replayable": replay_stats["q2_solved_not_replayable"],
+            "q3_solved_replayable": replay_stats["q3_solved_replayable"],
+            "q3_solved_not_replayable": replay_stats["q3_solved_not_replayable"],
         })
 
         # Accumulate for global means.
@@ -298,6 +319,49 @@ def _atomic_write_json(dest: Path, payload: Any) -> None:
     tmp = dest.with_name(f"{dest.stem}.{os.getpid()}_{tid}.tmp")
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     tmp.replace(dest)
+
+
+# ---------------------------------------------------------------------------
+# Replayability helpers
+# ---------------------------------------------------------------------------
+
+def _solved_ratio(queries: List[QueryResult]) -> Optional[float]:
+    """Fraction of queries where solvability == 'solved'. None if list is empty."""
+    if not queries:
+        return None
+    return sum(1 for q in queries if q.solvability == "solved") / len(queries)
+
+
+def _replayability_stats(queries: List[QueryResult]) -> Dict[str, Any]:
+    """Compute replayability breakdown and per-query-type solved rates.
+
+    Counts unique traces by trace_id; all queries for the same trace share the
+    same is_replayable value — we take it from the first query seen for that trace.
+    """
+    trace_replayable: Dict[str, bool] = {}
+    for q in queries:
+        if q.trace_id not in trace_replayable:
+            trace_replayable[q.trace_id] = q.is_replayable
+
+    n_rep = sum(1 for v in trace_replayable.values() if v)
+    n_not = sum(1 for v in trace_replayable.values() if not v)
+    n_total = n_rep + n_not
+
+    stats: Dict[str, Any] = {
+        "n_traces_replayable": n_rep,
+        "n_traces_not_replayable": n_not,
+        "pct_traces_replayable": round(n_rep / n_total, 4) if n_total > 0 else None,
+    }
+
+    for qtype in ("Q1", "Q2", "Q3"):
+        qtype_queries = [q for q in queries if q.query_type == qtype]
+        rep_q = [q for q in qtype_queries if q.is_replayable]
+        not_q = [q for q in qtype_queries if not q.is_replayable]
+        key = qtype.lower()
+        stats[f"{key}_solved_replayable"] = _solved_ratio(rep_q)
+        stats[f"{key}_solved_not_replayable"] = _solved_ratio(not_q)
+
+    return stats
 
 
 # ---------------------------------------------------------------------------

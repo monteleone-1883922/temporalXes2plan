@@ -1,8 +1,15 @@
-"""Stratified train/test split for event log evaluation.
+"""Stratified train/test split, specialized for plan evaluation.
 
-Splits an event log into a training set (written to a temporary XES file) and a
-list of test traces, stratified by trace-length decile so that the training set
-preserves the length distribution of the original log.
+Builds on the general-purpose primitives in core_utils (_load_log,
+_stratified_sample_indices, _build_train_test_split, TrainTestSplit) and
+adds two things specific to evaluation's own purpose, not needed by a
+general train/test split (e.g. network_search's, see core_utils.split):
+
+- min_test_cases/max_test_cases: evaluation runs want a predictable number
+  of Q1/Q2/Q3 queries regardless of log size.
+- min_test_trace_length: a test trace needs enough events to produce a
+  meaningful prefix (evaluation.trace_sampler.sample_prefix); traces below
+  this are still used for training, just never sampled as a test case.
 
 Typical usage::
 
@@ -17,40 +24,13 @@ Typical usage::
 """
 
 from __future__ import annotations
-from parsing.csv_loader import csv_to_event_log
 
 import random
-import tempfile
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, List, Optional
+from typing import Optional
 
-import pm4py
+from core_utils import TrainTestSplit, _build_train_test_split, _load_log, _stratified_sample_indices
 
-
-@dataclass
-class TrainTestSplit:
-    """Output of a stratified train/test split.
-
-    Attributes:
-        train_path: Path to a temporary XES file containing the training traces.
-            Deleted automatically when used as a context manager.
-        test_cases: List of pm4py Trace objects for evaluation.
-        n_train: Number of traces in the training set.
-        n_test: Number of traces in the test set.
-    """
-
-    train_path: Path
-    test_cases: List[Any]
-    n_train: int
-    n_test: int
-
-    def __enter__(self) -> "TrainTestSplit":
-        return self
-
-    def __exit__(self, *_: Any) -> None:
-        if self.train_path.exists():
-            self.train_path.unlink()
+__all__ = ["TrainTestSplit", "split"]
 
 
 def split(
@@ -63,7 +43,7 @@ def split(
     mapping: Optional[dict] = None,
     min_test_trace_length: int = 3,
 ) -> TrainTestSplit:
-    """Load an event log and produce a stratified train/test split.
+    """Load an event log and produce a stratified train/test split for evaluation.
 
     Test cases are selected via stratified sampling across trace-length deciles
     so the test set covers the full length distribution.  Traces shorter than
@@ -103,103 +83,5 @@ def split(
     sampled_local = _stratified_sample_indices(eligible_traces, n_test_cases, rng)
     # Map back to original indices.
     test_indices = [eligible_indices[j] for j in sampled_local]
-    test_set = set(test_indices)
 
-    test_cases = [traces[i] for i in test_indices]
-    train_traces = [traces[i] for i in range(len(traces)) if i not in test_set]
-
-    train_log = pm4py.objects.log.obj.EventLog(
-        train_traces,
-        attributes=log.attributes,
-    )
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".xes", delete=False)
-    tmp.close()
-    train_path = Path(tmp.name)
-    pm4py.write_xes(train_log, str(train_path))
-
-    return TrainTestSplit(
-        train_path=train_path,
-        test_cases=test_cases,
-        n_train=len(train_traces),
-        n_test=len(test_cases),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _load_log(log_path: str, log_fmt: str, mapping: Optional[dict]) -> Any:
-    """Load an XES or CSV event log via pm4py.
-
-    Args:
-        log_path: File path.
-        log_fmt: "xes" or "csv".
-        mapping: Column mapping for CSV files.
-
-    Returns:
-        pm4py EventLog object.
-    """
-    if log_fmt.lower() == "csv":
-
-        return csv_to_event_log(log_path, mapping or {})
-    return pm4py.objects.log.importer.xes.importer.apply(log_path)
-
-
-def _stratified_sample_indices(
-    traces: List[Any],
-    n_test_cases: int,
-    rng: random.Random,
-) -> List[int]:
-    """Select test-set indices via proportional stratified sampling on trace length deciles.
-
-    Traces are binned into up to 10 decile buckets sorted by length.  Each
-    bucket contributes a number of test cases proportional to its size, so the
-    test set reflects the actual length distribution of the candidate pool.
-    Leftover quota from rounding is assigned to the largest buckets first.
-
-    Args:
-        traces: Candidate traces (already filtered for minimum length).
-        n_test_cases: Target total number of test traces.
-        rng: Seeded Random instance for reproducibility.
-
-    Returns:
-        Sorted list of selected trace indices (into the *traces* list).
-    """
-    n_total = len(traces)
-    if n_total == 0:
-        return []
-
-    n_select = min(n_test_cases, n_total)
-
-    lengths = [len(t) for t in traces]
-    indexed = sorted(enumerate(lengths), key=lambda x: x[1])
-
-    n_buckets = min(10, n_total)
-    buckets: List[List[int]] = [[] for _ in range(n_buckets)]
-    for rank, (orig_idx, _) in enumerate(indexed):
-        bucket_idx = min(rank * n_buckets // n_total, n_buckets - 1)
-        buckets[bucket_idx].append(orig_idx)
-
-    # Proportional allocation: each bucket gets floor(n_select * size / n_total).
-    raw_alloc = [n_select * len(b) / n_total for b in buckets]
-    alloc = [int(a) for a in raw_alloc]
-    remainder = n_select - sum(alloc)
-
-    # Distribute leftover slots to buckets with largest fractional parts.
-    fracs = sorted(
-        range(n_buckets),
-        key=lambda i: raw_alloc[i] - alloc[i],
-        reverse=True,
-    )
-    for i in range(remainder):
-        alloc[fracs[i]] += 1
-
-    selected: List[int] = []
-    for bucket, take in zip(buckets, alloc):
-        take = min(take, len(bucket))
-        if take > 0:
-            selected.extend(rng.sample(bucket, take))
-
-    return sorted(selected)
+    return _build_train_test_split(log, traces, test_indices)

@@ -24,20 +24,21 @@ Example::
 """
 
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from models import AnalysisConfig, ParseResult
 from parsing.log_validator import ValidationResult, validate_event_log
 from parsing.xes_parser import Parser
 from parsing.csv_loader import csv_to_event_log
-from parsing.partial_trace_replayer import PartialTraceReplayer
 from encoding.domain_builder import DomainBuilder
-from encoding.pddl_writer import PDDLWriter
+from encoding.domain_builder import build_domain_with_variant_map as _build_domain_with_variant_map
+from encoding.prepared_input import PreparedDomainInput, VariantInfo
 from encoding.problem_builder import ProblemBuilder
 from planning.planner_runner import PlannerResult, run_planner as _run_planner
-from web.serializer import serialize_parse_result
+from pipeline import Pipeline, BuildResult
+from network_search.scoring import ScoreWeights
 import pm4py
 
 # ---------------------------------------------------------------------------
@@ -68,20 +69,6 @@ class PlanResult:
     planner: str
 
 
-@dataclass
-class ReplayResult:
-    """Outcome of a partial-trace replay."""
-
-    init_places: List[str]
-    init_effects: List[Dict[str, Any]]
-    replayed_activities: List[str]
-    n_events: int
-    warnings: List[str]
-    tau_fired: List[str] = field(default_factory=list)
-    tau_split_count: int = 0
-    full_trace_validated: bool = False
-
-
 # ---------------------------------------------------------------------------
 # Main API class
 # ---------------------------------------------------------------------------
@@ -96,53 +83,50 @@ class EvalAPI:
     # Full pipeline
     # ------------------------------------------------------------------
 
-    def run_pipeline(
+    def build_network(
         self,
         log_path: str,
-        config: Optional[AnalysisConfig] = None,
         domain_name: str = "test_process",
         discovery_algorithm: str = "inductive",
         coverage_percentage: float = 0.001,
         use_durative: bool = False,
         use_costs: bool = False,
         use_activity_classifier: bool = False,
-    ) -> PipelineResult:
-        """Parse an event log and encode it into a PDDL domain.
-
-        Does NOT write any files to disk.
-
-        Args:
-            log_path: Path to the XES or CSV event log.
-            config: Optional AnalysisConfig; defaults are used if None.
-            domain_name: PDDL domain name.
-            discovery_algorithm: Process discovery algorithm ("inductive" or "heuristic").
-            coverage_percentage: Minimum variant coverage for log filtering.
-            use_durative: Encode durative actions (requires timestamps).
-            use_costs: Include action costs in the PDDL domain.
-            use_activity_classifier: Use concept:name + lifecycle:transition as classifier.
-
-        Returns:
-            PipelineResult with parse_result, domain_text, and serialized JSON.
+        config: Optional[AnalysisConfig] = None,
+        search: bool = False,
+        search_n_trials: int = 30,
+        search_test_pct: float = 0.2,
+        search_seed: int = 42,
+        search_weights: Optional[ScoreWeights] = None,
+        snapshot_dir: Optional[str] = None,
+        discretizer_cache_path: Optional[Path] = None,
+        force_rediscretize: bool = False,
+    ) -> BuildResult:
+        """Build the PDDL domain for an event log — delegates entirely to
+        Pipeline.build_network() (the same optimizer + parse + encode logic
+        used by the CLI/web pipeline), so evaluation never re-implements the
+        search: the domain is built exactly once per log, optimizer or not,
+        and every query/test run afterwards reuses the same BuildResult.
         """
-        parse_result = self.parse(
-            log_path,
-            config=config,
-            coverage_percentage=coverage_percentage,
-            discovery_algorithm=discovery_algorithm,
-            use_activity_classifier=use_activity_classifier,
-        )
-        domain_text = self.build_domain(
-            parse_result,
+        return Pipeline().build_network(
+            log_path=log_path,
             domain_name=domain_name,
+            discovery_algorithm=discovery_algorithm,
+            coverage_percentage=coverage_percentage,
             use_durative=use_durative,
             use_costs=use_costs,
+            use_activity_classifier=use_activity_classifier,
+            config=config,
+            search=search,
+            search_n_trials=search_n_trials,
+            search_test_pct=search_test_pct,
+            search_seed=search_seed,
+            search_weights=search_weights,
+            snapshot_dir=snapshot_dir,
+            discretizer_cache_path=discretizer_cache_path,
+            force_rediscretize=force_rediscretize,
         )
-        serialized = serialize_parse_result(parse_result)
-        return PipelineResult(
-            parse_result=parse_result,
-            domain_text=domain_text,
-            serialized=serialized,
-        )
+
 
     # ------------------------------------------------------------------
     # Individual steps
@@ -172,100 +156,19 @@ class EvalAPI:
             log = pm4py.objects.log.importer.xes.importer.apply(log_path)
         return validate_event_log(log)
 
-    def parse(
-        self,
-        log_path: str,
-        config: Optional[AnalysisConfig] = None,
-        coverage_percentage: float = 0.001,
-        discovery_algorithm: str = "inductive",
-        use_activity_classifier: bool = False,
-        discretizer_cache_path: Optional[Path] = None,
-        force_rediscretize: bool = False,
-    ) -> ParseResult:
-        """Run the parsing stage only (Petri net discovery + mining).
+    def serialize(self, prepared: PreparedDomainInput, parse_result: ParseResult) -> Dict[str, Any]:
+        """Serialize a PreparedDomainInput into the current.json-shaped UI dict.
 
-        Args:
-            log_path: Path to the XES or CSV event log.
-            config: Optional AnalysisConfig; defaults are used if None.
-            coverage_percentage: Minimum variant coverage for log filtering.
-            discovery_algorithm: "inductive" or "heuristic".
-            use_activity_classifier: Use concept:name + lifecycle:transition.
-            discretizer_cache_path: Optional path to a JSON file for caching
-                discretizer boundaries. When set, boundaries are loaded from the
-                file if it exists (unless force_rediscretize=True) and saved
-                after computation. Intended for evaluation use only.
-            force_rediscretize: If True, ignore an existing cache and recompute
-                discretizer boundaries from scratch.
-
-        Returns:
-            ParseResult with Petri net model, transitions, attribute catalog, etc.
+        Same shape produced by pipeline.py's own serialization step — the
+        PreparedDomainInput used to build the domain is the source of truth,
+        plus the start/end place metadata it has no reason to carry itself.
         """
-        parser = Parser(
-            log_path=log_path,
-            coverage_percentage=coverage_percentage,
-            discovery_algorithm=discovery_algorithm,
-            use_activity_classifier=use_activity_classifier,
-            config=config,
-            discretizer_cache_path=discretizer_cache_path,
-            force_rediscretize=force_rediscretize,
-        )
-        return parser.parse_result
-
-    def build_domain(
-        self,
-        parse_result: ParseResult,
-        domain_name: str = "test_process",
-        use_durative: bool = False,
-        use_costs: bool = False,
-    ) -> str:
-        """Encode a ParseResult into a PDDL domain string.
-
-        Args:
-            parse_result: Output of parse().
-            domain_name: PDDL domain name.
-            use_durative: Encode durative actions.
-            use_costs: Include action costs.
-
-        Returns:
-            PDDL domain as a string.
-        """
-        domain, _ = DomainBuilder().build_with_registry(
-            parse_result,
-            domain_name=domain_name,
-            use_durative=use_durative,
-            use_costs=use_costs,
-        )
-        return PDDLWriter()._render_domain(domain)
-
-    def build_domain_with_variant_effects(
-        self,
-        parse_result: ParseResult,
-        domain_name: str = "test_process",
-        use_durative: bool = False,
-        use_costs: bool = False,
-    ) -> tuple:
-        """Encode a ParseResult and return both the domain text and variant effects.
-
-        Args:
-            parse_result: Output of parse().
-            domain_name: PDDL domain name.
-            use_durative: Encode durative actions.
-            use_costs: Include action costs.
-
-        Returns:
-            Tuple of (domain_text, variant_effects) where variant_effects maps
-            each variant action name to its flat {attribute: value} effects dict.
-        """
-        from evaluation.plan_validator import build_variant_effects_lookup
-        domain, registry = DomainBuilder().build_with_registry(
-            parse_result,
-            domain_name=domain_name,
-            use_durative=use_durative,
-            use_costs=use_costs,
-        )
-        domain_text = PDDLWriter()._render_domain(domain)
-        variant_effects = build_variant_effects_lookup(registry)
-        return domain_text, variant_effects
+        data = prepared.to_dict()
+        data["metadata"] = {
+            "start_place": parse_result.start_place,
+            "end_place": parse_result.end_place,
+        }
+        return data
 
 
     def build_problem(
@@ -359,90 +262,4 @@ class EvalAPI:
             raw_stdout=raw.stdout,
             raw_stderr=raw.stderr,
             planner=raw.planner,
-        )
-
-    def replay_trace(
-        self,
-        trace: Any,
-        serialized: Dict[str, Any],
-        n_prefix: Optional[int] = None,
-        tau_max_depth: int = 10,
-    ) -> ReplayResult:
-        """Replay a trace against a serialized Petri net.
-
-        Args:
-            trace: pm4py Trace object (full trace).
-            serialized: Dict in current.json format.
-            n_prefix: Number of leading events forming the observed prefix.
-                Attributes and init_places are derived up to this point.
-                Defaults to len(trace) (treat full trace as prefix).
-            tau_max_depth: Maximum tau chain depth for BFS search.
-
-        Returns:
-            ReplayResult with derived init state.
-
-        Raises:
-            PartialTraceError: If the trace cannot be replayed.
-        """
-        events = list(trace)
-        if n_prefix is None:
-            n_prefix = len(events)
-        raw = PartialTraceReplayer().replay_with_full_trace(
-            events=events,
-            n_prefix=n_prefix,
-            current_data=serialized,
-            tau_max_depth=tau_max_depth,
-        )
-        return ReplayResult(
-            init_places=raw["init_places"],
-            init_effects=raw["init_effects"],
-            replayed_activities=raw["replayed_activities"],
-            n_events=raw["n_events"],
-            warnings=raw["warnings"],
-            tau_fired=raw["tau_fired"],
-            tau_split_count=raw["tau_split_count"],
-            full_trace_validated=raw["full_trace_validated"],
-        )
-
-    def replay_trace_from_bytes(
-        self,
-        trace_bytes: bytes,
-        serialized: Dict[str, Any],
-        fmt: str = "xes",
-        mapping: Optional[Dict[str, Optional[str]]] = None,
-        tau_max_depth: int = 10,
-    ) -> ReplayResult:
-        """Replay a trace from raw bytes (web API entry point).
-
-        The entire trace is treated as the prefix.
-
-        Args:
-            trace_bytes: Raw bytes of the XES or CSV trace file.
-            serialized: Dict in current.json format.
-            fmt: "xes" or "csv".
-            mapping: Column mapping required when fmt="csv".
-            tau_max_depth: Maximum tau chain depth for BFS search.
-
-        Returns:
-            ReplayResult with derived init state.
-
-        Raises:
-            PartialTraceError: If the trace cannot be replayed.
-        """
-        raw = PartialTraceReplayer().replay(
-            file_bytes=trace_bytes,
-            current_data=serialized,
-            fmt=fmt,
-            mapping=mapping,
-            tau_max_depth=tau_max_depth,
-        )
-        return ReplayResult(
-            init_places=raw["init_places"],
-            init_effects=raw["init_effects"],
-            replayed_activities=raw["replayed_activities"],
-            n_events=raw["n_events"],
-            warnings=raw["warnings"],
-            tau_fired=raw["tau_fired"],
-            tau_split_count=raw["tau_split_count"],
-            full_trace_validated=raw["full_trace_validated"],
         )

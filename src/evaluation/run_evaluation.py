@@ -12,6 +12,7 @@ Usage (from project root)::
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 from dataclasses import dataclass
@@ -24,14 +25,15 @@ from evaluation.test_case_selector import split as _split_log
 from evaluation.trace_sampler import sample_prefix as _sample_prefix
 from evaluation.query_builder import build_q1, build_q2, build_q3, is_q3_reachable, QuerySpec
 from evaluation.metrics_collector import q1_metrics, q2_metrics, q3_metrics
-from evaluation.plan_validator import validate_plan
 from evaluation.planner_runner_with_retry import RetryConfig, run_with_retry as _run_with_retry
 from evaluation.log_downloader import download_if_needed, get_log_selection
 from evaluation.report_generator import (
     LogResult, QueryResult, write_log_result, write_cross_log_summary,
 )
-from web.serializer import serialize_parse_result
-from encoding.graph_updater import save_original_and_current
+from network_search.scoring import ScoreWeights
+from replay.trace_replayer import TraceReplayer
+from replay.plan_replayer import replay_plan
+from core_utils import save_original_and_current
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +78,29 @@ class EvalConfig:
     gvf_target: float = 0.90
     min_gvf_improvement: float = 0.01
     jenks_sample_size: int = 20000
-    # Replay params
-    tau_max_depth: int = 10
+    # network_search optimizer — used by default to pick the AnalysisConfig;
+    # the discretizer params above still apply as the base_config for the
+    # fields the optimizer doesn't tune (see network_search/search_space.py).
+    use_optimizer: bool = True
+    search_n_trials: int = 30
+    w_det: float = 1.0
+    w_fb_xor: float = 1.0
+    w_fb_eff: float = 1.0
+    w_prune_xor: float = 3.0
+    w_dup: float = 0.2
+    w_repro: float = 5.0
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _config_to_dict(config: AnalysisConfig) -> Dict[str, Any]:
+    """AnalysisConfig -> JSON-serializable dict (ignored_attributes is the
+    only field that isn't already JSON-native — a Set[str])."""
+    data = dataclasses.asdict(config)
+    data["ignored_attributes"] = sorted(data["ignored_attributes"])
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +178,18 @@ def evaluate_log(
         with tts:
             logger.info("[%s] Split done — train=%d test=%d", log_id, tts.n_train, tts.n_test)
 
-            # 3. Parse on training data
-            logger.debug("[%s] Running discovery (algorithm=%s, coverage=%.4f)", log_id, cfg.algorithm, cfg.coverage)
+            # 3-4. Build the domain once for the whole log — optionally via
+            # the optimizer — by delegating to Pipeline.build_network()
+            # (through EvalAPI.build_network()), never re-implementing the
+            # search here. log_path is tts.train_path (never the original
+            # log), so both the optimizer's own internal scoring split and
+            # the final rebuild "on the complete log" it performs stay
+            # entirely within evaluation's own training data, never touching
+            # the held-out test traces in tts.test_cases.
+            logger.debug(
+                "[%s] Building network (algorithm=%s, coverage=%.4f, optimizer=%s)",
+                log_id, cfg.algorithm, cfg.coverage, cfg.use_optimizer,
+            )
             try:
                 discretizer_cache = log_out_dir / "discretizer_cache.json"
                 analysis_cfg = AnalysisConfig(
@@ -168,17 +201,29 @@ def evaluate_log(
                     min_gvf_improvement=cfg.min_gvf_improvement,
                     jenks_sample_size=cfg.jenks_sample_size,
                 )
-                parse_result = api.parse(
+                search_weights = ScoreWeights(
+                    w_det=cfg.w_det, w_fb_xor=cfg.w_fb_xor, w_fb_eff=cfg.w_fb_eff,
+                    w_prune_xor=cfg.w_prune_xor, w_dup=cfg.w_dup, w_repro=cfg.w_repro,
+                ) if cfg.use_optimizer else None
+
+                build_result = api.build_network(
                     str(tts.train_path),
-                    config=analysis_cfg,
-                    coverage_percentage=cfg.coverage,
                     discovery_algorithm=cfg.algorithm,
+                    coverage_percentage=cfg.coverage,
+                    use_durative=True,
+                    use_costs=True,
+                    config=analysis_cfg,
+                    search=cfg.use_optimizer,
+                    search_n_trials=cfg.search_n_trials,
+                    search_seed=cfg.seed,
+                    search_weights=search_weights,
+                    snapshot_dir=str(log_out_dir / "analysis_debug"),
                     discretizer_cache_path=discretizer_cache,
                     force_rediscretize=cfg.force_rediscretize,
                 )
             except Exception as exc:
                 logger.error(
-                    "[%s] parse failed (algorithm=%s, train_path=%s): %s",
+                    "[%s] build_network failed (algorithm=%s, train_path=%s): %s",
                     log_id, cfg.algorithm, tts.train_path, exc, exc_info=True,
                 )
                 return LogResult(
@@ -187,35 +232,39 @@ def evaluate_log(
                     pipeline_ok=False, pipeline_error=str(exc),
                 )
 
+            parse_result = build_result.parse_result
+            prepared = build_result.prepared
+            variant_map = build_result.variant_map
+            analysis_cfg = build_result.config
+            domain_text = str(build_result.domain)
             n_activities = len(parse_result.petri_net_model.activities)
 
-            # 4. Build domain (durative + costs required for weighted metric)
-            try:
-                domain_text, variant_effects = api.build_domain_with_variant_effects(
-                    parse_result, use_durative=True, use_costs=True
+            search_summary = None
+            if build_result.trial_records is not None:
+                best = max(
+                    build_result.trial_records,
+                    key=lambda r: r.score if r.score is not None else float("-inf"),
                 )
-            except Exception as exc:
-                logger.error("[%s] build_domain failed: %s", log_id, exc, exc_info=True)
-                return LogResult(
-                    log_id=log_id, log_name=log_name, log_fmt=log_fmt,
-                    n_train_cases=tts.n_train, n_test_cases=tts.n_test,
-                    n_activities=n_activities,
-                    pipeline_ok=False, pipeline_error=str(exc),
+                search_summary = {
+                    "n_trials": cfg.search_n_trials,
+                    "best_score": best.score,
+                    "best_trial_number": best.trial_number,
+                }
+                (log_out_dir / "search_config.json").write_text(
+                    json.dumps(_config_to_dict(analysis_cfg), indent=2, ensure_ascii=False),
+                    encoding="utf-8",
                 )
 
-            # 5. Serialize Petri net for downstream modules
-            serialized = serialize_parse_result(parse_result)
-
-            (log_out_dir / "domain.pddl").write_text(domain_text, encoding="utf-8")
-            (log_out_dir / "current.json").write_text(
-                json.dumps(serialized, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            # 5. Serialize + publish into the web UI's data directory — the
+            # single place both the GUI import flow and the evaluation
+            # harness write the domain to (web.app reads
+            # DATA_DIR/<config_name>/), so no separate copy is kept under
+            # output_dir/<log_id>/.
+            serialized = api.serialize(prepared, parse_result)
             logger.info(
                 "[%s] Domain built (%d activities, durative=True).", log_id, n_activities
             )
 
-            # Also publish into the web UI's data directory so the network can be
-            # inspected via the Petri net editor (web.app reads DATA_DIR/<config_name>/).
             web_config_dir = WEB_DATA_DIR / log_id
             orig_written, curr_written = save_original_and_current(
                 str(web_config_dir), serialized
@@ -225,16 +274,23 @@ def evaluate_log(
                 log_id, web_config_dir, orig_written, curr_written,
             )
 
+            pddl_path = web_config_dir / "pddl" / "domain.pddl"
+            if pddl_path.exists():
+                logger.info("[%s] %s already exists — skipped", log_id, pddl_path)
+            else:
+                build_result.domain.write(pddl_path)
+                logger.info("[%s] domain.pddl written to %s", log_id, pddl_path)
+
             # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
+            replayer = TraceReplayer(prepared, parse_result.petri_net_model, config=analysis_cfg)
             query_results: List[QueryResult] = []
             for trace in tts.test_cases:
                 trace_id = str(trace.attributes.get("concept:name", "unknown")).replace(" ", "_")
                 prefix = _sample_prefix(
-                    trace, serialized, api,
+                    trace, replayer,
                     min_prefix_pct=cfg.min_prefix_pct,
                     max_prefix_pct=cfg.max_prefix_pct,
                     seed=cfg.seed,
-                    tau_max_depth=cfg.tau_max_depth,
                 )
                 if prefix is None:
                     logger.warning("[%s] %s: prefix sampling failed — skipping trace.", log_id, trace_id)
@@ -245,21 +301,21 @@ def evaluate_log(
                 # Q1 — process completion, no deadline
                 q1_spec = build_q1(prefix, cfg.cost_weight)
                 query_results.append(
-                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects, pddl_dir)
+                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable)
                 )
 
                 # Q2 — completion within remaining time budget
                 q2_spec = build_q2(prefix, cfg.cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects, pddl_dir)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable)
                     )
 
                 # Q3 — completion within budget + attribute constraints
                 q3_spec = build_q3(prefix, serialized, cfg.cost_weight)
                 if q3_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, variant_effects, pddl_dir)
+                        _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable)
                     )
                 else:
                     query_id = f"{log_id}_{trace_id}_Q3"
@@ -275,6 +331,7 @@ def evaluate_log(
                         planner_duration_s=None,
                         metrics={},
                         validation=None,
+                        is_replayable=prefix.is_replayable,
                     ))
 
             logger.info("[%s] Done — %d queries.", log_id, len(query_results))
@@ -288,6 +345,8 @@ def evaluate_log(
                 pipeline_ok=True,
                 pipeline_error=None,
                 queries=query_results,
+                used_optimizer=cfg.use_optimizer,
+                search_summary=search_summary,
             )
     finally:
         logging.getLogger().removeHandler(_log_handler)
@@ -308,8 +367,10 @@ def _run_query(
     serialized: Dict[str, Any],
     failures_dir: Path,
     prefix: Any,
-    variant_effects: Optional[Dict[str, Dict[str, Any]]] = None,
+    prepared: Any,
+    variant_map: Dict[str, Any],
     pddl_dir: Optional[Path] = None,
+    is_replayable: bool = True,
 ) -> QueryResult:
     query_id = f"{log_id}_{trace_id}_{spec.query_type}"
 
@@ -343,20 +404,19 @@ def _run_query(
 
     validation = None
     if result.success and result.plan_steps:
-        report = validate_plan(
+        init_attrs = {e["attribute"]: e["value"] for e in (spec.init_effects or [])}
+        outcome = replay_plan(
             result.plan_steps,
-            spec.init_places,
-            serialized,
-            init_attributes=spec.init_effects,
-            variant_effects=variant_effects,
+            set(spec.init_places),
+            init_attrs,
+            prepared,
+            variant_map,
         )
         validation = {
-            "valid": report.valid,
-            "attribute_checked": report.attribute_checked,
-            "error_step": report.error_step,
-            "error_action": report.error_action,
-            "error_reason": report.error_reason,
-            "steps_executed": report.steps_executed,
+            "valid": outcome.is_replayable,
+            "error_step": outcome.error_step,
+            "error_reason": outcome.error_reason,
+            "steps_executed": len(outcome.steps),
         }
 
     return QueryResult(
@@ -370,6 +430,7 @@ def _run_query(
         planner_duration_s=result.duration_s,
         metrics=metrics,
         validation=validation,
+        is_replayable=is_replayable,
     )
 
 
@@ -390,6 +451,7 @@ def _load_log_result(data: Dict[str, Any]) -> LogResult:
             planner_duration_s=q["planner_duration_s"],
             metrics=q["metrics"],
             validation=q["validation"],
+            is_replayable=q.get("is_replayable", True),
         )
         for q in data.get("queries", [])
     ]
@@ -403,6 +465,8 @@ def _load_log_result(data: Dict[str, Any]) -> LogResult:
         pipeline_ok=data["pipeline_ok"],
         pipeline_error=data["pipeline_error"],
         queries=queries,
+        used_optimizer=data.get("used_optimizer", False),
+        search_summary=data.get("search_summary"),
     )
 
 
@@ -489,8 +553,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Stage 3: stop incrementing k when marginal GVF gain falls below this.")
     p.add_argument("--jenks-sample-size", dest="jenks_sample_size", type=int, default=20000,
                    help="Stage 3: max points for Jenks DP; larger arrays are sampled.")
-    p.add_argument("--tau-max-depth", dest="tau_max_depth", type=int, default=10,
-                   help="Maximum tau chain depth for BFS search during trace replay.")
+    # network_search optimizer
+    p.add_argument("--no-optimizer", dest="no_optimizer", action="store_true",
+                   help="Disable the Optuna optimizer and use the fixed discretizer "
+                        "params above (plus AnalysisConfig defaults) directly. "
+                        "The optimizer is used by default.")
+    p.add_argument("--search-n-trials", dest="search_n_trials", type=int, default=30,
+                   help="Number of candidate AnalysisConfigs the optimizer evaluates per log.")
+    p.add_argument("--w-det", dest="w_det", type=float, default=1.0,
+                   help="ScoreWeights.w_det for the optimizer.")
+    p.add_argument("--w-fb-xor", dest="w_fb_xor", type=float, default=1.0,
+                   help="ScoreWeights.w_fb_xor for the optimizer.")
+    p.add_argument("--w-fb-eff", dest="w_fb_eff", type=float, default=1.0,
+                   help="ScoreWeights.w_fb_eff for the optimizer.")
+    p.add_argument("--w-prune-xor", dest="w_prune_xor", type=float, default=3.0,
+                   help="ScoreWeights.w_prune_xor for the optimizer.")
+    p.add_argument("--w-dup", dest="w_dup", type=float, default=0.2,
+                   help="ScoreWeights.w_dup for the optimizer.")
+    p.add_argument("--w-repro", dest="w_repro", type=float, default=5.0,
+                   help="ScoreWeights.w_repro for the optimizer.")
     p.add_argument("--csv-mapping", dest="csv_mapping", type=str, default=None,
                    help="JSON string mapping CSV columns, e.g. '{\"case_id\": \"col_a\"}'.")
     p.add_argument("--log-level", dest="log_level", type=str, default="INFO",
@@ -540,7 +621,14 @@ def main(args: argparse.Namespace) -> None:
         gvf_target=args.gvf_target,
         min_gvf_improvement=args.min_gvf_improvement,
         jenks_sample_size=args.jenks_sample_size,
-        tau_max_depth=args.tau_max_depth,
+        use_optimizer=not args.no_optimizer,
+        search_n_trials=args.search_n_trials,
+        w_det=args.w_det,
+        w_fb_xor=args.w_fb_xor,
+        w_fb_eff=args.w_fb_eff,
+        w_prune_xor=args.w_prune_xor,
+        w_dup=args.w_dup,
+        w_repro=args.w_repro,
     )
 
     selection = get_log_selection(Path(args.metadata), log_ids=cfg.log_ids)
