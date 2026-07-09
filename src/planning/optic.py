@@ -170,7 +170,7 @@ def run(
 
     _log(f"Planner finished (exit code {proc.returncode})")
 
-    plan_lines, plan_actions = _parse_optic_stdout(proc.stdout)
+    plan_lines, plan_actions, makespan = _parse_optic_stdout(proc.stdout)
     plan_text: Optional[str] = None
 
     if plan_actions:
@@ -178,7 +178,7 @@ def run(
         (pddl_dir / "plan.txt").write_text(plan_text, encoding="utf-8")
         _log(f"Plan saved — {len(plan_actions)} action(s)")
 
-    metrics = _parse_optic_metrics(proc.stdout, proc.stderr)
+    metrics = _parse_optic_metrics(proc.stdout, proc.stderr, makespan)
     metrics["solution_length"] = len(plan_actions) if plan_actions else None
 
     solvability = _classify(proc.returncode, plan_text is not None, proc.stdout, proc.stderr)
@@ -212,7 +212,7 @@ def _empty_result() -> Dict[str, Any]:
         "solvability": "error",
         "plan_text": None,
         "plan_actions": [],
-        "metrics": {k: None for k in ("expanded_nodes", "search_time", "solution_length", "total_time")},
+        "metrics": {k: None for k in ("expanded_nodes", "search_time", "solution_length", "total_time", "cost", "duration")},
         "stdout": "",
         "stderr": "",
         "message": "",
@@ -226,32 +226,38 @@ def _parse_optic_stdout(stdout: str):
     ';;; Solution Found'. We take the last one.
 
     Returns:
-        Tuple of (raw_plan_lines, action_name_list).
+        Tuple of (raw_plan_lines, action_name_list, makespan). `makespan`
+        is the plan's simulated completion time — max(timestamp + duration)
+        over all timed lines in the block, not just the last line, since a
+        temporal plan can have concurrent actions finishing out of order.
     """
     # Split on solution delimiters, keep the last block
     blocks = re.split(r";;; Solution Found", stdout)
     if len(blocks) < 2:
-        return [], []
+        return [], [], None
 
     last_block = blocks[-1]
     plan_lines = []
     actions = []
+    makespan: Optional[float] = None
 
     for line in last_block.splitlines():
         # Temporal plan line: "  0.000: (action_name) [duration]"
-        m = re.match(r"^\s*([\d.]+)\s*:\s*\(([^)]+)\)\s*\[", line)
+        m = re.match(r"^\s*([\d.]+)\s*:\s*\(([^)]+)\)\s*\[([\d.]+)\]", line)
         if m:
             plan_lines.append(line.strip())
             name = _normalise(m.group(2).split()[0])
             if name and not name.startswith("tau_") and not name.startswith("mark_places_from_"):
                 actions.append(name)
+            end_time = float(m.group(1)) + float(m.group(3))
+            makespan = end_time if makespan is None else max(makespan, end_time)
 
-    return plan_lines, actions
+    return plan_lines, actions, makespan
 
 
-def _parse_optic_metrics(stdout: str, stderr: str) -> Dict[str, Any]:
+def _parse_optic_metrics(stdout: str, stderr: str, makespan: Optional[float] = None) -> Dict[str, Any]:
     combined = stdout + "\n" + stderr
-    metrics: Dict[str, Any] = {k: None for k in ("expanded_nodes", "search_time", "solution_length", "total_time")}
+    metrics: Dict[str, Any] = {k: None for k in ("expanded_nodes", "search_time", "solution_length", "total_time", "cost", "duration")}
 
     m = re.search(r"States evaluated:\s*(\d+)", combined)
     if m:
@@ -261,6 +267,12 @@ def _parse_optic_metrics(stdout: str, stderr: str) -> Dict[str, Any]:
     if m:
         metrics["total_time"] = float(m.group(1))
         metrics["search_time"] = metrics["total_time"]
+
+    m = re.search(r";\s*Cost:\s*([\d.]+)", combined)
+    if m:
+        metrics["cost"] = float(m.group(1))
+
+    metrics["duration"] = makespan
 
     return metrics
 

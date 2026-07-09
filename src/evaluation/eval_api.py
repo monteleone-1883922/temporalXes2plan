@@ -62,6 +62,7 @@ class PlanResult:
     plan_steps: List[str]
     cost: Optional[float]
     duration_s: Optional[float]
+    search_time_s: Optional[float]
     solvability: str
     error: Optional[str]
     raw_stdout: str
@@ -257,6 +258,7 @@ class EvalAPI:
             plan_steps=raw.plan_actions,
             cost=raw.metrics.get("cost"),
             duration_s=raw.metrics.get("duration"),
+            search_time_s=raw.metrics.get("search_time"),
             solvability=raw.solvability,
             error=None if raw.success else raw.message,
             raw_stdout=raw.stdout,
