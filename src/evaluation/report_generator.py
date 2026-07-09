@@ -202,6 +202,13 @@ def _build_summary(
     q3_within: List[float] = []
     q3_plan_time: List[float] = []
 
+    # Replayability cross-check: solved despite the trace not being
+    # replayable, and not-solved despite the trace being replayable —
+    # accumulated per query type across logs (mean of per-log ratios,
+    # same convention as solved_ratio_mean).
+    solved_given_not_replayable: Dict[str, List[float]] = {"Q1": [], "Q2": [], "Q3": []}
+    not_solved_given_replayable: Dict[str, List[float]] = {"Q1": [], "Q2": [], "Q3": []}
+
     per_log_rows: List[Dict[str, Any]] = []
 
     for lr in all_results:
@@ -235,6 +242,15 @@ def _build_summary(
             "q3_solved_replayable": replay_stats["q3_solved_replayable"],
             "q3_solved_not_replayable": replay_stats["q3_solved_not_replayable"],
         })
+
+        for qtype in ("Q1", "Q2", "Q3"):
+            key = qtype.lower()
+            snr = replay_stats[f"{key}_solved_not_replayable"]
+            if snr is not None:
+                solved_given_not_replayable[qtype].append(snr)
+            sr = replay_stats[f"{key}_solved_replayable"]
+            if sr is not None:
+                not_solved_given_replayable[qtype].append(1 - sr)
 
         # Accumulate for global means.
         if q1_sr is not None:
@@ -279,12 +295,16 @@ def _build_summary(
             "within_budget_ratio_mean": _mean(q1_within),
             "plan_time_mean": _mean(q1_plan_time),
             "plan_time_std": _std(q1_plan_time),
+            "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q1"]),
+            "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q1"]),
         },
         "q2": {
             "solved_ratio_mean": _mean(q2_solved),
             "within_budget_ratio_mean": _mean(q2_within),
             "plan_time_mean": _mean(q2_plan_time),
             "plan_time_std": _std(q2_plan_time),
+            "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q2"]),
+            "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q2"]),
         },
         "q3": {
             "solved_ratio_mean": _mean(q3_solved),
@@ -292,6 +312,8 @@ def _build_summary(
             "within_budget_ratio_mean": _mean(q3_within),
             "plan_time_mean": _mean(q3_plan_time),
             "plan_time_std": _std(q3_plan_time),
+            "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q3"]),
+            "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q3"]),
         },
         "per_log": per_log_rows,
     }
