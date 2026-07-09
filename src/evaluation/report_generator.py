@@ -192,14 +192,11 @@ def _build_summary(
     n_queries_total = sum(len(r.queries) for r in all_results)
 
     q1_solved: List[float] = []
-    q1_obj: List[float] = []
     q2_solved: List[float] = []
     q2_within: List[float] = []
-    q2_obj: List[float] = []
     q3_solved: List[float] = []
     q3_correct: List[float] = []
     q3_within: List[float] = []
-    q3_obj: List[float] = []
 
     per_log_rows: List[Dict[str, Any]] = []
 
@@ -237,19 +234,11 @@ def _build_summary(
         # Accumulate for global means.
         if q1_sr is not None:
             q1_solved.append(q1_sr)
-        for q in log_q1:
-            v = q.metrics.get("weighted_objective")
-            if v is not None:
-                q1_obj.append(v)
 
         if q2_sr is not None:
             q2_solved.append(q2_sr)
         if q2_wr is not None:
             q2_within.append(q2_wr)
-        for q in log_q2:
-            v = q.metrics.get("weighted_objective")
-            if v is not None:
-                q2_obj.append(v)
 
         q3_sr = _ratio(log_q3, "solved")
         if q3_sr is not None:
@@ -259,10 +248,6 @@ def _build_summary(
         q3_wr = _ratio_metric(log_q3, "within_budget")
         if q3_wr is not None:
             q3_within.append(q3_wr)
-        for q in log_q3:
-            v = q.metrics.get("weighted_objective")
-            if v is not None:
-                q3_obj.append(v)
 
     return {
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
@@ -272,19 +257,15 @@ def _build_summary(
         "cost_weight": cost_weight,
         "q1": {
             "solved_ratio_mean": _mean(q1_solved),
-            "solved_ratio_std": _std(q1_solved),
-            "weighted_objective_mean": _mean(q1_obj),
         },
         "q2": {
             "solved_ratio_mean": _mean(q2_solved),
             "within_budget_ratio_mean": _mean(q2_within),
-            "weighted_objective_mean": _mean(q2_obj),
         },
         "q3": {
             "solved_ratio_mean": _mean(q3_solved),
             "correct_ratio_mean": _mean(q3_correct),
             "within_budget_ratio_mean": _mean(q3_within),
-            "weighted_objective_mean": _mean(q3_obj),
         },
         "per_log": per_log_rows,
     }
