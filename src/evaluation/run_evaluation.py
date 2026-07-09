@@ -441,7 +441,7 @@ def _run_query(
     result, attempts = _run_with_retry(domain_text, problem_text, api, retry_cfg, failures_dir, query_id, pddl_dir)
 
     if spec.query_type == "Q1":
-        metrics = q1_metrics(result, cfg.cost_weight)
+        metrics = q1_metrics(result, prefix, cfg.cost_weight)
     elif spec.query_type == "Q2":
         metrics = q2_metrics(result, prefix, cfg.cost_weight)
     else:

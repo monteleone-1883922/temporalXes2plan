@@ -19,17 +19,30 @@ from evaluation.trace_sampler import PrefixSample
 # Per-query metrics
 # ---------------------------------------------------------------------------
 
-def q1_metrics(result: PlanResult, cost_weight: float = 0.001) -> Dict[str, Any]:
+def q1_metrics(
+    result: PlanResult,
+    prefix_sample: PrefixSample,
+    cost_weight: float = 0.001,
+) -> Dict[str, Any]:
     """Compute Q1 metrics: process completion, no deadline.
+
+    Q1's PDDL problem has no deadline, so `budget_s`/`within_budget` never
+    affect whether the planner finds a plan — they are computed here purely
+    for statistics, to compare `plan_time_s` against how long the process
+    actually took in the original trace (same as Q2/Q3).
 
     Args:
         result: PlanResult from the planner invocation.
+        prefix_sample: PrefixSample used to compute the reference real
+            duration of the trace suffix.
         cost_weight: Scaling factor α used in the weighted objective.
 
     Returns:
         Dict with keys: solved, solvability, plan_time_s, plan_cost,
-        weighted_objective.
+        weighted_objective, budget_s, within_budget.
     """
+    budget_s = _remaining_budget(prefix_sample)
+    within_budget = _within_budget(result.duration_s, budget_s)
     weighted = _weighted_objective(result.duration_s, result.cost, cost_weight)
     return {
         "solved": result.success,
@@ -37,6 +50,8 @@ def q1_metrics(result: PlanResult, cost_weight: float = 0.001) -> Dict[str, Any]
         "plan_time_s": result.duration_s,
         "plan_cost": result.cost,
         "weighted_objective": weighted,
+        "budget_s": budget_s,
+        "within_budget": within_budget,
     }
 
 

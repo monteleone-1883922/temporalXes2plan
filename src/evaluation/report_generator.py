@@ -192,6 +192,7 @@ def _build_summary(
     n_queries_total = sum(len(r.queries) for r in all_results)
 
     q1_solved: List[float] = []
+    q1_within: List[float] = []
     q1_plan_time: List[float] = []
     q2_solved: List[float] = []
     q2_within: List[float] = []
@@ -209,6 +210,7 @@ def _build_summary(
         log_q3 = [q for q in lr.queries if q.query_type == "Q3"]
 
         q1_sr = _ratio(log_q1, "solved")
+        q1_wr = _ratio_metric(log_q1, "within_budget")
         q2_sr = _ratio(log_q2, "solved")
         q2_wr = _ratio_metric(log_q2, "within_budget")
         q3_cr = _ratio_metric(log_q3, "correct")
@@ -237,6 +239,8 @@ def _build_summary(
         # Accumulate for global means.
         if q1_sr is not None:
             q1_solved.append(q1_sr)
+        if q1_wr is not None:
+            q1_within.append(q1_wr)
         for q in log_q1:
             v = q.metrics.get("plan_time_s")
             if v is not None:
@@ -272,6 +276,7 @@ def _build_summary(
         "cost_weight": cost_weight,
         "q1": {
             "solved_ratio_mean": _mean(q1_solved),
+            "within_budget_ratio_mean": _mean(q1_within),
             "plan_time_mean": _mean(q1_plan_time),
             "plan_time_std": _std(q1_plan_time),
         },
