@@ -39,7 +39,7 @@ def q1_metrics(
 
     Returns:
         Dict with keys: solved, solvability, plan_time_s, plan_cost,
-        weighted_objective, budget_s, within_budget.
+        weighted_objective, budget_s, within_budget, search_time_s.
     """
     budget_s = _remaining_budget(prefix_sample)
     within_budget = _within_budget(result.duration_s, budget_s)
@@ -52,6 +52,7 @@ def q1_metrics(
         "weighted_objective": weighted,
         "budget_s": budget_s,
         "within_budget": within_budget,
+        "search_time_s": result.search_time_s,
     }
 
 
@@ -69,7 +70,7 @@ def q2_metrics(
 
     Returns:
         Dict with keys: solved, solvability, plan_time_s, plan_cost,
-        weighted_objective, budget_s, within_budget.
+        weighted_objective, budget_s, within_budget, search_time_s.
     """
     budget_s = _remaining_budget(prefix_sample)
     within_budget = _within_budget(result.duration_s, budget_s)
@@ -82,6 +83,7 @@ def q2_metrics(
         "weighted_objective": weighted,
         "budget_s": budget_s,
         "within_budget": within_budget,
+        "search_time_s": result.search_time_s,
     }
 
 
@@ -103,8 +105,8 @@ def q3_metrics(
 
     Returns:
         Dict with keys: solved, solvability, plan_time_s, plan_cost,
-        weighted_objective, budget_s, within_budget, ground_truth_reachable,
-        correct.
+        weighted_objective, budget_s, within_budget, search_time_s,
+        ground_truth_reachable, correct.
     """
     budget_s = _remaining_budget(prefix_sample)
     within_budget = _within_budget(result.duration_s, budget_s)
@@ -118,6 +120,7 @@ def q3_metrics(
         "weighted_objective": weighted,
         "budget_s": budget_s,
         "within_budget": within_budget,
+        "search_time_s": result.search_time_s,
         "ground_truth_reachable": ground_truth_reachable,
         "correct": correct,
     }

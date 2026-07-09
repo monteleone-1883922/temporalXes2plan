@@ -473,7 +473,7 @@ def _run_query(
         n_prefix_events=len(prefix.prefix_events),
         attempts=attempts,
         solvability=result.solvability,
-        planner_duration_s=result.duration_s,
+        planner_duration_s=result.search_time_s,
         metrics=metrics,
         validation=validation,
         is_replayable=is_replayable,
