@@ -33,6 +33,9 @@ from evaluation.report_generator import (
 from network_search.scoring import ScoreWeights
 from replay.trace_replayer import TraceReplayer
 from replay.plan_replayer import replay_plan
+from encoding.prepared_input import PreparedDomainInput
+from encoding.prepared_graph_utils import build_petrinet_model_from_prepared
+from encoding.domain_builder import build_domain_with_variant_map
 from core_utils import save_original_and_current
 
 logger = logging.getLogger(__name__)
@@ -69,7 +72,7 @@ class EvalConfig:
     resume: bool
     cost_weight: float
     csv_mapping: Optional[Dict[str, Optional[str]]]
-    force_rediscretize: bool
+    force_rebuild: bool
     # Discretizer (Stage 1–3) params — mapped to AnalysisConfig
     kmeans_max_k: int = 5
     dominance_threshold: float = 0.30
@@ -178,53 +181,118 @@ def evaluate_log(
         with tts:
             logger.info("[%s] Split done — train=%d test=%d", log_id, tts.n_train, tts.n_test)
 
-            # 3-4. Build the domain once for the whole log — optionally via
-            # the optimizer — by delegating to Pipeline.build_network()
-            # (through EvalAPI.build_network()), never re-implementing the
-            # search here. log_path is tts.train_path (never the original
-            # log), so both the optimizer's own internal scoring split and
-            # the final rebuild "on the complete log" it performs stay
-            # entirely within evaluation's own training data, never touching
-            # the held-out test traces in tts.test_cases.
-            logger.debug(
-                "[%s] Building network (algorithm=%s, coverage=%.4f, optimizer=%s)",
-                log_id, cfg.algorithm, cfg.coverage, cfg.use_optimizer,
-            )
-            try:
-                discretizer_cache = log_out_dir / "discretizer_cache.json"
-                analysis_cfg = AnalysisConfig(
-                    kmeans_max_k=cfg.kmeans_max_k,
-                    dominance_threshold=cfg.dominance_threshold,
-                    min_residual_points=cfg.min_residual_points,
-                    min_gvf_threshold=cfg.min_gvf_threshold,
-                    gvf_target=cfg.gvf_target,
-                    min_gvf_improvement=cfg.min_gvf_improvement,
-                    jenks_sample_size=cfg.jenks_sample_size,
-                )
-                search_weights = ScoreWeights(
-                    w_det=cfg.w_det, w_fb_xor=cfg.w_fb_xor, w_fb_eff=cfg.w_fb_eff,
-                    w_prune_xor=cfg.w_prune_xor, w_dup=cfg.w_dup, w_repro=cfg.w_repro,
-                ) if cfg.use_optimizer else None
+            # 3-4. Build the domain once for the whole log. If data/<log_id>/
+            # current.json already exists, reuse it as the cache: skip
+            # parse+encode+optimizer entirely and reconstruct prepared/
+            # variant_map/domain straight from the saved JSON — exactly the
+            # same reconstruction web/api.py already does for its own
+            # current.json-driven endpoints (PreparedDomainInput.from_dict +
+            # build_petrinet_model_from_prepared + build_domain_with_variant_map),
+            # so no XES re-parse or optimizer re-run happens on repeat
+            # evaluations of the same log. --force-rebuild bypasses this and
+            # always rebuilds from scratch (log_path is tts.train_path, never
+            # the original log, so the optimizer's own internal scoring split
+            # and its final rebuild "on the complete log" both stay entirely
+            # within evaluation's own training data, never touching the
+            # held-out test traces in tts.test_cases).
+            web_config_dir = WEB_DATA_DIR / log_id
+            current_path = web_config_dir / "current.json"
+            use_cache = current_path.exists() and not cfg.force_rebuild
 
-                build_result = api.build_network(
-                    str(tts.train_path),
-                    discovery_algorithm=cfg.algorithm,
-                    coverage_percentage=cfg.coverage,
-                    use_durative=True,
-                    use_costs=True,
-                    config=analysis_cfg,
-                    search=cfg.use_optimizer,
-                    search_n_trials=cfg.search_n_trials,
-                    search_seed=cfg.seed,
-                    search_weights=search_weights,
-                    snapshot_dir=str(log_out_dir / "analysis_debug"),
-                    discretizer_cache_path=discretizer_cache,
-                    force_rediscretize=cfg.force_rediscretize,
-                )
+            try:
+                if use_cache:
+                    logger.info(
+                        "[%s] Reusing cached domain from %s (skip parse/encode/optimizer). "
+                        "Use --force-rebuild to rebuild.", log_id, current_path,
+                    )
+                    serialized = json.loads(current_path.read_text(encoding="utf-8"))
+                    prepared = PreparedDomainInput.from_dict(serialized)
+                    meta = serialized.get("metadata", {})
+                    petri_net_model = build_petrinet_model_from_prepared(
+                        prepared, meta.get("start_place"), meta.get("end_place"),
+                    )
+                    analysis_cfg = AnalysisConfig(
+                        kmeans_max_k=cfg.kmeans_max_k,
+                        dominance_threshold=cfg.dominance_threshold,
+                        min_residual_points=cfg.min_residual_points,
+                        min_gvf_threshold=cfg.min_gvf_threshold,
+                        gvf_target=cfg.gvf_target,
+                        min_gvf_improvement=cfg.min_gvf_improvement,
+                        jenks_sample_size=cfg.jenks_sample_size,
+                    )
+                    domain, variant_map = build_domain_with_variant_map(
+                        prepared, config=analysis_cfg,
+                        use_durative=True, use_costs=True,
+                    )
+                    n_activities = len(petri_net_model.activities)
+                    used_optimizer = False
+                    search_summary = None
+                else:
+                    logger.debug(
+                        "[%s] Building network (algorithm=%s, coverage=%.4f, optimizer=%s)",
+                        log_id, cfg.algorithm, cfg.coverage, cfg.use_optimizer,
+                    )
+                    discretizer_cache = log_out_dir / "discretizer_cache.json"
+                    analysis_cfg = AnalysisConfig(
+                        kmeans_max_k=cfg.kmeans_max_k,
+                        dominance_threshold=cfg.dominance_threshold,
+                        min_residual_points=cfg.min_residual_points,
+                        min_gvf_threshold=cfg.min_gvf_threshold,
+                        gvf_target=cfg.gvf_target,
+                        min_gvf_improvement=cfg.min_gvf_improvement,
+                        jenks_sample_size=cfg.jenks_sample_size,
+                    )
+                    search_weights = ScoreWeights(
+                        w_det=cfg.w_det, w_fb_xor=cfg.w_fb_xor, w_fb_eff=cfg.w_fb_eff,
+                        w_prune_xor=cfg.w_prune_xor, w_dup=cfg.w_dup, w_repro=cfg.w_repro,
+                    ) if cfg.use_optimizer else None
+
+                    build_result = api.build_network(
+                        str(tts.train_path),
+                        discovery_algorithm=cfg.algorithm,
+                        coverage_percentage=cfg.coverage,
+                        use_durative=True,
+                        use_costs=True,
+                        config=analysis_cfg,
+                        search=cfg.use_optimizer,
+                        search_n_trials=cfg.search_n_trials,
+                        search_seed=cfg.seed,
+                        search_weights=search_weights,
+                        snapshot_dir=str(log_out_dir / "analysis_debug"),
+                        discretizer_cache_path=discretizer_cache,
+                        force_rediscretize=cfg.force_rebuild,
+                    )
+                    prepared = build_result.prepared
+                    variant_map = build_result.variant_map
+                    analysis_cfg = build_result.config
+                    domain = build_result.domain
+                    petri_net_model = build_result.parse_result.petri_net_model
+                    n_activities = len(petri_net_model.activities)
+                    used_optimizer = cfg.use_optimizer
+
+                    search_summary = None
+                    if build_result.trial_records is not None:
+                        best = max(
+                            build_result.trial_records,
+                            key=lambda r: r.score if r.score is not None else float("-inf"),
+                        )
+                        search_summary = {
+                            "n_trials": cfg.search_n_trials,
+                            "best_score": best.score,
+                            "best_trial_number": best.trial_number,
+                        }
+                        (log_out_dir / "search_config.json").write_text(
+                            json.dumps(_config_to_dict(analysis_cfg), indent=2, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+
+                    serialized = api.serialize(prepared, build_result.parse_result)
+
+                domain_text = str(domain)
             except Exception as exc:
                 logger.error(
-                    "[%s] build_network failed (algorithm=%s, train_path=%s): %s",
-                    log_id, cfg.algorithm, tts.train_path, exc, exc_info=True,
+                    "[%s] build failed (algorithm=%s, train_path=%s, use_cache=%s): %s",
+                    log_id, cfg.algorithm, tts.train_path, use_cache, exc, exc_info=True,
                 )
                 return LogResult(
                     log_id=log_id, log_name=log_name, log_fmt=log_fmt,
@@ -232,40 +300,14 @@ def evaluate_log(
                     pipeline_ok=False, pipeline_error=str(exc),
                 )
 
-            parse_result = build_result.parse_result
-            prepared = build_result.prepared
-            variant_map = build_result.variant_map
-            analysis_cfg = build_result.config
-            domain_text = str(build_result.domain)
-            n_activities = len(parse_result.petri_net_model.activities)
-
-            search_summary = None
-            if build_result.trial_records is not None:
-                best = max(
-                    build_result.trial_records,
-                    key=lambda r: r.score if r.score is not None else float("-inf"),
-                )
-                search_summary = {
-                    "n_trials": cfg.search_n_trials,
-                    "best_score": best.score,
-                    "best_trial_number": best.trial_number,
-                }
-                (log_out_dir / "search_config.json").write_text(
-                    json.dumps(_config_to_dict(analysis_cfg), indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-
-            # 5. Serialize + publish into the web UI's data directory — the
-            # single place both the GUI import flow and the evaluation
-            # harness write the domain to (web.app reads
-            # DATA_DIR/<config_name>/), so no separate copy is kept under
-            # output_dir/<log_id>/.
-            serialized = api.serialize(prepared, parse_result)
             logger.info(
                 "[%s] Domain built (%d activities, durative=True).", log_id, n_activities
             )
 
-            web_config_dir = WEB_DATA_DIR / log_id
+            # 5. Publish into the web UI's data directory — the single place
+            # both the GUI import flow and the evaluation harness write the
+            # domain to (web.app reads DATA_DIR/<config_name>/), so no
+            # separate copy is kept under output_dir/<log_id>/.
             orig_written, curr_written = save_original_and_current(
                 str(web_config_dir), serialized
             )
@@ -278,11 +320,11 @@ def evaluate_log(
             if pddl_path.exists():
                 logger.info("[%s] %s already exists — skipped", log_id, pddl_path)
             else:
-                build_result.domain.write(pddl_path)
+                domain.write(pddl_path)
                 logger.info("[%s] domain.pddl written to %s", log_id, pddl_path)
 
             # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
-            replayer = TraceReplayer(prepared, parse_result.petri_net_model, config=analysis_cfg)
+            replayer = TraceReplayer(prepared, petri_net_model, config=analysis_cfg)
             query_results: List[QueryResult] = []
             for trace in tts.test_cases:
                 trace_id = str(trace.attributes.get("concept:name", "unknown")).replace(" ", "_")
@@ -345,7 +387,7 @@ def evaluate_log(
                 pipeline_ok=True,
                 pipeline_error=None,
                 queries=query_results,
-                used_optimizer=cfg.use_optimizer,
+                used_optimizer=used_optimizer,
                 search_summary=search_summary,
             )
     finally:
@@ -536,8 +578,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Re-download log files even if cached.")
     p.add_argument("--resume", action="store_true",
                    help="Skip logs whose result.json already exists.")
-    p.add_argument("--force-rediscretize", dest="force_rediscretize", action="store_true",
-                   help="Ricalcola la discretizzazione ignorando la cache salvata.")
+    p.add_argument("--force-rebuild", dest="force_rebuild", action="store_true",
+                   help="Ignora la cache esistente per il log (current.json in "
+                        "data/<log_id>/ e il discretizer cache) e ricostruisce "
+                        "dominio/rete da zero, rieseguendo l'optimizer se attivo.")
     # Discretizer params
     p.add_argument("--kmeans-max-k", dest="kmeans_max_k", type=int, default=5,
                    help="Stage 1 threshold (few unique values) and max-k cap for Stage 3 Jenks.")
@@ -613,7 +657,7 @@ def main(args: argparse.Namespace) -> None:
         resume=args.resume,
         cost_weight=args.cost_weight,
         csv_mapping=csv_mapping,
-        force_rediscretize=args.force_rediscretize,
+        force_rebuild=args.force_rebuild,
         kmeans_max_k=args.kmeans_max_k,
         dominance_threshold=args.dominance_threshold,
         min_residual_points=args.min_residual_points,
