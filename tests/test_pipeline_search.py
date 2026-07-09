@@ -12,11 +12,14 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
+from unittest.mock import patch
 
 import pm4py
 import pytest
 from pm4py.objects.log.obj import Event, EventLog, Trace
 
+import pipeline as pipeline_module
+from models import AnalysisConfig
 from pipeline import Pipeline
 
 
@@ -145,3 +148,39 @@ class TestPipelineRunWithSearch:
         config_dir = Path(data_dir) / "xor_log"
         assert (config_dir / "current.json").exists()
         assert not (config_dir / "network_search_trials.jsonl").exists()
+
+    def test_search_uses_config_as_base_for_untouched_fields(self, xes_path, tmp_path):
+        # GUI optimizer toggle: fields the search doesn't tune (e.g.
+        # attr_precondition_min_firings) must come from the caller-supplied
+        # `config`, not AnalysisConfig()'s hardcoded default -- spy on
+        # find_best_config to capture what base_config it actually received.
+        # Deliberately avoids replay_engine="alignments" here: it exercises a
+        # different code path that deterministically hits the pre-existing,
+        # unrelated prepared_graph_utils.py bug this test suite is already
+        # blocked on elsewhere (see the other failing tests in this class).
+        data_dir = str(tmp_path / "data5")
+        pddl_dir = str(tmp_path / "pddl5")
+        custom = AnalysisConfig(attr_precondition_min_firings=99, ignored_attributes={"custom_attr"})
+
+        captured = {}
+        original = pipeline_module.find_best_config
+
+        def _spy(*args, **kwargs):
+            captured["base_config"] = kwargs.get("base_config")
+            return original(*args, **kwargs)
+
+        with patch("pipeline.find_best_config", side_effect=_spy):
+            Pipeline().run(
+                log_path=xes_path,
+                data_dir=data_dir,
+                pddl_output_dir=pddl_dir,
+                coverage_percentage=0.8,
+                search=True,
+                search_n_trials=2,
+                search_seed=0,
+                config=custom,
+            )
+
+        assert captured["base_config"] is custom
+        assert captured["base_config"].attr_precondition_min_firings == 99
+        assert captured["base_config"].ignored_attributes == {"custom_attr"}

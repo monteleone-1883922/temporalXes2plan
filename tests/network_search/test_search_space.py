@@ -195,3 +195,79 @@ class TestExcludedFieldsStayAtDefault:
             assert cfg.ignored_attributes == default.ignored_attributes
             assert cfg.log_removed_effects == default.log_removed_effects
             assert cfg.snapshot_dir == default.snapshot_dir
+
+
+# ---------------------------------------------------------------------------
+# base_config: fields the search doesn't tune are sourced from it instead of
+# AnalysisConfig()'s hardcoded default -- lets Pipeline.run(search=True,
+# config=...) honor user-chosen values for those fields (GUI optimizer toggle).
+# ---------------------------------------------------------------------------
+
+CUSTOM_BASE_CONFIG = AnalysisConfig(
+    jenks_sample_size=12345,
+    kde_grid_points=222,
+    kde_extrema_order=9,
+    xor_screen_prune_branches=False,
+    lower_bound_prob_actions=0.0123,
+    replay_engine="alignments",
+    replay_alignment_variant="dijkstra_no_heuristics",
+    ignored_attributes={"custom_attr"},
+    attr_precondition_min_frequency=0.42,
+    attr_precondition_min_firings=99,
+    log_removed_effects=False,
+    snapshot_dir="custom_snapshot_dir",
+)
+
+
+@pytest.fixture(scope="module")
+def configs_with_base_config():
+    def objective(trial: optuna.Trial) -> float:
+        configs_with_base_config.result.append(
+            suggest_config(trial, base_config=CUSTOM_BASE_CONFIG)
+        )
+        return 0.0
+
+    configs_with_base_config.result = []
+    study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=1))
+    study.optimize(objective, n_trials=N_TRIALS)
+    return configs_with_base_config.result
+
+
+class TestBaseConfigOverride:
+    def test_untouched_fields_equal_base_config(self, configs_with_base_config):
+        for cfg in configs_with_base_config:
+            assert cfg.jenks_sample_size == CUSTOM_BASE_CONFIG.jenks_sample_size
+            assert cfg.kde_grid_points == CUSTOM_BASE_CONFIG.kde_grid_points
+            assert cfg.kde_extrema_order == CUSTOM_BASE_CONFIG.kde_extrema_order
+            assert cfg.xor_screen_prune_branches == CUSTOM_BASE_CONFIG.xor_screen_prune_branches
+            assert cfg.lower_bound_prob_actions == CUSTOM_BASE_CONFIG.lower_bound_prob_actions
+            assert cfg.replay_engine == CUSTOM_BASE_CONFIG.replay_engine
+            assert cfg.replay_alignment_variant == CUSTOM_BASE_CONFIG.replay_alignment_variant
+            assert cfg.ignored_attributes == CUSTOM_BASE_CONFIG.ignored_attributes
+            assert cfg.attr_precondition_min_frequency == CUSTOM_BASE_CONFIG.attr_precondition_min_frequency
+            assert cfg.attr_precondition_min_firings == CUSTOM_BASE_CONFIG.attr_precondition_min_firings
+            assert cfg.log_removed_effects == CUSTOM_BASE_CONFIG.log_removed_effects
+            assert cfg.snapshot_dir == CUSTOM_BASE_CONFIG.snapshot_dir
+
+    def test_tuned_fields_still_vary(self, configs_with_base_config):
+        # base_config must not leak into the 27 Optuna-tuned fields.
+        assert len({cfg.probability_min_samples for cfg in configs_with_base_config}) > 1
+        assert len({cfg.xor_prune_threshold for cfg in configs_with_base_config}) > 1
+        assert len({cfg.dt_prune_orphan_mode for cfg in configs_with_base_config}) > 1
+
+    def test_correlation_constraints_still_hold(self, configs_with_base_config):
+        assert all(
+            cfg.dt_min_samples >= cfg.probability_min_samples for cfg in configs_with_base_config
+        )
+        assert all(
+            cfg.dt_min_prob_to_use >= cfg.xor_prune_threshold - 1e-9
+            for cfg in configs_with_base_config
+        )
+
+    def test_none_base_config_behaves_like_default(self):
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=2))
+        trial = study.ask()
+        cfg = suggest_config(trial, base_config=None)
+        default = AnalysisConfig()
+        assert cfg.jenks_sample_size == default.jenks_sample_size
+        assert cfg.snapshot_dir == default.snapshot_dir

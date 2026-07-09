@@ -9,6 +9,8 @@ docs/network_improvement_loop_plan.md §4 for this module's role in the loop.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import optuna
 
 from models import AnalysisConfig
@@ -25,7 +27,7 @@ _DT_PRUNE_MIN_LEAF_SAMPLES_CHOICES = [1, 2, 3, 5, 8, 10, 15, 20]
 _EFFECT_MODE_CHOICES = ["duplicate", "duplicate_no_cost"]
 
 
-def suggest_config(trial: optuna.Trial) -> AnalysisConfig:
+def suggest_config(trial: optuna.Trial, base_config: Optional[AnalysisConfig] = None) -> AnalysisConfig:
     """Build one candidate AnalysisConfig from an Optuna trial.
 
     Two pairs of parameters are reparametrized as base + non-negative offset
@@ -45,8 +47,10 @@ def suggest_config(trial: optuna.Trial) -> AnalysisConfig:
     (replay_engine/replay_alignment_variant, jenks_sample_size/kde_grid_points/
     kde_extrema_order, the dead
     attr_precondition_*/effect_appearance_threshold/xor_screen_prune_branches
-    fields, and fixed/logging/path fields) is left at its AnalysisConfig()
-    default.
+    fields, and fixed/logging/path fields) is sourced from `base_config`
+    (or from `AnalysisConfig()`'s own default when `base_config` is None) —
+    this lets a caller (`Pipeline.run(search=True, config=...)`) supply
+    user-chosen values for fields Optuna doesn't tune.
     """
     # --- §4.2 fallback statistico e attributi "statici" ---
     # probability_min_samples is also the base for the dt_min_samples
@@ -122,6 +126,8 @@ def suggest_config(trial: optuna.Trial) -> AnalysisConfig:
     gvf_target = trial.suggest_float("gvf_target", 0.80, 0.98, step=0.02)
     min_gvf_improvement = trial.suggest_float("min_gvf_improvement", 0.005, 0.03, step=0.005)
 
+    base = base_config if base_config is not None else AnalysisConfig()
+
     return AnalysisConfig(
         dt_min_samples=dt_min_samples,
         dt_min_prob_to_use=dt_min_prob_to_use,
@@ -150,4 +156,18 @@ def suggest_config(trial: optuna.Trial) -> AnalysisConfig:
         min_gvf_threshold=min_gvf_threshold,
         gvf_target=gvf_target,
         min_gvf_improvement=min_gvf_improvement,
+        # --- fields Optuna doesn't tune: sourced from base_config, not a
+        # hardcoded default (docs/network_improvement_loop.md §4.6/§4.7) ---
+        jenks_sample_size=base.jenks_sample_size,
+        kde_grid_points=base.kde_grid_points,
+        kde_extrema_order=base.kde_extrema_order,
+        xor_screen_prune_branches=base.xor_screen_prune_branches,
+        lower_bound_prob_actions=base.lower_bound_prob_actions,
+        replay_engine=base.replay_engine,
+        replay_alignment_variant=base.replay_alignment_variant,
+        ignored_attributes=base.ignored_attributes,
+        attr_precondition_min_frequency=base.attr_precondition_min_frequency,
+        attr_precondition_min_firings=base.attr_precondition_min_firings,
+        log_removed_effects=base.log_removed_effects,
+        snapshot_dir=base.snapshot_dir,
     )

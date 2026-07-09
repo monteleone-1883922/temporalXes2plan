@@ -106,6 +106,7 @@ def _evaluate_rung1(
     coverage_percentage: float,
     discovery_algorithm: str,
     original_activity_names: Optional[Set[str]],
+    base_config: Optional[AnalysisConfig] = None,
 ) -> _Rung1Result:
     """Cheap phase: build the network, compute what's knowable without replay.
 
@@ -114,7 +115,7 @@ def _evaluate_rung1(
     both the ranking key for promotion and, for trials that end up
     discarded, the value reported to Optuna and stored as TrialRecord.score.
     """
-    config = suggest_config(trial)
+    config = suggest_config(trial, base_config=base_config)
     parser = Parser(
         log_path=training_log_path,
         coverage_percentage=coverage_percentage,
@@ -244,6 +245,7 @@ def find_best_config(
     round_size: int = 20,
     promotion_fraction: float = 0.35,
     min_promoted: int = 15,
+    base_config: Optional[AnalysisConfig] = None,
 ) -> Tuple[AnalysisConfig, List[TrialRecord]]:
     """Successive Halving loop (phase 5) — docs/network_improvement_loop_plan.md §7.
 
@@ -271,6 +273,11 @@ def find_best_config(
 
     Returns (best_config, every TrialRecord in trial order) — best_config is
     picked by .score, ties broken by whichever trial ran first.
+
+    base_config: fields Optuna doesn't tune (see search_space.py's
+    docstring) are taken from this config as-is for every trial instead of
+    AnalysisConfig()'s hardcoded defaults. Defaults to None (equivalent to
+    AnalysisConfig()).
     """
     weights = weights or ScoreWeights()
 
@@ -287,6 +294,7 @@ def find_best_config(
             _evaluate_rung1(
                 trial, training_log_path, weights,
                 coverage_percentage, discovery_algorithm, original_activity_names,
+                base_config=base_config,
             )
             for trial in trials
         ]

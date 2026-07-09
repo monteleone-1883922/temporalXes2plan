@@ -285,3 +285,43 @@ class TestSuccessiveHalvingPromotion:
         best_record = max(sh_records, key=lambda r: r.score)
         assert best_config == best_record.config
         assert best_record.promoted_to_rung2
+
+
+# ---------------------------------------------------------------------------
+# base_config propagation (GUI optimizer toggle: fields the search doesn't
+# tune must come from the caller's base config, not AnalysisConfig()'s
+# hardcoded default) -- see search_space.py's TestBaseConfigOverride for the
+# suggest_config()-level test; this checks find_best_config() threads it
+# through its ask/tell loop correctly.
+# ---------------------------------------------------------------------------
+
+CUSTOM_BASE_CONFIG = AnalysisConfig(
+    replay_engine="alignments",
+    snapshot_dir="custom_snapshot_dir",
+    ignored_attributes={"custom_attr"},
+)
+
+
+@pytest.fixture(scope="module")
+def base_config_search_result(split_result) -> Tuple[AnalysisConfig, List[TrialRecord]]:
+    return find_best_config(
+        training_log_path=str(split_result.train_path),
+        test_traces=split_result.test_cases,
+        n_trials=3,
+        base_config=CUSTOM_BASE_CONFIG,
+    )
+
+
+@pytest.mark.integration
+class TestBaseConfigPropagation:
+    def test_every_trial_config_carries_base_config_untouched_fields(self, base_config_search_result):
+        _, records = base_config_search_result
+        for record in records:
+            assert record.config.replay_engine == CUSTOM_BASE_CONFIG.replay_engine
+            assert record.config.snapshot_dir == CUSTOM_BASE_CONFIG.snapshot_dir
+            assert record.config.ignored_attributes == CUSTOM_BASE_CONFIG.ignored_attributes
+
+    def test_best_config_also_carries_base_config_untouched_fields(self, base_config_search_result):
+        best_config, _ = base_config_search_result
+        assert best_config.replay_engine == CUSTOM_BASE_CONFIG.replay_engine
+        assert best_config.snapshot_dir == CUSTOM_BASE_CONFIG.snapshot_dir

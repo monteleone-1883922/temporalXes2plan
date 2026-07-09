@@ -63,8 +63,14 @@ class Pipeline:
             use_durative: Encode durative actions when True.
             use_costs: Include action cost effects and functions section when True.
             use_activity_classifier: Combine concept:name + lifecycle:transition as label.
-            config: Analysis configuration; defaults to AnalysisConfig(). Ignored
-                when search=True (network_search picks the config instead).
+            config: Analysis configuration. When search=False, used directly
+                (defaults to AnalysisConfig() if omitted). When search=True,
+                used as the *base* config: fields network_search's search
+                space does not tune (see network_search/search_space.py's
+                docstring for the exact list) are taken from this config
+                instead of AnalysisConfig()'s hardcoded defaults; the ~27
+                fields Optuna does tune are still picked by the search
+                regardless of what this config sets for them.
             search: When True, run network_search.runner.find_best_config() to
                 pick the AnalysisConfig instead of using `config` directly — see
                 docs/network_improvement_loop.md/docs/network_improvement_loop_plan.md §0.
@@ -91,6 +97,7 @@ class Pipeline:
         if search:
             logger.info("Step 0/5: Searching for the best AnalysisConfig (%d trials)", search_n_trials)
             original_activity_names = utils.activity_names(log_path)
+            base_config = config or AnalysisConfig()
             with utils.split(log_path, test_pct=search_test_pct, seed=search_seed) as split_result:
                 config, _trial_records = find_best_config(
                     training_log_path=str(split_result.train_path),
@@ -100,6 +107,7 @@ class Pipeline:
                     weights=search_weights,
                     coverage_percentage=coverage_percentage,
                     discovery_algorithm=discovery_algorithm,
+                    base_config=base_config,
                 )
         else:
             config = config or AnalysisConfig()
