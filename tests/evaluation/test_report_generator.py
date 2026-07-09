@@ -55,6 +55,8 @@ def _make_log_result(
     pipeline_ok=True,
     pipeline_error=None,
     queries=None,
+    used_optimizer=False,
+    search_summary=None,
 ) -> LogResult:
     return LogResult(
         log_id=log_id,
@@ -66,6 +68,8 @@ def _make_log_result(
         pipeline_ok=pipeline_ok,
         pipeline_error=pipeline_error,
         queries=queries or [_make_query_result()],
+        used_optimizer=used_optimizer,
+        search_summary=search_summary,
     )
 
 
@@ -92,8 +96,25 @@ class TestWriteLogResult:
         data = json.loads((tmp_path / "1" / "result.json").read_text())
         for key in ("log_id", "log_name", "log_fmt", "n_train_cases",
                     "n_test_cases", "n_activities", "pipeline_ok",
-                    "pipeline_error", "queries"):
+                    "pipeline_error", "queries", "used_optimizer", "search_summary"):
             assert key in data, f"Missing key: {key}"
+
+    def test_used_optimizer_and_search_summary_serialized(self, tmp_path):
+        lr = _make_log_result(
+            log_id="1", used_optimizer=True,
+            search_summary={"n_trials": 30, "best_score": 4.2, "best_trial_number": 3},
+        )
+        write_log_result("1", lr, tmp_path)
+        data = json.loads((tmp_path / "1" / "result.json").read_text())
+        assert data["used_optimizer"] is True
+        assert data["search_summary"] == {"n_trials": 30, "best_score": 4.2, "best_trial_number": 3}
+
+    def test_used_optimizer_defaults_false_and_search_summary_none(self, tmp_path):
+        lr = _make_log_result(log_id="1")
+        write_log_result("1", lr, tmp_path)
+        data = json.loads((tmp_path / "1" / "result.json").read_text())
+        assert data["used_optimizer"] is False
+        assert data["search_summary"] is None
 
     def test_result_json_queries_list(self, tmp_path):
         lr = _make_log_result(log_id="1")

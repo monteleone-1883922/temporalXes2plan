@@ -1,11 +1,19 @@
-"""Unit tests for evaluation.test_case_selector."""
+"""Unit tests for evaluation.test_case_selector.split — the evaluation-specific
+wrapper (min/max test-case clamping + minimum test-trace length) around
+core_utils's general-purpose split building blocks.
+
+_load_log is looked up in evaluation.test_case_selector's own namespace
+(imported there via `from core_utils import _load_log`), so it must be
+patched there; pm4py.write_xes/tempfile.NamedTemporaryFile execute inside
+core_utils._build_train_test_split, so those are patched on core_utils.
+"""
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pm4py
 
-from evaluation.test_case_selector import TrainTestSplit, split, _stratified_sample_indices
+from evaluation.test_case_selector import TrainTestSplit, split
 
 
 # ---------------------------------------------------------------------------
@@ -33,10 +41,10 @@ def _run_split(lengths, test_pct=0.2, min_test=1, max_test=1000, seed=0, min_len
     """Helper: run split() with a synthetic in-memory log via mocks."""
     log = _make_log(lengths)
     with patch("evaluation.test_case_selector._load_log", return_value=log), \
-         patch("evaluation.test_case_selector.pm4py.write_xes"):
+         patch("core_utils.pm4py.write_xes"):
         with tempfile.NamedTemporaryFile(suffix=".xes", delete=False) as f:
             tmp = Path(f.name)
-        with patch("evaluation.test_case_selector.tempfile.NamedTemporaryFile") as mock_ntf:
+        with patch("core_utils.tempfile.NamedTemporaryFile") as mock_ntf:
             mock_ntf.return_value.name = str(tmp)
             s = split("fake.xes", test_pct=test_pct, min_test_cases=min_test,
                       max_test_cases=max_test, seed=seed, min_test_trace_length=min_len)
@@ -46,62 +54,10 @@ def _run_split(lengths, test_pct=0.2, min_test=1, max_test=1000, seed=0, min_len
 
 
 # ---------------------------------------------------------------------------
-# _stratified_sample_indices (unit)
+# split() — clamping (evaluation-specific)
 # ---------------------------------------------------------------------------
 
-class TestStratifiedSampleIndices:
-    def test_returns_correct_count(self):
-        import random
-        traces = [_make_trace(i + 1, str(i)) for i in range(30)]
-        result = _stratified_sample_indices(traces, 10, random.Random(0))
-        assert len(result) == 10
-
-    def test_never_exceeds_available(self):
-        import random
-        traces = [_make_trace(1, str(i)) for i in range(5)]
-        result = _stratified_sample_indices(traces, 20, random.Random(0))
-        assert len(result) <= 5
-
-    def test_empty_log_returns_empty(self):
-        import random
-        result = _stratified_sample_indices([], 5, random.Random(0))
-        assert result == []
-
-    def test_result_sorted(self):
-        import random
-        traces = [_make_trace(i + 1, str(i)) for i in range(20)]
-        result = _stratified_sample_indices(traces, 8, random.Random(0))
-        assert result == sorted(result)
-
-    def test_indices_within_bounds(self):
-        import random
-        traces = [_make_trace(i + 1, str(i)) for i in range(20)]
-        result = _stratified_sample_indices(traces, 8, random.Random(0))
-        assert all(0 <= idx < len(traces) for idx in result)
-
-    def test_no_duplicates(self):
-        import random
-        traces = [_make_trace(i + 1, str(i)) for i in range(20)]
-        result = _stratified_sample_indices(traces, 8, random.Random(0))
-        assert len(result) == len(set(result))
-
-    def test_proportional_allocation_reflects_bucket_sizes(self):
-        """Larger buckets must contribute more samples than smaller ones."""
-        import random
-        # 90 long traces + 10 short traces → long bucket should dominate
-        traces = [_make_trace(10, str(i)) for i in range(90)]
-        traces += [_make_trace(1, str(i + 90)) for i in range(10)]
-        result = _stratified_sample_indices(traces, 20, random.Random(0))
-        long_selected = sum(1 for idx in result if idx < 90)
-        short_selected = sum(1 for idx in result if idx >= 90)
-        assert long_selected > short_selected
-
-
-# ---------------------------------------------------------------------------
-# split() — sizes and disjointness
-# ---------------------------------------------------------------------------
-
-class TestSplitSizes:
+class TestSplitClamping:
     def test_split_sizes_sum_to_total(self):
         # 30 traces, 20% = 6 test cases
         lengths = list(range(3, 33))
@@ -158,7 +114,7 @@ class TestSplitSizes:
 
 
 # ---------------------------------------------------------------------------
-# split() — short trace exclusion from test set
+# split() — short trace exclusion from test set (evaluation-specific)
 # ---------------------------------------------------------------------------
 
 class TestShortTraceExclusion:
@@ -184,7 +140,7 @@ class TestShortTraceExclusion:
 
 
 # ---------------------------------------------------------------------------
-# Context manager
+# Context manager (TrainTestSplit itself lives in core_utils, re-exported here)
 # ---------------------------------------------------------------------------
 
 class TestContextManager:
@@ -195,19 +151,6 @@ class TestContextManager:
         with s:
             assert train_file.exists()
         assert not train_file.exists()
-
-    def test_context_manager_returns_self(self, tmp_path):
-        train_file = tmp_path / "train.xes"
-        train_file.write_text("<log/>")
-        s = TrainTestSplit(train_path=train_file, test_cases=[], n_train=0, n_test=0)
-        with s as result:
-            assert result is s
-
-    def test_context_manager_tolerates_missing_file(self, tmp_path):
-        train_file = tmp_path / "nonexistent.xes"
-        s = TrainTestSplit(train_path=train_file, test_cases=[], n_train=0, n_test=0)
-        with s:
-            pass  # should not raise
 
 
 # ---------------------------------------------------------------------------

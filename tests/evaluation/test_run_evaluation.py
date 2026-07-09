@@ -1,7 +1,19 @@
-"""Unit tests for evaluation.run_evaluation."""
+"""Unit tests for evaluation.run_evaluation.
+
+evaluate_log() now builds the domain exactly once per log via
+EvalAPI.build_network() (a thin wrapper around pipeline.Pipeline.build_network(),
+which itself optionally runs the network_search optimizer) — unless
+data/<log_id>/current.json already exists, in which case it's reused as a
+cache and reconstructed via PreparedDomainInput.from_dict() +
+build_petrinet_model_from_prepared() + build_domain_with_variant_map()
+instead of re-parsing (see evaluation/run_evaluation.py's own module
+docstring / the "3-4. Build the domain" comment block). --force-rebuild
+bypasses that cache. Tests patch evaluation.run_evaluation.WEB_DATA_DIR to
+tmp_path so they never touch the real project data/ directory.
+"""
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,6 +26,8 @@ from evaluation.run_evaluation import (
     main,
 )
 from evaluation.report_generator import LogResult, QueryResult
+from models import AnalysisConfig
+from pipeline import BuildResult
 
 
 # ---------------------------------------------------------------------------
@@ -41,14 +55,13 @@ def _make_cfg(output_dir: Path, **overrides) -> EvalConfig:
         resume=False,
         cost_weight=0.001,
         csv_mapping=None,
-        force_rediscretize=False,
-        force_reanalysis=False,
+        force_rebuild=False,
     )
     defaults.update(overrides)
     return EvalConfig(**defaults)
 
 
-def _make_log_result_data(log_id="log_1", pipeline_ok=True):
+def _make_log_result_data(log_id="log_1", pipeline_ok=True, used_optimizer=False, search_summary=None):
     return {
         "log_id": log_id,
         "log_name": "Test Log",
@@ -58,6 +71,8 @@ def _make_log_result_data(log_id="log_1", pipeline_ok=True):
         "n_activities": 5,
         "pipeline_ok": pipeline_ok,
         "pipeline_error": None,
+        "used_optimizer": used_optimizer,
+        "search_summary": search_summary,
         "queries": [
             {
                 "query_id": f"{log_id}_case1_Q1",
@@ -75,15 +90,52 @@ def _make_log_result_data(log_id="log_1", pipeline_ok=True):
     }
 
 
-def _make_mock_api(missing_timestamp=False):
+def _make_serialized():
+    return {
+        "graph": {"nodes": [], "edges": []},
+        "transitions": {},
+        "attribute_catalog": {},
+        "metadata": {"start_place": "p_start", "end_place": "p_end"},
+    }
+
+
+def _make_domain_mock(text="(define (domain test))"):
+    """A PDDLDomain-like mock: str(domain) == text, and .write(path) actually
+    writes the file (mirroring encoding.pddl_model.PDDLDomain.write())."""
+    domain = MagicMock()
+    domain.__str__.return_value = text
+
+    def _write(path):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return text
+
+    domain.write.side_effect = _write
+    return domain
+
+
+def _make_build_result(n_activities=3, trial_records=None, domain_text="(define (domain test))"):
+    parse_result = MagicMock()
+    parse_result.petri_net_model.activities = list(range(n_activities))
+    return BuildResult(
+        parse_result=parse_result,
+        prepared=MagicMock(),
+        domain=_make_domain_mock(domain_text),
+        variant_map={},
+        config=AnalysisConfig(),
+        domain_name="test_process",
+        trial_records=trial_records,
+    )
+
+
+def _make_mock_api(missing_timestamp=False, build_result=None, serialized=None):
     api = MagicMock()
     vr = MagicMock()
     vr.missing_timestamp = missing_timestamp
     api.validate_log.return_value = vr
-    api.parse.return_value = MagicMock()
-    api.parse.return_value.petri_net_model.activities = {"a", "b", "c"}
-    api.build_domain.return_value = "(define (domain test))"
-    api.build_domain_with_variant_effects.return_value = ("(define (domain test))", {})
+    api.build_network.return_value = build_result or _make_build_result()
+    api.serialize.return_value = serialized if serialized is not None else _make_serialized()
     api.build_problem.return_value = "(define (problem p) (:domain test))"
     plan_result = MagicMock()
     plan_result.success = True
@@ -112,6 +164,87 @@ def _make_mock_tts(n_train=80, n_test=2):
     return tts
 
 
+def _make_replay_outcome(is_replayable=True):
+    outcome = MagicMock()
+    outcome.is_replayable = is_replayable
+    outcome.error_step = None
+    outcome.error_reason = None
+    outcome.steps = ["act_a"]
+    return outcome
+
+
+def _make_prefix():
+    prefix = MagicMock()
+    prefix.prefix_ratio = 0.5
+    prefix.prefix_events = [MagicMock()]
+    prefix.init_places = ["p_start"]
+    prefix.init_effects = []
+    prefix.full_duration_s = 3600.0
+    prefix.prefix_duration_s = 1000.0
+    prefix.final_event_attributes = {}
+    prefix.is_replayable = True
+    return prefix
+
+
+def _make_q1_spec():
+    q1_spec = MagicMock()
+    q1_spec.query_type = "Q1"
+    q1_spec.init_places = ["p_start"]
+    q1_spec.init_effects = []
+    q1_spec.goal_sop = [[]]
+    q1_spec.metric = "minimize_weighted"
+    q1_spec.cost_weight = 0.001
+    q1_spec.require_completion = True
+    q1_spec.deadline = None
+    return q1_spec
+
+
+def _patched_evaluate_log(*, api, cfg, tmp_path, log_id="log_1", n_test=2, prefix=None,
+                           mock_prefix=True):
+    """Context-manager-returning helper: patches every collaborator
+    evaluate_log() calls (except the cache-reconstruction trio, which only
+    the cache-hit tests need — see _patch_cache_reconstruction)."""
+    q1_spec = _make_q1_spec()
+    prefix_value = (prefix or _make_prefix()) if mock_prefix else None
+    return patch.multiple(
+        "evaluation.run_evaluation",
+        WEB_DATA_DIR=tmp_path / "data",
+        _split_log=MagicMock(return_value=_make_mock_tts(n_test=n_test)),
+        _sample_prefix=MagicMock(return_value=prefix_value),
+        build_q1=MagicMock(return_value=q1_spec),
+        build_q2=MagicMock(return_value=None),
+        build_q3=MagicMock(return_value=None),
+        q1_metrics=MagicMock(return_value={"solved": True, "weighted_objective": 1.0}),
+        replay_plan=MagicMock(return_value=_make_replay_outcome()),
+        TraceReplayer=MagicMock(),
+    )
+
+
+def _patch_cache_reconstruction(n_activities=9, domain_text="(define (domain cached))"):
+    """Patches the three functions the cache-hit branch uses to reconstruct
+    prepared/petri_net_model/domain straight from current.json, without a
+    real PreparedDomainInput/pm4py PetriNet."""
+    prepared = MagicMock()
+    petri_net_model = MagicMock()
+    petri_net_model.activities = list(range(n_activities))
+    domain = _make_domain_mock(domain_text)
+    return patch.multiple(
+        "evaluation.run_evaluation",
+        PreparedDomainInput=MagicMock(**{"from_dict.return_value": prepared}),
+        build_petrinet_model_from_prepared=MagicMock(return_value=petri_net_model),
+        build_domain_with_variant_map=MagicMock(return_value=(domain, {})),
+    )
+
+
+def _write_cached_current_json(tmp_path, log_id="log_1"):
+    data_dir = tmp_path / "data" / log_id
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "current.json").write_text(
+        json.dumps(_make_serialized()), encoding="utf-8"
+    )
+    return data_dir
+
+
 # ---------------------------------------------------------------------------
 # _load_log_result
 # ---------------------------------------------------------------------------
@@ -137,9 +270,26 @@ class TestLoadLogResult:
         lr = _load_log_result(data)
         assert lr.queries == []
 
+    def test_used_optimizer_and_search_summary_round_trip(self):
+        data = _make_log_result_data(
+            used_optimizer=True,
+            search_summary={"n_trials": 30, "best_score": 4.2, "best_trial_number": 7},
+        )
+        lr = _load_log_result(data)
+        assert lr.used_optimizer is True
+        assert lr.search_summary == {"n_trials": 30, "best_score": 4.2, "best_trial_number": 7}
+
+    def test_used_optimizer_defaults_false_when_absent(self):
+        data = _make_log_result_data()
+        del data["used_optimizer"]
+        del data["search_summary"]
+        lr = _load_log_result(data)
+        assert lr.used_optimizer is False
+        assert lr.search_summary is None
+
 
 # ---------------------------------------------------------------------------
-# evaluate_log — missing timestamps
+# evaluate_log — missing timestamps / validate_log failure
 # ---------------------------------------------------------------------------
 
 class TestEvaluateLogMissingTimestamps:
@@ -166,37 +316,41 @@ class TestEvaluateLogMissingTimestamps:
 
 
 # ---------------------------------------------------------------------------
-# evaluate_log — pipeline failures
+# evaluate_log — build failures (build-fresh and cache-hit paths)
 # ---------------------------------------------------------------------------
 
-class TestEvaluateLogPipelineFailures:
-    def test_parse_exception_marks_failed(self, tmp_path):
+class TestEvaluateLogBuildFailures:
+    def test_build_network_exception_marks_failed(self, tmp_path):
         api = _make_mock_api()
-        api.parse.side_effect = RuntimeError("parse failed")
+        api.build_network.side_effect = RuntimeError("build failed")
         cfg = _make_cfg(tmp_path)
 
-        with patch("evaluation.run_evaluation._split_log") as mock_split:
-            mock_split.return_value = _make_mock_tts()
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path):
             lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
 
         assert lr.pipeline_ok is False
-        assert "parse failed" in lr.pipeline_error
+        assert "build failed" in lr.pipeline_error
 
-    def test_build_domain_exception_marks_failed(self, tmp_path):
+    def test_cache_hit_reconstruction_exception_marks_failed(self, tmp_path):
+        # current.json exists, but reconstructing the domain from it fails.
+        _write_cached_current_json(tmp_path)
         api = _make_mock_api()
-        api.build_domain_with_variant_effects.side_effect = RuntimeError("domain failed")
         cfg = _make_cfg(tmp_path)
 
-        with patch("evaluation.run_evaluation._split_log") as mock_split:
-            mock_split.return_value = _make_mock_tts()
+        with (
+            _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path),
+            patch("evaluation.run_evaluation.build_domain_with_variant_map",
+                  side_effect=RuntimeError("bad cache")),
+        ):
             lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
 
         assert lr.pipeline_ok is False
-        assert "domain failed" in lr.pipeline_error
+        assert "bad cache" in lr.pipeline_error
+        api.build_network.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# evaluate_log — successful flow
+# evaluate_log — successful flow (build-fresh path, no current.json cached)
 # ---------------------------------------------------------------------------
 
 class TestEvaluateLogSuccess:
@@ -204,46 +358,7 @@ class TestEvaluateLogSuccess:
         api = _make_mock_api()
         cfg = _make_cfg(tmp_path)
 
-        prefix = MagicMock()
-        prefix.prefix_ratio = 0.5
-        prefix.prefix_events = [MagicMock(), MagicMock()]
-        prefix.init_places = ["p_start"]
-        prefix.init_effects = []
-        prefix.full_duration_s = 3600.0
-        prefix.prefix_duration_s = 1000.0
-        prefix.final_event_attributes = {}
-
-        q1_spec = MagicMock()
-        q1_spec.query_type = "Q1"
-        q1_spec.init_places = ["p_start"]
-        q1_spec.init_effects = []
-        q1_spec.goal_sop = [[]]
-        q1_spec.metric = "minimize_weighted"
-        q1_spec.cost_weight = 0.001
-        q1_spec.require_completion = True
-        q1_spec.deadline = None
-
-        with (
-            patch("evaluation.run_evaluation._split_log") as mock_split,
-            patch("evaluation.run_evaluation._sample_prefix") as mock_prefix_fn,
-            patch("evaluation.run_evaluation.build_q1", return_value=q1_spec),
-            patch("evaluation.run_evaluation.build_q2", return_value=None),
-            patch("evaluation.run_evaluation.build_q3", return_value=None),
-            patch("evaluation.run_evaluation.q1_metrics", return_value={"solved": True, "weighted_objective": 1.0}),
-            patch("evaluation.run_evaluation.validate_plan") as mock_validate,
-            patch("evaluation.run_evaluation.serialize_parse_result", return_value={"transitions": {}, "attribute_catalog": {}, "metadata": {"end_place": "p_end"}, "graph": {}}),
-        ):
-            mock_split.return_value = _make_mock_tts(n_test=n_test)
-            mock_prefix_fn.return_value = prefix if mock_prefix else None
-            vr = MagicMock()
-            vr.valid = True
-            vr.attribute_checked = True
-            vr.error_step = None
-            vr.error_action = None
-            vr.error_reason = None
-            vr.steps_executed = 1
-            mock_validate.return_value = vr
-
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=n_test, mock_prefix=mock_prefix):
             lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
 
         return lr
@@ -252,13 +367,28 @@ class TestEvaluateLogSuccess:
         lr = self._run(tmp_path)
         assert lr.pipeline_ok is True
 
-    def test_n_activities_from_parse_result(self, tmp_path):
+    def test_n_activities_from_build_result(self, tmp_path):
         lr = self._run(tmp_path)
-        assert lr.n_activities == 3  # {"a", "b", "c"}
+        assert lr.n_activities == 3  # _make_build_result()'s default
 
-    def test_domain_pddl_written(self, tmp_path):
+    def test_domain_pddl_written_under_data_dir(self, tmp_path):
         self._run(tmp_path)
-        assert (tmp_path / "log_1" / "domain.pddl").exists()
+        assert (tmp_path / "data" / "log_1" / "pddl" / "domain.pddl").exists()
+
+    def test_current_json_published_under_data_dir(self, tmp_path):
+        self._run(tmp_path)
+        assert (tmp_path / "data" / "log_1" / "current.json").exists()
+
+    def test_no_domain_pddl_written_under_output_dir(self, tmp_path):
+        # Dedup guard: the domain/network must live only under data/<log_id>/,
+        # never duplicated under the results output_dir.
+        self._run(tmp_path)
+        assert not (tmp_path / "log_1" / "domain.pddl").exists()
+        assert not (tmp_path / "log_1" / "current.json").exists()
+
+    def test_used_optimizer_true_by_default(self, tmp_path):
+        lr = self._run(tmp_path)
+        assert lr.used_optimizer is True
 
     def test_skipped_trace_produces_no_queries(self, tmp_path):
         lr = self._run(tmp_path, n_test=2, mock_prefix=False)
@@ -268,47 +398,7 @@ class TestEvaluateLogSuccess:
         api = _make_mock_api()
         cfg = _make_cfg(tmp_path)
 
-        prefix = MagicMock()
-        prefix.prefix_ratio = 0.5
-        prefix.prefix_events = [MagicMock()]
-        prefix.init_places = ["p_start"]
-        prefix.init_effects = []
-        prefix.full_duration_s = 3600.0
-        prefix.prefix_duration_s = 1000.0
-        prefix.final_event_attributes = {}
-
-        q_spec = MagicMock()
-        q_spec.query_type = "Q1"
-        q_spec.init_places = ["p_start"]
-        q_spec.init_effects = []
-        q_spec.goal_sop = [[]]
-        q_spec.metric = "minimize_weighted"
-        q_spec.cost_weight = 0.001
-        q_spec.require_completion = True
-        q_spec.deadline = None
-
-        with (
-            patch("evaluation.run_evaluation._split_log") as mock_split,
-            patch("evaluation.run_evaluation._sample_prefix", return_value=prefix),
-            patch("evaluation.run_evaluation.build_q1", return_value=q_spec),
-            patch("evaluation.run_evaluation.build_q2", return_value=None),
-            patch("evaluation.run_evaluation.build_q3", return_value=None),
-            patch("evaluation.run_evaluation.q1_metrics", return_value={"solved": True, "weighted_objective": 1.0}),
-            patch("evaluation.run_evaluation.validate_plan") as mock_vp,
-            patch("evaluation.run_evaluation.serialize_parse_result", return_value={
-                "transitions": {}, "attribute_catalog": {},
-                "metadata": {"end_place": "p_end"}, "graph": {},
-            }),
-        ):
-            mock_split.return_value = _make_mock_tts(n_test=1)
-            vr = MagicMock()
-            vr.valid = True
-            vr.error_step = None
-            vr.error_action = None
-            vr.error_reason = None
-            vr.steps_executed = 1
-            mock_vp.return_value = vr
-
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1):
             lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
 
         q3_records = [q for q in lr.queries if q.query_type == "Q3"]
@@ -317,127 +407,96 @@ class TestEvaluateLogSuccess:
 
 
 # ---------------------------------------------------------------------------
-# evaluate_log — reuse existing Petri net / domain / attributes
-# (current.json, domain.pddl, model_cache.json) unless --force-reanalysis
+# evaluate_log — current.json cache (skip parse/encode/optimizer when it
+# already exists, unless force_rebuild)
 # ---------------------------------------------------------------------------
 
-class TestEvaluateLogModelReuse:
-    def _write_existing_model(self, tmp_path, log_id="log_1", n_activities=7):
-        log_dir = tmp_path / log_id
-        log_dir.mkdir(parents=True, exist_ok=True)
-        (log_dir / "domain.pddl").write_text("(define (domain cached))", encoding="utf-8")
-        (log_dir / "current.json").write_text(
-            json.dumps({
-                "transitions": {}, "attribute_catalog": {},
-                "metadata": {"end_place": "p_end"}, "graph": {},
-            }),
-            encoding="utf-8",
-        )
-        (log_dir / "model_cache.json").write_text(
-            json.dumps({"n_activities": n_activities, "variant_effects": {"act_a": {"x": 1}}}),
-            encoding="utf-8",
-        )
-        return log_dir
-
-    def _run(self, tmp_path, cfg_overrides=None, pre_write=True, n_activities=7):
+class TestEvaluateLogCache:
+    def test_uses_cache_when_current_json_exists(self, tmp_path):
+        _write_cached_current_json(tmp_path)
         api = _make_mock_api()
-        cfg = _make_cfg(tmp_path, **(cfg_overrides or {}))
-
-        if pre_write:
-            self._write_existing_model(tmp_path, n_activities=n_activities)
-
-        prefix = MagicMock()
-        prefix.prefix_ratio = 0.5
-        prefix.prefix_events = [MagicMock()]
-        prefix.init_places = ["p_start"]
-        prefix.init_effects = []
-        prefix.full_duration_s = 3600.0
-        prefix.prefix_duration_s = 1000.0
-        prefix.final_event_attributes = {}
-
-        q1_spec = MagicMock()
-        q1_spec.query_type = "Q1"
-        q1_spec.init_places = ["p_start"]
-        q1_spec.init_effects = []
-        q1_spec.goal_sop = [[]]
-        q1_spec.metric = "minimize_weighted"
-        q1_spec.cost_weight = 0.001
-        q1_spec.require_completion = True
-        q1_spec.deadline = None
+        cfg = _make_cfg(tmp_path)
 
         with (
-            patch("evaluation.run_evaluation._split_log") as mock_split,
-            patch("evaluation.run_evaluation._sample_prefix", return_value=prefix),
-            patch("evaluation.run_evaluation.build_q1", return_value=q1_spec),
-            patch("evaluation.run_evaluation.build_q2", return_value=None),
-            patch("evaluation.run_evaluation.build_q3", return_value=None),
-            patch("evaluation.run_evaluation.q1_metrics", return_value={"solved": True, "weighted_objective": 1.0}),
-            patch("evaluation.run_evaluation.validate_plan") as mock_validate,
-            patch("evaluation.run_evaluation.serialize_parse_result", return_value={
-                "transitions": {}, "attribute_catalog": {},
-                "metadata": {"end_place": "p_end"}, "graph": {},
-            }),
+            _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1),
+            _patch_cache_reconstruction(n_activities=9),
         ):
-            mock_split.return_value = _make_mock_tts(n_test=1)
-            vr = MagicMock()
-            vr.valid = True
-            vr.attribute_checked = True
-            vr.error_step = None
-            vr.error_action = None
-            vr.error_reason = None
-            vr.steps_executed = 1
-            mock_validate.return_value = vr
-
             lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
 
-        return lr, api
-
-    def test_reuses_existing_model_when_present(self, tmp_path):
-        lr, api = self._run(tmp_path, n_activities=7)
-        api.parse.assert_not_called()
-        api.build_domain_with_variant_effects.assert_not_called()
-        assert lr.n_activities == 7  # from model_cache.json, not the mocked parse (3)
-
-    def test_reused_run_still_produces_queries(self, tmp_path):
-        lr, _ = self._run(tmp_path, n_activities=7)
+        api.build_network.assert_not_called()
         assert lr.pipeline_ok is True
+        assert lr.n_activities == 9  # from the cache-reconstruction mock, not the api mock's build_network (3)
+        assert lr.used_optimizer is False
+        assert lr.search_summary is None
+
+    def test_builds_fresh_when_no_current_json(self, tmp_path):
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1):
+            evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
+
+        api.build_network.assert_called_once()
+
+    def test_force_rebuild_bypasses_cache(self, tmp_path):
+        _write_cached_current_json(tmp_path)
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path, force_rebuild=True)
+
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1):
+            evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
+
+        api.build_network.assert_called_once()
+
+    def test_cache_hit_still_produces_queries(self, tmp_path):
+        _write_cached_current_json(tmp_path)
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+
+        with (
+            _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1),
+            _patch_cache_reconstruction(),
+        ):
+            lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
+
         q1_records = [q for q in lr.queries if q.query_type == "Q1"]
         assert len(q1_records) == 1
 
-    def test_force_reanalysis_rebuilds_even_if_present(self, tmp_path):
-        lr, api = self._run(tmp_path, cfg_overrides={"force_reanalysis": True}, n_activities=7)
-        api.parse.assert_called_once()
-        api.build_domain_with_variant_effects.assert_called_once()
-        assert lr.n_activities == 3  # from the freshly mocked parse result {"a", "b", "c"}
 
-    def test_force_reanalysis_overwrites_cached_files(self, tmp_path):
-        self._run(tmp_path, cfg_overrides={"force_reanalysis": True}, n_activities=7)
-        domain_text = (tmp_path / "log_1" / "domain.pddl").read_text(encoding="utf-8")
-        assert domain_text == "(define (domain test))"  # written by the fresh build, not "cached"
+# ---------------------------------------------------------------------------
+# evaluate_log — search_summary / search_config.json when the optimizer runs
+# ---------------------------------------------------------------------------
 
-    def test_missing_model_cache_triggers_rebuild(self, tmp_path):
-        # current.json + domain.pddl present but model_cache.json absent — not
-        # enough info (variant_effects/n_activities) to safely skip discovery.
-        log_dir = self._write_existing_model(tmp_path, n_activities=7)
-        (log_dir / "model_cache.json").unlink()
+class TestEvaluateLogSearchSummary:
+    def test_search_summary_and_search_config_written_when_trial_records_present(self, tmp_path):
+        trial_a = MagicMock(score=1.0, trial_number=0)
+        trial_b = MagicMock(score=4.2, trial_number=1)
+        build_result = _make_build_result(trial_records=[trial_a, trial_b])
+        api = _make_mock_api(build_result=build_result)
+        cfg = _make_cfg(tmp_path, search_n_trials=2)
 
-        lr, api = self._run(tmp_path, pre_write=False)
-        api.parse.assert_called_once()
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1):
+            lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
 
-    def test_missing_domain_pddl_triggers_rebuild(self, tmp_path):
-        log_dir = self._write_existing_model(tmp_path, n_activities=7)
-        (log_dir / "domain.pddl").unlink()
+        assert lr.used_optimizer is True
+        assert lr.search_summary == {"n_trials": 2, "best_score": 4.2, "best_trial_number": 1}
+        search_config_path = tmp_path / "log_1" / "search_config.json"
+        assert search_config_path.exists()
+        saved = json.loads(search_config_path.read_text(encoding="utf-8"))
+        assert "ignored_attributes" in saved
+        assert isinstance(saved["ignored_attributes"], list)
 
-        lr, api = self._run(tmp_path, pre_write=False)
-        api.parse.assert_called_once()
+    def test_no_optimizer_means_no_search_summary(self, tmp_path):
+        build_result = _make_build_result(trial_records=None)
+        api = _make_mock_api(build_result=build_result)
+        cfg = _make_cfg(tmp_path, use_optimizer=False)
 
-    def test_fresh_build_writes_model_cache(self, tmp_path):
-        self._run(tmp_path, pre_write=False)
-        cache_path = tmp_path / "log_1" / "model_cache.json"
-        assert cache_path.exists()
-        cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        assert cache["n_activities"] == 3
-        assert cache["variant_effects"] == {}
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1):
+            lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
+
+        assert lr.used_optimizer is False
+        assert lr.search_summary is None
+        assert not (tmp_path / "log_1" / "search_config.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -551,13 +610,13 @@ class TestCLIParsing:
         args = build_parser().parse_args(["--force-download"])
         assert args.force_download is True
 
-    def test_cli_parses_force_reanalysis_flag(self):
-        args = build_parser().parse_args(["--force-reanalysis"])
-        assert args.force_reanalysis is True
+    def test_cli_parses_force_rebuild_flag(self):
+        args = build_parser().parse_args(["--force-rebuild"])
+        assert args.force_rebuild is True
 
-    def test_cli_force_reanalysis_default_false(self):
+    def test_cli_force_rebuild_default_false(self):
         args = build_parser().parse_args([])
-        assert args.force_reanalysis is False
+        assert args.force_rebuild is False
 
     def test_cli_parses_log_ids(self):
         args = build_parser().parse_args(["--log-ids", "1", "5", "12"])
@@ -566,6 +625,45 @@ class TestCLIParsing:
     def test_cli_default_algorithm(self):
         args = build_parser().parse_args([])
         assert args.algorithm == "inductive"
+
+    def test_cli_optimizer_enabled_by_default(self):
+        args = build_parser().parse_args([])
+        assert args.no_optimizer is False
+
+    def test_cli_no_optimizer_flag(self):
+        args = build_parser().parse_args(["--no-optimizer"])
+        assert args.no_optimizer is True
+
+    def test_cli_parses_search_n_trials(self):
+        args = build_parser().parse_args(["--search-n-trials", "50"])
+        assert args.search_n_trials == 50
+
+    def test_cli_search_n_trials_default(self):
+        args = build_parser().parse_args([])
+        assert args.search_n_trials == 30
+
+    def test_cli_parses_score_weights(self):
+        args = build_parser().parse_args([
+            "--w-det", "2.0", "--w-fb-xor", "1.5", "--w-fb-eff", "1.2",
+            "--w-prune-xor", "4.0", "--w-dup", "0.3", "--w-repro", "6.0",
+        ])
+        assert args.w_det == pytest.approx(2.0)
+        assert args.w_fb_xor == pytest.approx(1.5)
+        assert args.w_fb_eff == pytest.approx(1.2)
+        assert args.w_prune_xor == pytest.approx(4.0)
+        assert args.w_dup == pytest.approx(0.3)
+        assert args.w_repro == pytest.approx(6.0)
+
+    def test_cli_score_weight_defaults_match_score_weights(self):
+        from network_search.scoring import ScoreWeights
+        args = build_parser().parse_args([])
+        defaults = ScoreWeights()
+        assert args.w_det == pytest.approx(defaults.w_det)
+        assert args.w_fb_xor == pytest.approx(defaults.w_fb_xor)
+        assert args.w_fb_eff == pytest.approx(defaults.w_fb_eff)
+        assert args.w_prune_xor == pytest.approx(defaults.w_prune_xor)
+        assert args.w_dup == pytest.approx(defaults.w_dup)
+        assert args.w_repro == pytest.approx(defaults.w_repro)
 
 
 # ---------------------------------------------------------------------------

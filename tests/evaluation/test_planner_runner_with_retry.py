@@ -171,11 +171,11 @@ class TestFailurePointer:
         run_with_retry("domain", "problem", api, _cfg(), failures, "qid_1")
         assert not (failures / "qid_1.json").exists()
 
-    def test_no_failure_pointer_on_non_retryable(self, tmp_path):
+    def test_failure_pointer_written_on_non_retryable(self, tmp_path):
         failures = tmp_path / "failures"
         api = _make_api(_make_result(success=False, solvability="unsolvable_structural"))
         run_with_retry("domain", "problem", api, _cfg(), failures, "qid_1")
-        assert not (failures / "qid_1.json").exists()
+        assert (failures / "qid_1.json").exists()
 
     def test_failure_pointer_json_schema(self, tmp_path):
         failures = tmp_path / "failures"
@@ -183,11 +183,9 @@ class TestFailurePointer:
         run_with_retry("DOMAIN", "PROBLEM", api, _cfg(max_attempts=2), failures, "qid_1")
         data = json.loads((failures / "qid_1.json").read_text())
         for key in ("query_id", "last_solvability", "last_error",
-                    "last_stdout", "last_stderr", "domain_pddl", "problem_pddl", "timestamp"):
+                    "last_stdout", "last_stderr", "timestamp"):
             assert key in data, f"Missing key: {key}"
         assert data["query_id"] == "qid_1"
-        assert data["domain_pddl"] == "DOMAIN"
-        assert data["problem_pddl"] == "PROBLEM"
         assert data["last_solvability"] == "error"
         assert data["last_error"] == "boom"
 
@@ -205,14 +203,14 @@ class TestFailurePointer:
 class TestWriteFailurePointer:
     def test_writes_valid_json(self, tmp_path):
         result = _make_result(success=False, solvability="error", error="oops", stdout="out", stderr="err")
-        _write_failure_pointer(tmp_path, "q42", "DOM", "PROB", result)
+        _write_failure_pointer(tmp_path, "q42", "PROB", result)
         data = json.loads((tmp_path / "q42.json").read_text())
         assert data["query_id"] == "q42"
         assert data["last_solvability"] == "error"
 
     def test_timestamp_is_iso(self, tmp_path):
         result = _make_result(success=False, solvability="error")
-        _write_failure_pointer(tmp_path, "q1", "d", "p", result)
+        _write_failure_pointer(tmp_path, "q1", "p", result)
         data = json.loads((tmp_path / "q1.json").read_text())
         from datetime import datetime
         datetime.fromisoformat(data["timestamp"])  # raises if invalid

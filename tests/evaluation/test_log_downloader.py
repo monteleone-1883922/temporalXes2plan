@@ -256,13 +256,14 @@ class TestDownloadIfNeeded:
 
 class TestFmtDerivation:
     def _download_with_fmt(self, tmp_path, fmt_value: str) -> str:
-        row = _make_row(log_id="20", log_name="Log20", filename="log.x", fmt=fmt_value)
+        row = _make_row(log_id="20", log_name="Log20", filename="log.xes", fmt=fmt_value)
         mock_resp = MagicMock()
         mock_resp.content = b"x"
         mock_resp.raise_for_status = MagicMock()
+        ext = fmt_value.strip().lower()
         with (
             patch("evaluation.log_downloader._resolve_file_link",
-                  return_value=("https://example.org/log.x", "log.x")),
+                  return_value=(f"https://example.org/log.{ext}", f"log.{ext}")),
             patch("evaluation.log_downloader.requests.get", return_value=mock_resp),
         ):
             _, fmt = download_if_needed(row, cache_dir=tmp_path)
@@ -313,7 +314,7 @@ class TestExtractFromZip:
 
     def test_raises_when_extension_not_found(self):
         content = self._make_zip({"data.csv": "a,b\n1,2\n"})
-        with pytest.raises(ValueError, match="No .xes file found"):
+        with pytest.raises(ValueError, match="No xes file found"):
             _extract_from_zip(content, "xes")
 
 
