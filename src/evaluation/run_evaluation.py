@@ -1,12 +1,12 @@
 """Orchestrator for the evaluation harness.
 
-Reads CLI arguments, downloads logs, runs the evaluation pipeline for each log,
-and writes per-log results plus a rolling cross-log summary.
+Reads CLI arguments, downloads a single log, runs the evaluation pipeline
+for it, and writes its per-log result plus summary.
 
 Usage (from project root)::
 
     conda run -n temporalXes2Plan python -m src.evaluation.run_evaluation \\
-        --planner-timeout 60
+        --log-id 55 --planner-timeout 60
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from evaluation.metrics_collector import q1_metrics, q2_metrics, q3_metrics, seq
 from evaluation.planner_runner_with_retry import RetryConfig, run_with_retry as _run_with_retry
 from evaluation.log_downloader import download_if_needed, get_log_selection
 from evaluation.report_generator import (
-    LogResult, QueryResult, write_log_result, write_cross_log_summary,
+    LogResult, QueryResult, write_log_result, write_log_summary,
 )
 from network_search.scoring import ScoreWeights
 from replay.trace_replayer import TraceReplayer
@@ -53,7 +53,7 @@ WEB_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 class EvalConfig:
     """All tunable parameters for the evaluation harness."""
 
-    log_ids: Optional[List[str]]
+    log_id: int
     test_pct: float
     min_test_cases: int
     max_test_cases: int
@@ -558,8 +558,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Directory for downloaded log files.")
     p.add_argument("--output-dir", dest="output_dir", type=Path, default=_here / "results",
                    help="Directory for results.")
-    p.add_argument("--log-ids", dest="log_ids", type=int,  nargs="+", default=None,
-                    help="Event Log IDs to include, e.g. --log-ids LOG_001 LOG_005")
+    p.add_argument("--log-id", dest="log_id", type=int, required=True,
+                    help="Event Log ID to evaluate — one log per run, e.g. --log-id 55")
     p.add_argument("--cost-weight", dest="cost_weight", type=float, default=0.001,
                    help="α in (total-time + α * total-cost) metric.")
     p.add_argument("--test-pct", dest="test_pct", type=float, default=0.2,
@@ -654,7 +654,7 @@ def main(args: argparse.Namespace) -> None:
         csv_mapping = json.loads(args.csv_mapping)
 
     cfg = EvalConfig(
-        log_ids=args.log_ids,
+        log_id=args.log_id,
         test_pct=args.test_pct,
         min_test_cases=args.min_test_cases,
         max_test_cases=args.max_test_cases,
@@ -693,43 +693,42 @@ def main(args: argparse.Namespace) -> None:
         w_dup=args.w_dup,
     )
 
-    selection = get_log_selection(Path(args.metadata), log_ids=cfg.log_ids)
+    selection = get_log_selection(Path(args.metadata), log_ids=[cfg.log_id])
+    if len(selection) != 1:
+        raise ValueError(
+            f"Expected exactly one log matching --log-id {cfg.log_id} in "
+            f"{args.metadata}, found {len(selection)}."
+        )
+    row = selection.iloc[0]
     api = EvalAPI()
-    all_results: List[LogResult] = []
 
-    logger.info("Starting — %d logs, planner=optic", len(selection))
+    log_id = str(row.get("Event Log ID", row.get("log_id", "unknown")))
+    log_name = str(row.get("Event Log Name", row.get("log_name", log_id)))
 
-    for _, row in selection.iterrows():
-        log_id = str(row.get("Event Log ID", row.get("log_id", "unknown")))
-        log_name = str(row.get("Event Log Name", row.get("log_name", log_id)))
+    logger.info("Starting — log %s, planner=optic", log_id)
 
-        result_path = output_dir / log_id / "result.json"
-        if cfg.resume and result_path.exists():
-            logger.info("[%s] Resuming — result.json already exists, skipping.", log_id)
-            existing = _load_log_result(json.loads(result_path.read_text(encoding="utf-8")))
-            all_results.append(existing)
-            write_cross_log_summary(all_results, output_dir, cfg.cost_weight)
-            continue
-
+    result_path = output_dir / log_id / "result.json"
+    if cfg.resume and result_path.exists():
+        logger.info("[%s] Resuming — result.json already exists, skipping.", log_id)
+        log_result = _load_log_result(json.loads(result_path.read_text(encoding="utf-8")))
+    else:
         log_path, log_fmt = download_if_needed(row, cfg.cache_dir, force=cfg.force_download)
 
         if log_fmt == "csv" and cfg.csv_mapping is None:
             cfg.csv_mapping = _prompt_csv_mapping(log_path)
 
         log_result = evaluate_log(log_id, log_name, log_path, log_fmt, output_dir, api, cfg)
-
         write_log_result(log_id, log_result, output_dir)
-        all_results.append(log_result)
-        write_cross_log_summary(all_results, output_dir, cfg.cost_weight)
         logger.info(
             "[%s] %s",
             log_id,
             "OK" if log_result.pipeline_ok else f"FAILED: {log_result.pipeline_error}",
         )
 
-    ok_count = sum(1 for r in all_results if r.pipeline_ok)
+    summary_path = write_log_summary(log_result, output_dir, cfg.cost_weight)
     logger.info(
-        "Done — %d/%d logs OK, summary at %s/summary.json", ok_count, len(all_results), output_dir,
+        "Done — log %s %s, summary at %s", log_id,
+        "OK" if log_result.pipeline_ok else "FAILED", summary_path,
     )
 
 

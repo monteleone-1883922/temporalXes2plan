@@ -36,7 +36,7 @@ from pipeline import BuildResult
 
 def _make_cfg(output_dir: Path, **overrides) -> EvalConfig:
     defaults = dict(
-        log_ids=None,
+        log_id=1,
         test_pct=0.2,
         min_test_cases=1,
         max_test_cases=100,
@@ -525,6 +525,7 @@ class TestMainResume:
         }])
 
         args = build_parser().parse_args([
+            "--log-id", "1",
             "--output-dir", str(tmp_path),
             "--resume",
             "--metadata", str(tmp_path / "meta.csv"),
@@ -532,7 +533,7 @@ class TestMainResume:
 
         with (
             patch("evaluation.run_evaluation.get_log_selection", return_value=selection),
-            patch("evaluation.run_evaluation.write_cross_log_summary"),
+            patch("evaluation.run_evaluation.write_log_summary"),
             patch("evaluation.run_evaluation.evaluate_log") as mock_eval,
         ):
             main(args)
@@ -546,6 +547,7 @@ class TestMainResume:
         }])
 
         args = build_parser().parse_args([
+            "--log-id", "1",
             "--output-dir", str(tmp_path),
             "--resume",
             "--metadata", str(tmp_path / "meta.csv"),
@@ -562,7 +564,7 @@ class TestMainResume:
             patch("evaluation.run_evaluation.download_if_needed", return_value=(tmp_path / "log.xes", "xes")),
             patch("evaluation.run_evaluation.evaluate_log", return_value=lr) as mock_eval,
             patch("evaluation.run_evaluation.write_log_result"),
-            patch("evaluation.run_evaluation.write_cross_log_summary"),
+            patch("evaluation.run_evaluation.write_log_summary"),
         ):
             main(args)
             mock_eval.assert_called_once()
@@ -574,76 +576,81 @@ class TestMainResume:
 
 class TestCLIParsing:
     def test_cli_parses_cost_weight(self):
-        args = build_parser().parse_args(["--cost-weight", "0.05"])
+        args = build_parser().parse_args(["--log-id", "1", "--cost-weight", "0.05"])
         assert args.cost_weight == pytest.approx(0.05)
 
     def test_cli_cost_weight_default(self):
-        args = build_parser().parse_args([])
+        args = build_parser().parse_args(["--log-id", "1"])
         assert args.cost_weight == pytest.approx(0.001)
 
     def test_cli_parses_csv_mapping_json(self):
         mapping = '{"case_id": "col_a", "activity": "col_b"}'
-        args = build_parser().parse_args(["--csv-mapping", mapping])
+        args = build_parser().parse_args(["--log-id", "1", "--csv-mapping", mapping])
         assert args.csv_mapping == mapping
 
     def test_cli_parses_test_pct(self):
-        args = build_parser().parse_args(["--test-pct", "0.3"])
+        args = build_parser().parse_args(["--log-id", "1", "--test-pct", "0.3"])
         assert args.test_pct == pytest.approx(0.3)
 
     def test_cli_parses_min_test_cases(self):
-        args = build_parser().parse_args(["--min-test-cases", "5"])
+        args = build_parser().parse_args(["--log-id", "1", "--min-test-cases", "5"])
         assert args.min_test_cases == 5
 
     def test_cli_parses_max_test_cases(self):
-        args = build_parser().parse_args(["--max-test-cases", "150"])
+        args = build_parser().parse_args(["--log-id", "1", "--max-test-cases", "150"])
         assert args.max_test_cases == 150
 
     def test_cli_test_pct_default(self):
-        args = build_parser().parse_args([])
+        args = build_parser().parse_args(["--log-id", "1"])
         assert args.test_pct == pytest.approx(0.2)
 
     def test_cli_parses_resume_flag(self):
-        args = build_parser().parse_args(["--resume"])
+        args = build_parser().parse_args(["--log-id", "1", "--resume"])
         assert args.resume is True
 
     def test_cli_parses_force_download_flag(self):
-        args = build_parser().parse_args(["--force-download"])
+        args = build_parser().parse_args(["--log-id", "1", "--force-download"])
         assert args.force_download is True
 
     def test_cli_parses_force_rebuild_flag(self):
-        args = build_parser().parse_args(["--force-rebuild"])
+        args = build_parser().parse_args(["--log-id", "1", "--force-rebuild"])
         assert args.force_rebuild is True
 
     def test_cli_force_rebuild_default_false(self):
-        args = build_parser().parse_args([])
+        args = build_parser().parse_args(["--log-id", "1"])
         assert args.force_rebuild is False
 
-    def test_cli_parses_log_ids(self):
-        args = build_parser().parse_args(["--log-ids", "1", "5", "12"])
-        assert args.log_ids == [1, 5, 12]
+    def test_cli_parses_log_id(self):
+        args = build_parser().parse_args(["--log-id", "55"])
+        assert args.log_id == 55
+
+    def test_cli_log_id_is_required(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args([])
 
     def test_cli_default_algorithm(self):
-        args = build_parser().parse_args([])
+        args = build_parser().parse_args(["--log-id", "1"])
         assert args.algorithm == "inductive"
 
     def test_cli_optimizer_enabled_by_default(self):
-        args = build_parser().parse_args([])
+        args = build_parser().parse_args(["--log-id", "1"])
         assert args.no_optimizer is False
 
     def test_cli_no_optimizer_flag(self):
-        args = build_parser().parse_args(["--no-optimizer"])
+        args = build_parser().parse_args(["--log-id", "1", "--no-optimizer"])
         assert args.no_optimizer is True
 
     def test_cli_parses_search_n_trials(self):
-        args = build_parser().parse_args(["--search-n-trials", "50"])
+        args = build_parser().parse_args(["--log-id", "1", "--search-n-trials", "50"])
         assert args.search_n_trials == 50
 
     def test_cli_search_n_trials_default(self):
-        args = build_parser().parse_args([])
+        args = build_parser().parse_args(["--log-id", "1"])
         assert args.search_n_trials == 30
 
     def test_cli_parses_score_weights(self):
         args = build_parser().parse_args([
+            "--log-id", "1",
             "--w-det-xor", "0.9", "--w-det-eff", "0.7", "--w-fb-xor", "1.5", "--w-fb-eff", "1.2",
             "--w-prune-xor", "4.0", "--w-xor", "0.8", "--w-eff", "0.9", "--w-dup", "0.3",
         ])
@@ -658,7 +665,7 @@ class TestCLIParsing:
 
     def test_cli_score_weight_defaults_match_score_weights(self):
         from network_search.scoring import ScoreWeights
-        args = build_parser().parse_args([])
+        args = build_parser().parse_args(["--log-id", "1"])
         defaults = ScoreWeights()
         assert args.w_det_xor == pytest.approx(defaults.w_det_xor)
         assert args.w_det_eff == pytest.approx(defaults.w_det_eff)
@@ -709,7 +716,7 @@ class TestCSVMappingInteractiveFallback:
             pipeline_ok=True, pipeline_error=None, queries=[],
         )
 
-        args = build_parser().parse_args(["--output-dir", str(tmp_path),
+        args = build_parser().parse_args(["--log-id", "1", "--output-dir", str(tmp_path),
                                           "--metadata", str(tmp_path / "meta.csv")])
 
         with (
@@ -717,7 +724,7 @@ class TestCSVMappingInteractiveFallback:
             patch("evaluation.run_evaluation.download_if_needed", return_value=(csv_log, "csv")),
             patch("evaluation.run_evaluation.evaluate_log", return_value=lr),
             patch("evaluation.run_evaluation.write_log_result"),
-            patch("evaluation.run_evaluation.write_cross_log_summary"),
+            patch("evaluation.run_evaluation.write_log_summary"),
             patch("evaluation.run_evaluation._prompt_csv_mapping", return_value={"case_id": "col_a"}) as mock_prompt,
         ):
             main(args)

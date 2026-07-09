@@ -1,5 +1,4 @@
 """Unit tests for evaluation.report_generator."""
-import csv
 import json
 import threading
 from pathlib import Path
@@ -10,8 +9,8 @@ from evaluation.report_generator import (
     LogResult,
     QueryResult,
     _atomic_write_json,
-    write_cross_log_summary,
     write_log_result,
+    write_log_summary,
 )
 
 
@@ -151,79 +150,54 @@ class TestWriteLogResult:
 
 
 # ---------------------------------------------------------------------------
-# write_cross_log_summary
+# write_log_summary
 # ---------------------------------------------------------------------------
 
-class TestWriteCrossLogSummary:
-    def test_summary_json_written(self, tmp_path):
-        results = [_make_log_result()]
-        write_cross_log_summary(results, tmp_path)
-        assert (tmp_path / "summary.json").exists()
-
-    def test_summary_csv_written(self, tmp_path):
-        results = [_make_log_result()]
-        write_cross_log_summary(results, tmp_path)
-        assert (tmp_path / "summary.csv").exists()
+class TestWriteLogSummary:
+    def test_summary_json_written_in_log_subdir(self, tmp_path):
+        result = _make_log_result(log_id="1")
+        dest = write_log_summary(result, tmp_path)
+        assert dest == tmp_path / "1" / "summary_result.json"
+        assert dest.exists()
 
     def test_summary_json_top_level_schema(self, tmp_path):
-        results = [_make_log_result()]
-        write_cross_log_summary(results, tmp_path)
-        data = json.loads((tmp_path / "summary.json").read_text())
+        result = _make_log_result()
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
         for key in ("generated_at", "n_logs", "n_logs_ok", "n_queries_total",
                     "cost_weight", "q1", "q2", "q3", "per_log"):
             assert key in data, f"Missing summary key: {key}"
 
-    def test_summary_json_n_logs_correct(self, tmp_path):
-        results = [_make_log_result(log_id="1"), _make_log_result(log_id="2")]
-        write_cross_log_summary(results, tmp_path)
-        data = json.loads((tmp_path / "summary.json").read_text())
-        assert data["n_logs"] == 2
+    def test_summary_json_n_logs_is_always_one(self, tmp_path):
+        result = _make_log_result(log_id="1")
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["n_logs"] == 1
 
-    def test_summary_json_n_logs_ok(self, tmp_path):
-        results = [
-            _make_log_result(log_id="1", pipeline_ok=True),
-            _make_log_result(log_id="2", pipeline_ok=False, pipeline_error="err", queries=[]),
-        ]
-        write_cross_log_summary(results, tmp_path)
-        data = json.loads((tmp_path / "summary.json").read_text())
-        assert data["n_logs_ok"] == 1
+    def test_summary_json_n_logs_ok_zero_when_pipeline_failed(self, tmp_path):
+        result = _make_log_result(pipeline_ok=False, pipeline_error="err", queries=[])
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["n_logs_ok"] == 0
 
-    def test_summary_json_written_after_each_log(self, tmp_path):
-        results = []
-        for i in range(3):
-            results.append(_make_log_result(log_id=str(i)))
-            write_cross_log_summary(results, tmp_path)
-            data = json.loads((tmp_path / "summary.json").read_text())
-            assert data["n_logs"] == i + 1
-
-    def test_summary_csv_has_correct_columns(self, tmp_path):
-        results = [_make_log_result()]
-        write_cross_log_summary(results, tmp_path)
-        with (tmp_path / "summary.csv").open(encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            columns = reader.fieldnames
-        expected = {"log_id", "log_name", "log_fmt", "n_test_cases",
-                    "q1_solved_ratio", "q2_solved_ratio",
-                    "q2_within_budget_ratio", "q3_correct_ratio"}
-        assert expected.issubset(set(columns))
-
-    def test_summary_csv_rows_match_logs(self, tmp_path):
-        results = [_make_log_result(log_id="a"), _make_log_result(log_id="b")]
-        write_cross_log_summary(results, tmp_path)
-        with (tmp_path / "summary.csv").open(encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
-        assert len(rows) == 2
+    def test_summary_overwritten_on_second_call(self, tmp_path):
+        result = _make_log_result(log_id="1", pipeline_ok=True)
+        write_log_summary(result, tmp_path)
+        result2 = _make_log_result(log_id="1", pipeline_ok=False, pipeline_error="err", queries=[])
+        dest = write_log_summary(result2, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["n_logs_ok"] == 0
 
     def test_summary_cost_weight_recorded(self, tmp_path):
-        results = [_make_log_result()]
-        write_cross_log_summary(results, tmp_path, cost_weight=0.05)
-        data = json.loads((tmp_path / "summary.json").read_text())
+        result = _make_log_result()
+        dest = write_log_summary(result, tmp_path, cost_weight=0.05)
+        data = json.loads(dest.read_text())
         assert data["cost_weight"] == pytest.approx(0.05)
 
     def test_summary_per_log_has_log_id(self, tmp_path):
-        results = [_make_log_result(log_id="xyz")]
-        write_cross_log_summary(results, tmp_path)
-        data = json.loads((tmp_path / "summary.json").read_text())
+        result = _make_log_result(log_id="xyz")
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
         assert data["per_log"][0]["log_id"] == "xyz"
 
 

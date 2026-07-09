@@ -1,20 +1,20 @@
-"""Write per-log results and cross-log summary to disk.
+"""Write a single log's results and summary to disk.
 
-Per-log results are written to ``<output_dir>/<log_id>/result.json``.
-The cross-log summary is written atomically (write to .tmp, then rename)
-to ``<output_dir>/summary.json`` and ``<output_dir>/summary.csv``.
+Evaluation runs one log at a time. Results are written to
+``<output_dir>/<log_id>/result.json``; the summary for that same log is
+written atomically (write to .tmp, then rename) to
+``<output_dir>/<log_id>/summary_result.json``.
 
 Typical usage::
 
-    from evaluation.report_generator import LogResult, QueryResult, write_log_result, write_cross_log_summary
+    from evaluation.report_generator import LogResult, QueryResult, write_log_result, write_log_summary
 
     write_log_result(log_id, log_result, output_dir)
-    write_cross_log_summary(all_results, output_dir, cost_weight=0.001)
+    write_log_summary(log_result, output_dir, cost_weight=0.001)
 """
 
 from __future__ import annotations
 
-import csv
 import json
 import os
 import statistics
@@ -119,27 +119,31 @@ def write_log_result(
     return dest
 
 
-def write_cross_log_summary(
-    all_results: List[LogResult],
+def write_log_summary(
+    log_result: LogResult,
     output_dir: Path,
     cost_weight: float = 0.001,
-) -> None:
-    """Write ``summary.json`` and ``summary.csv`` to output_dir.
+) -> Path:
+    """Write ``summary_result.json`` to ``<output_dir>/<log_id>/``.
 
-    Both files are written atomically (to a .tmp sibling, then renamed) so
-    that a crash mid-write never leaves a partially written file.
+    Written atomically (to a .tmp sibling, then renamed) so that a crash
+    mid-write never leaves a partially written file.
 
     Args:
-        all_results: All LogResult objects collected so far.
+        log_result: The LogResult to summarise.
         output_dir: Root results directory.
         cost_weight: α value recorded in the summary for reference.
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    summary = _build_summary(all_results, cost_weight)
-    _atomic_write_json(output_dir / "summary.json", summary)
-    _write_summary_csv(output_dir / "summary.csv", summary)
+    Returns:
+        Path to the written file.
+    """
+    log_dir = Path(output_dir) / log_result.log_id
+    log_dir.mkdir(parents=True, exist_ok=True)
+    dest = log_dir / "summary_result.json"
+
+    summary = _build_summary([log_result], cost_weight)
+    _atomic_write_json(dest, summary)
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -368,26 +372,6 @@ def _build_summary(
         },
         "per_log": per_log_rows,
     }
-
-
-# ---------------------------------------------------------------------------
-# CSV writer
-# ---------------------------------------------------------------------------
-
-def _write_summary_csv(dest: Path, summary: Dict[str, Any]) -> None:
-    per_log = summary.get("per_log", [])
-    if not per_log:
-        dest.write_text("", encoding="utf-8")
-        return
-
-    columns = list(per_log[0].keys())
-    tid = threading.get_ident()
-    tmp = dest.with_name(f"{dest.stem}.{os.getpid()}_{tid}.tmp")
-    with tmp.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(per_log)
-    tmp.replace(dest)
 
 
 # ---------------------------------------------------------------------------
