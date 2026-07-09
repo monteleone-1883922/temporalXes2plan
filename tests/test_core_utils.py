@@ -16,33 +16,36 @@ class TestSanitizeName:
         assert sanitize_name("ER Registration") == "er_registration"
 
     def test_strips_case_prefix(self):
-        # "case:" stripped; remaining ":" → ascii58
-        assert sanitize_name("case:concept:name") == "conceptascii58name"
+        # "case:" stripped; remaining ":" → "_" (common separator)
+        assert sanitize_name("case:concept:name") == "concept_name"
 
     def test_strips_case_prefix_case_insensitive(self):
         assert sanitize_name("CASE:status") == "status"
 
-    def test_colon_to_ascii(self):
-        assert sanitize_name("concept:name") == "conceptascii58name"
+    def test_colon_to_underscore(self):
+        assert sanitize_name("concept:name") == "concept_name"
 
-    def test_dash_to_ascii(self):
-        assert sanitize_name("my-activity") == "myascii45activity"
+    def test_dash_to_underscore(self):
+        assert sanitize_name("my-activity") == "my_activity"
 
-    def test_parens_to_ascii(self):
-        # '(' → ascii40, ')' → ascii41, '/' → ascii47, space → '_'
-        assert sanitize_name("CRP (mg/L)") == "crp_ascii40mgascii47lascii41"
+    def test_parens_to_underscore(self):
+        # '(' and ')' dropped, '/' and space → '_'
+        assert sanitize_name("CRP (mg/L)") == "crp_mg_l"
 
-    def test_slash_to_ascii(self):
-        assert sanitize_name("a/b") == "aascii47b"
+    def test_slash_to_underscore(self):
+        assert sanitize_name("a/b") == "a_b"
 
-    def test_backslash_to_ascii(self):
-        assert sanitize_name("a\\b") == "aascii92b"
+    def test_backslash_to_underscore(self):
+        assert sanitize_name("a\\b") == "a_b"
 
     def test_hash_to_ascii(self):
         assert sanitize_name("#") == "ascii35"
 
     def test_at_to_ascii(self):
-        assert sanitize_name("@risk") == "ascii64risk"
+        # '_asciiNN_' delimits the code so it doesn't fuse with the
+        # surrounding letters — trailing/leading '_' get stripped, the
+        # inner separator before "risk" stays.
+        assert sanitize_name("@risk") == "ascii64_risk"
 
     def test_empty_string_returns_empty(self):
         assert sanitize_name("") == ""
@@ -52,7 +55,7 @@ class TestSanitizeName:
 
     def test_mixed_complex(self):
         # Same as test_strips_case_prefix
-        assert sanitize_name("case:concept:name") == "conceptascii58name"
+        assert sanitize_name("case:concept:name") == "concept_name"
 
     def test_consecutive_underscores_collapsed(self):
         assert sanitize_name("a  b") == "a_b"
@@ -79,7 +82,7 @@ class TestSanitizeValue:
         assert sanitize_value("amount", "2") == "amount_val_2"
 
     def test_dot_in_value(self):
-        assert sanitize_value("x", "A.B") == "x_val_aascii46b"
+        assert sanitize_value("x", "A.B") == "x_val_a_ascii46_b"
 
     def test_empty_value_fallback(self):
         assert sanitize_value("x", "") == "x_val_empty"

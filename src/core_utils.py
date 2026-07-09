@@ -28,9 +28,10 @@ def _replace_special_chars(s: str) -> str:
     """Replace non-alphanumeric characters for PDDL name safety.
 
     Space becomes '_'; any other non-alphanumeric/non-underscore character
-    becomes 'ascii{decimal_code}' (e.g. '#' → 'ascii35', '@' → 'ascii64').
-    Consecutive underscores are collapsed and leading/trailing underscores
-    are stripped.
+    becomes '_ascii{decimal_code}_' (e.g. '#' → '_ascii35_', '@' → '_ascii64_')
+    — underscore-delimited so the encoded code point doesn't fuse with
+    adjacent letters/digits into an ambiguous token. Consecutive underscores
+    are collapsed and leading/trailing underscores are stripped.
     """
     parts = []
     for ch in s:
@@ -39,7 +40,7 @@ def _replace_special_chars(s: str) -> str:
         elif ch == ' ':
             parts.append('_')
         else:
-            parts.append(f"ascii{ord(ch)}")
+            parts.append(f"_ascii{ord(ch)}_")
     result = ''.join(parts)
     result = re.sub(r'_+', '_', result)
     return result.strip('_')
@@ -48,11 +49,12 @@ def _replace_special_chars(s: str) -> str:
 def sanitize_name(name: str) -> str:
     """Sanitize an activity or attribute name for use in PDDL syntax.
 
-    Strips 'case:' prefixes; spaces become '_'; other special characters
-    become 'ascii{code}' to preserve uniqueness and avoid empty results.
+    Strips 'case:' prefixes; spaces and the common separators ':', '-', '/',
+    '\\' become '_'; '(', ')' are dropped; any other special character
+    becomes '_ascii{code}_' to preserve uniqueness and avoid empty results.
 
     ESEMPIO:
-        "case:concept:name" -> "conceptascii58name"
+        "case:concept:name" -> "concept_name"
         "ER Registration"   -> "er_registration"
         "#"                 -> "ascii35"
     """

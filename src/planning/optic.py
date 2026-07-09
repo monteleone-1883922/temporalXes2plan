@@ -295,8 +295,8 @@ def _classify(return_code: int, plan_exists: bool, stdout: str, stderr: str) -> 
 
 
 def _normalise(name: str) -> str:
-    if name.startswith("exec_"):
-        name = name[5:]
+    if name.startswith("execute_"):
+        name = name[len("execute_"):]
     name = name.split("_DETDUP")[0]
     name = re.sub(r"_v\d+$", "", name)
     return name
