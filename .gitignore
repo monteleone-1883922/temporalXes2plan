@@ -43,6 +43,7 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+
 nosetests.xml
 coverage.xml
 *.cover
@@ -188,3 +189,10 @@ logs/
 # Z3 build artifacts
 src/z3/build/
 src/z3/install/
+.aider*
+
+.claude
+
+data/
+claude_plans/
+graphify*
