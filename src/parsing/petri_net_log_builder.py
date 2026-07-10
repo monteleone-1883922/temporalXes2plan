@@ -176,6 +176,101 @@ class PetriNetLogBuilder:
             final_marking=self.final_marking,
         )
 
+    def build_all_with_fitness(
+        self, replay_log: Any, raw_replay_result: Any,
+    ) -> List[Tuple[float, TraceExecution]]:
+        """Build (fitness, TraceExecution) for every trace with a successful
+        replay, regardless of config.replay_min_fitness — the full per-trace
+        computation (align + build_execution), done once. Callers that need
+        to know which traces pass a given replay_min_fitness threshold
+        should filter this list themselves (fitness >= threshold, a cheap
+        O(n) comparison) instead of recomputing the align/build_execution
+        work — see network_search caching (preload_replay/PreloadedReplay in
+        parsing/xes_parser.py), which is exactly why this exists: the align
+        result for a given trace never depends on config.replay_min_fitness,
+        only on which traces survive the threshold.
+
+        Args:
+            replay_log: Output of prepare_replay_log(log).
+            raw_replay_result: Output of run_raw_replay(replay_log).
+
+        Returns:
+            List of (fitness, TraceExecution), one per trace in replay_log,
+            in the same order.
+        """
+        if self.config.replay_engine == "alignments":
+            triples = self._align_all_alignments_with_fitness(replay_log, raw_replay_result)
+        else:
+            triples = self._align_all_token_based_with_fitness(replay_log, raw_replay_result)
+        return [
+            (fitness, self._build_execution(trace, aligned))
+            for fitness, trace, aligned in triples
+        ]
+
+    def filter_executions_by_fitness(
+        self, executions_with_fitness: List[Tuple[float, TraceExecution]],
+    ) -> PetriNetLog:
+        """Cheap phase: filter an already-built (fitness, TraceExecution) list
+        (see build_all_with_fitness) by config.replay_min_fitness — same
+        threshold semantics and log messages as build_from_raw_replay, minus
+        the align/build_execution work (already done once, upstream).
+
+        Args:
+            executions_with_fitness: Output of build_all_with_fitness(),
+                built with this same net/engine (caller's responsibility).
+
+        Returns:
+            PetriNetLog with one TraceExecution per accepted trace.
+        """
+        total = len(executions_with_fitness)
+        skipped = 0
+        executions = []
+        for fitness, execution in executions_with_fitness:
+            if fitness < self.config.replay_min_fitness:
+                skipped += 1
+            else:
+                executions.append(execution)
+        if skipped > 0:
+            skip_pct = 100.0 * skipped / total if total > 0 else 0.0
+            logger.warning(
+                f"PetriNetLog: skipped {skipped}/{total} traces ({skip_pct:.1f}%) "
+                f"with fitness < {self.config.replay_min_fitness}"
+            )
+        else:
+            logger.info(f"PetriNetLog: all {total} traces accepted.")
+        return PetriNetLog(
+            executions=executions,
+            net=self.petrinet,
+            initial_marking=self.initial_marking,
+            final_marking=self.final_marking,
+        )
+
+    def _align_all_token_based_with_fitness(
+        self, log: Any, replayed: Any,
+    ) -> List[Tuple[float, Any, List[Tuple[Transition, Dict[str, Any]]]]]:
+        """Same alignment as _filter_and_align_token_based, but for every
+        trace (no fitness filter) and with fitness exposed alongside each
+        result — see build_all_with_fitness."""
+        triples = []
+        for trace, result in zip(log, replayed):
+            fitness = result.get("trace_fitness", 0.0)
+            activated_transitions = result.get("activated_transitions", [])
+            triples.append((fitness, trace, self._align_trace(trace, activated_transitions)))
+        return triples
+
+    def _align_all_alignments_with_fitness(
+        self, log: Any, aligned_results: Any,
+    ) -> List[Tuple[float, Any, List[Tuple[Transition, Dict[str, Any]]]]]:
+        """Same conversion as _filter_and_align_alignments, but for every
+        trace (no fitness filter) and with fitness exposed alongside each
+        result — see build_all_with_fitness."""
+        triples = []
+        for trace, result in zip(log, aligned_results):
+            fitness = result.get("fitness", 0.0)
+            aligned = self._align_trace_via_alignment(trace, result.get("alignment", []))
+            triples.append((fitness, trace, aligned))
+        return triples
+
     @staticmethod
     def _has_lifecycle_start_events(log: Any) -> bool:
         """Return True if any event in the log carries lifecycle:transition == 'start'."""

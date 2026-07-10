@@ -371,6 +371,107 @@ class TestBuild:
 
 
 # ===========================================================================
+# build_all_with_fitness() / filter_executions_by_fitness() —
+# network_search caching (see parsing/xes_parser.py::preload_replay)
+# ===========================================================================
+
+class TestBuildAllWithFitness:
+    def _builder(self, config=None):
+        net = _seq_net()
+        return _make_builder(net["arcs"], Marking({net["p_in"]: 1}), config=config), net
+
+    def _log(self, n: int = 1):
+        return make_log(*[
+            make_trace(make_event("A"), make_event("B"), case_id=f"c{i}")
+            for i in range(n)
+        ])
+
+    def test_returns_one_pair_per_trace_regardless_of_fitness(self):
+        """Unlike build(), every trace is included — no fitness filter."""
+        builder, net = self._builder()
+        fake = [
+            _fake_replay([net["t_a"], net["t_b"]], fitness=1.0),
+            _fake_replay([net["t_a"], net["t_b"]], fitness=0.1),
+        ]
+        replay_log = builder.prepare_replay_log(self._log(2))
+        with patch("pm4py.conformance_diagnostics_token_based_replay", return_value=fake):
+            raw = builder.run_raw_replay(replay_log)
+        result = builder.build_all_with_fitness(replay_log, raw)
+        assert len(result) == 2
+        assert [fitness for fitness, _ in result] == [1.0, 0.1]
+
+    def test_executions_match_build_from_raw_replay_bypassed(self):
+        """build_all_with_fitness's executions must be identical (same steps,
+        same attributes_applied) to build_from_raw_replay(...,
+        bypass_fitness_filter=True) — same align+build work, just with
+        fitness exposed alongside instead of discarded."""
+        builder, net = self._builder()
+        fake = [
+            _fake_replay([net["t_a"], net["t_b"]], fitness=1.0),
+            _fake_replay([net["t_a"], net["t_b"]], fitness=0.1),
+        ]
+        replay_log = builder.prepare_replay_log(self._log(2))
+        with patch("pm4py.conformance_diagnostics_token_based_replay", return_value=fake):
+            raw = builder.run_raw_replay(replay_log)
+
+        with_fitness = builder.build_all_with_fitness(replay_log, raw)
+        bypassed = builder.build_from_raw_replay(replay_log, raw, bypass_fitness_filter=True)
+
+        assert len(with_fitness) == len(bypassed.executions)
+        for (fitness, exec_a), exec_b in zip(with_fitness, bypassed.executions):
+            assert exec_a.trace_id == exec_b.trace_id
+            assert len(exec_a.steps) == len(exec_b.steps)
+            for step_a, step_b in zip(exec_a.steps, exec_b.steps):
+                assert step_a.activity_name == step_b.activity_name
+                assert step_a.attributes == step_b.attributes
+
+    def test_filter_executions_by_fitness_matches_build_from_raw_replay(self):
+        """filter_executions_by_fitness() applied to build_all_with_fitness()'s
+        output must select the same trace_ids, in the same order, as
+        build_from_raw_replay(..., bypass_fitness_filter=False) with the same
+        config.replay_min_fitness — the property that makes this cache
+        behavior-preserving for network_search."""
+        config = AnalysisConfig(replay_min_fitness=0.5)
+        builder, net = self._builder(config=config)
+        fake = [
+            _fake_replay([net["t_a"], net["t_b"]], fitness=1.0),
+            _fake_replay([net["t_a"], net["t_b"]], fitness=0.6),
+            _fake_replay([net["t_a"], net["t_b"]], fitness=0.3),
+        ]
+        replay_log = builder.prepare_replay_log(self._log(3))
+        with patch("pm4py.conformance_diagnostics_token_based_replay", return_value=fake):
+            raw = builder.run_raw_replay(replay_log)
+
+        with_fitness = builder.build_all_with_fitness(replay_log, raw)
+        via_cache = builder.filter_executions_by_fitness(with_fitness)
+        direct = builder.build_from_raw_replay(replay_log, raw, bypass_fitness_filter=False)
+
+        assert [e.trace_id for e in via_cache.executions] == [e.trace_id for e in direct.executions]
+        assert len(via_cache.executions) == 2
+
+    def test_filter_executions_by_fitness_all_accepted_when_threshold_is_low(self):
+        config = AnalysisConfig(replay_min_fitness=0.0)
+        builder, net = self._builder(config=config)
+        fake = [_fake_replay([net["t_a"], net["t_b"]], fitness=f) for f in (1.0, 0.5, 0.1)]
+        replay_log = builder.prepare_replay_log(self._log(3))
+        with patch("pm4py.conformance_diagnostics_token_based_replay", return_value=fake):
+            raw = builder.run_raw_replay(replay_log)
+        with_fitness = builder.build_all_with_fitness(replay_log, raw)
+        result = builder.filter_executions_by_fitness(with_fitness)
+        assert len(result.executions) == 3
+
+    def test_filter_executions_by_fitness_stores_net_reference(self):
+        builder, net = self._builder()
+        fake = [_fake_replay([net["t_a"], net["t_b"]])]
+        replay_log = builder.prepare_replay_log(self._log(1))
+        with patch("pm4py.conformance_diagnostics_token_based_replay", return_value=fake):
+            raw = builder.run_raw_replay(replay_log)
+        with_fitness = builder.build_all_with_fitness(replay_log, raw)
+        result = builder.filter_executions_by_fitness(with_fitness)
+        assert result.net is builder.petrinet
+
+
+# ===========================================================================
 # build() — alignments engine (config.replay_engine == "alignments")
 # ===========================================================================
 

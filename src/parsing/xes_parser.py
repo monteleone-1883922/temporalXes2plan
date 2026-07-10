@@ -22,7 +22,7 @@ import os
 import random
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional, Set, List
+from typing import Any, Dict, Optional, Set, List, Tuple
 
 import numpy as np
 from pm4py import PetriNet
@@ -37,6 +37,7 @@ from models import (
     EffectInfo,
     Guard,
     ParseResult,
+    PetriNetLog,
     PetriNetModel,
     PreprocessedLog,
     TransitionEffects,
@@ -131,6 +132,7 @@ class PreloadedReplay:
     raw_replay_result: Any
     replay_engine: str
     duration_stats: Dict[str, ActionDurationStats]
+    executions_with_fitness: List[Tuple[float, Any]]
 
 
 def preload_replay(
@@ -138,19 +140,27 @@ def preload_replay(
     config: Optional[AnalysisConfig] = None,
     external_durations: Optional[Dict[str, ExternalDuration]] = None,
 ) -> PreloadedReplay:
-    """Runs the expensive pm4py replay/alignment call once and extracts
-    duration stats once, both ahead of any per-trial config.replay_min_fitness
-    filtering.
+    """Runs the expensive pm4py replay/alignment call once, aligns and builds
+    every trace's TraceExecution once, and extracts duration stats once, all
+    ahead of any per-trial config.replay_min_fitness filtering.
 
     config is only consulted for replay_engine/replay_alignment_variant —
     neither is Optuna-tuned (search_space.py §4.6), so they're constant for
     the whole search; callers should pass base_config (or None for
     AnalysisConfig()'s defaults), not a per-trial config.
 
+    executions_with_fitness holds (fitness, TraceExecution) for every trace
+    with a successful replay, regardless of config.replay_min_fitness — the
+    alignment/build_execution result for a given trace never depends on that
+    threshold (see PetriNetLogBuilder.build_all_with_fitness), only on which
+    traces survive it, so trials filter this list themselves (cheap) instead
+    of recomputing the align/build_execution work — see Parser.__init__.
+
     duration_stats is computed from every trace with a successful replay,
-    ignoring config.replay_min_fitness entirely (bypass_fitness_filter=True)
-    — an accepted approximation since duration stats are insensitive to the
-    small number of traces near the fitness threshold.
+    ignoring config.replay_min_fitness entirely — an accepted approximation
+    since duration stats are insensitive to the small number of traces near
+    the fitness threshold (unlike executions_with_fitness above, which is an
+    exact cache, not an approximation).
     """
     config = config or AnalysisConfig()
     pnm = preloaded.petri_net_model
@@ -165,10 +175,14 @@ def preload_replay(
     )
     replay_log = builder.prepare_replay_log(preloaded.full_lifecycle_log)
     raw_replay_result = builder.run_raw_replay(replay_log)
+    executions_with_fitness = builder.build_all_with_fitness(replay_log, raw_replay_result)
 
     logger.info("Starting duration extraction")
-    full_pn_log = builder.build_from_raw_replay(
-        replay_log, raw_replay_result, bypass_fitness_filter=True
+    full_pn_log = PetriNetLog(
+        executions=[execution for _, execution in executions_with_fitness],
+        net=pnm.petrinet,
+        initial_marking=pnm.initial_marking,
+        final_marking=pnm.final_marking,
     )
     duration_stats: Dict[str, ActionDurationStats] = TemporalExtractor().extract(
         external_durations=external_durations,
@@ -185,6 +199,7 @@ def preload_replay(
         raw_replay_result=raw_replay_result,
         replay_engine=config.replay_engine,
         duration_stats=duration_stats,
+        executions_with_fitness=executions_with_fitness,
     )
 
 
@@ -280,9 +295,9 @@ class Parser:
             config=self.config,
         )
         if preloaded_replay is not None and preloaded_replay.replay_engine == self.config.replay_engine:
-            logger.info("Starting token replay (reusing cached raw replay)")
-            self.pn_log = builder.build_from_raw_replay(
-                preloaded_replay.replay_log, preloaded_replay.raw_replay_result
+            logger.info("Starting token replay (reusing cached alignments)")
+            self.pn_log = builder.filter_executions_by_fitness(
+                preloaded_replay.executions_with_fitness
             )
             logger.info("Token replay complete: %d traces accepted", len(self.pn_log.executions))
 
