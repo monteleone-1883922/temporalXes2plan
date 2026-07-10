@@ -38,7 +38,9 @@ def _guard_from_dict(data: Dict[str, Any]) -> Guard:
     return Guard(attribute=data["attribute"], value=value, negated=negated)
 
 
-def _sop_to_dict(sop: List[List[Guard]]) -> List[List[Dict[str, Any]]]:
+def _sop_to_dict(sop: Optional[List[List[Guard]]]) -> List[List[Dict[str, Any]]]:
+    if sop is None:
+        return []
     return [[_guard_to_dict(g) for g in clause] for clause in sop]
 
 

@@ -94,7 +94,8 @@ def _prepared_negated_attributes(prepared: PreparedDomainInput) -> Set[str]:
 
     for branches in prepared.xor_branches.values():
         for branch in branches:
-            _scan_sop(branch.conditions)
+            if branch.conditions:
+                _scan_sop(branch.conditions)
 
     return negated
 
