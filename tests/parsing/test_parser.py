@@ -587,13 +587,21 @@ class TestPreloadedEquivalence:
                 assert d_b.guards == p_b.guards
 
     def test_parse_result_matches_with_and_without_preloaded_replay(self, tmp_path_factory):
-        """preloaded_replay caches the raw token-replay call + duration stats
-        (computed once, ahead of the per-trial replay_min_fitness filter) —
-        see docs plan for the network_search caching work. The resulting
-        ParseResult must match a Parser() run that recomputes both from
-        scratch, except duration_stats which is expected to differ slightly
-        since it's computed on all successfully-replayed traces rather than
-        only the ones surviving this particular config's fitness threshold."""
+        """preloaded_replay caches the raw token-replay call, the per-trace
+        alignment (build_all_with_fitness — align + build_execution, done
+        once regardless of config.replay_min_fitness), and duration stats —
+        see docs plan for the network_search caching work.
+
+        pn_log (and everything derived from it: transitions, effects, XOR
+        guards) must match a Parser() run that recomputes everything from
+        scratch EXACTLY — this is not an approximation: filter_executions_by_fitness()
+        applies the same config.replay_min_fitness threshold to the same
+        cached (fitness, TraceExecution) pairs that build() would have
+        produced fresh, see test_filter_executions_by_fitness_matches_build_from_raw_replay
+        in test_petri_net_log_builder.py. Only duration_stats is an accepted
+        approximation (computed once on all successfully-replayed traces,
+        not re-filtered per trial) — unchanged by this caching, unrelated to
+        pn_log."""
         tmp = tmp_path_factory.mktemp("parser_preloaded_replay_equivalence")
         xes_path = str(tmp / "xor_log.xes")
         pm4py.write_xes(_make_xor_log(), xes_path)
@@ -604,21 +612,43 @@ class TestPreloadedEquivalence:
             snapshot_dir=str(tmp / "snapshots"),
         )
 
-        direct = Parser(
+        direct_parser = Parser(
             xes_path, coverage_percentage=0.8, discovery_algorithm="inductive", config=config,
-        ).parse_result
+        )
+        direct = direct_parser.parse_result
 
         preloaded = load_and_discover(xes_path, coverage_percentage=0.8, discovery_algorithm="inductive")
         preloaded_replay = preload_replay(preloaded, config)
-        via_preloaded = Parser(
+        via_preloaded_parser = Parser(
             xes_path, coverage_percentage=0.8, discovery_algorithm="inductive", config=config,
             preloaded=preloaded, preloaded_replay=preloaded_replay,
-        ).parse_result
+        )
+        via_preloaded = via_preloaded_parser.parse_result
+
+        # pn_log: exact same accepted traces, same order (not just same count).
+        assert (
+            [e.trace_id for e in direct_parser.pn_log.executions]
+            == [e.trace_id for e in via_preloaded_parser.pn_log.executions]
+        )
 
         assert direct.transitions.keys() == via_preloaded.transitions.keys()
         for name, d_trans in direct.transitions.items():
             p_trans = via_preloaded.transitions[name]
             assert set(d_trans.effects.keys()) == set(p_trans.effects.keys())
+            for attr, d_effect in d_trans.effects.items():
+                p_effect = p_trans.effects[attr]
+                assert d_effect.appearance_level == p_effect.appearance_level
+                assert d_effect.value_level == p_effect.value_level
+                assert d_effect.value_probabilities == p_effect.value_probabilities
+
+            d_branches = d_trans.xor_branches or []
+            p_branches = p_trans.xor_branches or []
+            assert len(d_branches) == len(p_branches)
+            for d_b, p_b in zip(d_branches, p_branches):
+                assert d_b.place_name == p_b.place_name
+                assert d_b.cascade_level == p_b.cascade_level
+                assert d_b.probability == p_b.probability
+                assert d_b.guards == p_b.guards
 
         # duration_stats: same set of activities have duration data, even
         # though the two Parser()s computed it from slightly different trace
