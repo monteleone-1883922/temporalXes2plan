@@ -177,6 +177,8 @@ def build_domain_with_variant_map(
     effective_deadline = has_deadline and any(
         isinstance(a, PDDLDurativeAction) for a in actions
     )
+    if effective_deadline:
+        requirements += [":timed-initial-literals"]
 
     domain = PDDLDomain(
         name=domain_name,

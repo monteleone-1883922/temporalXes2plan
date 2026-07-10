@@ -145,8 +145,8 @@ class ProblemBuilder:
                 continue
             if attr in already_set:
                 continue
-            none_val = utils.sanitize_value(attr, "none")
-            atoms.append(PDDLEffect.set_attr_is(attr, none_val).to_pddl())
+            #none_val = utils.sanitize_value(attr, "none")
+            #atoms.append(PDDLEffect.set_attr_is(attr, none_val).to_pddl())
 
         return atoms
 

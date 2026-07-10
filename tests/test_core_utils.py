@@ -93,6 +93,22 @@ class TestSanitizeValue:
     def test_uppercase_lowercased(self):
         assert sanitize_value("status", "HIGH") == "status_val_high"
 
+    def test_uppercase_attr_name_lowercased(self):
+        """A mixed-case attr_name (e.g. from an unsanitized caller) must
+        produce the same constant name as its lowercase form — otherwise the
+        domain declares one PDDL symbol and a caller references another."""
+        assert sanitize_value("notificationType", "none") == "notificationtype_val_none"
+        assert (
+            sanitize_value("notificationType", "none")
+            == sanitize_value("notificationtype", "none")
+        )
+
+    def test_idempotent_regardless_of_original_attr_name_case(self):
+        """Re-sanitizing an already-sanitized value (produced with a
+        differently-cased attr_name) must be a no-op, not a double prefix."""
+        first = sanitize_value("notificationType", "none")
+        assert sanitize_value("notificationtype", first) == first
+
 
 # ---------------------------------------------------------------------------
 # convert_interval_to_lte_gte
