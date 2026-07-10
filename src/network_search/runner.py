@@ -167,6 +167,14 @@ def _discarded_record(rung1: _Rung1Result) -> TrialRecord:
         n_test_replayed=0,
         coverage=rung1.coverage,
     )
+
+    logger.debug(
+        "Trial %d: discarded at rung 1 (partial_score=%.4f, xor=%.4f, effect=%.4f, "
+        "duplication=%.4f, coverage=%.4f)",
+        rung1.trial.number, rung1.partial_score, rung1.xor_score, rung1.effect_score,
+        rung1.duplication_score, rung1.coverage,
+    )
+
     return TrialRecord(
         trial_number=rung1.trial.number,
         config=rung1.config,
@@ -251,7 +259,7 @@ def find_best_config(
     discovery_algorithm: str = "inductive",
     round_size: int = 20,
     promotion_fraction: float = 0.35,
-    min_promoted: int = 15,
+    min_promoted: int = 7,
     base_config: Optional[AnalysisConfig] = None,
 ) -> Tuple[AnalysisConfig, List[TrialRecord]]:
     """Successive Halving loop (phase 5) — docs/network_improvement_loop_plan.md §7.
@@ -293,8 +301,15 @@ def find_best_config(
     best_score_so_far = float("-inf")
 
     remaining = n_trials
+    round_num = 0
     while remaining > 0:
+        round_num += 1
         this_round_size = min(round_size, remaining)
+        completed_before = n_trials - remaining
+        logger.info(
+            "Round %d: trials %d-%d of %d",
+            round_num, completed_before + 1, completed_before + this_round_size, n_trials,
+        )
         trials = [study.ask() for _ in range(this_round_size)]
 
         rung1_results = [
@@ -322,8 +337,16 @@ def find_best_config(
             study.tell(rung1.trial, record.score)
 
         remaining -= this_round_size
+        logger.info(
+            "Round %d done: %d/%d promoted to rung 2, best_score_so_far=%.4f",
+            round_num, n_promote, this_round_size, best_score_so_far,
+        )
 
     best_record = max(records, key=lambda r: r.score)
+    logger.info(
+        "Search complete: %d trials evaluated, best trial #%d score=%.4f",
+        len(records), best_record.trial_number, best_record.score,
+    )
     return best_record.config, records
 
 #TODO is to remove?

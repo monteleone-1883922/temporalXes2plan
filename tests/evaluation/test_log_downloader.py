@@ -10,6 +10,7 @@ import requests
 
 from evaluation.log_downloader import (
     download_if_needed,
+    download_metadata_if_needed,
     get_log_selection,
     _extract_from_zip,
     _fmt_from_dataset_format,
@@ -117,6 +118,73 @@ class TestGetLogSelection:
         csv = self._sample_csv(tmp_path)
         result = get_log_selection(csv, log_ids=["999"])
         assert len(result) == 0
+
+
+# ---------------------------------------------------------------------------
+# download_metadata_if_needed
+# ---------------------------------------------------------------------------
+
+class TestDownloadMetadataIfNeeded:
+    def test_returns_existing_file_without_download(self, tmp_path):
+        path = tmp_path / "Metadata.csv"
+        path.write_text("existing content", encoding="utf-8")
+
+        with patch("evaluation.log_downloader.requests.get") as mock_get:
+            result = download_metadata_if_needed(path)
+
+        mock_get.assert_not_called()
+        assert result == path
+        assert path.read_text(encoding="utf-8") == "existing content"
+
+    def test_downloads_when_missing(self, tmp_path):
+        path = tmp_path / "Metadata.csv"
+        mock_response = MagicMock(content=b"col_a,col_b\n1,2\n")
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("evaluation.log_downloader.requests.get", return_value=mock_response) as mock_get:
+            result = download_metadata_if_needed(path)
+
+        mock_get.assert_called_once()
+        assert result == path
+        assert path.read_bytes() == b"col_a,col_b\n1,2\n"
+
+    def test_creates_parent_directories(self, tmp_path):
+        path = tmp_path / "nested" / "dir" / "Metadata.csv"
+        mock_response = MagicMock(content=b"data")
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("evaluation.log_downloader.requests.get", return_value=mock_response):
+            download_metadata_if_needed(path)
+
+        assert path.exists()
+
+    def test_force_redownloads_existing_file(self, tmp_path):
+        path = tmp_path / "Metadata.csv"
+        path.write_text("stale content", encoding="utf-8")
+        mock_response = MagicMock(content=b"fresh content")
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("evaluation.log_downloader.requests.get", return_value=mock_response) as mock_get:
+            download_metadata_if_needed(path, force=True)
+
+        mock_get.assert_called_once()
+        assert path.read_bytes() == b"fresh content"
+
+    def test_get_log_selection_downloads_metadata_when_missing(self, tmp_path):
+        path = tmp_path / "Metadata.csv"
+        rows = [{"Event Log ID": "1", "Event Log Name": "A", "Event Log Dataset File Name": "a.xes",
+                 "DOI Number": "10.5281/zenodo.1", "Dataset Format": "XES",
+                 "Prominent Exhibited Behavior": "Linear", "behavior_rank": 0,
+                 "Number of Activities": 5, "Number of Cases": 100}]
+        csv_bytes = pd.DataFrame(rows, columns=_METADATA_COLUMNS).to_csv(index=False).encode("utf-8")
+        mock_response = MagicMock(content=csv_bytes)
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("evaluation.log_downloader.requests.get", return_value=mock_response) as mock_get:
+            result = get_log_selection(path)
+
+        mock_get.assert_called_once()
+        assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------

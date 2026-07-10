@@ -9,6 +9,7 @@ convention as tests/parsing/test_parser.py, whose synthetic XOR log this
 test reuses.
 """
 import json
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
@@ -286,6 +287,45 @@ class TestSuccessiveHalvingPromotion:
         best_record = max(sh_records, key=lambda r: r.score)
         assert best_config == best_record.config
         assert best_record.promoted_to_rung2
+
+
+# ---------------------------------------------------------------------------
+# Progress logging — round start/end and search-complete summary at INFO,
+# discarded-trial detail at DEBUG (previously silent). Uses its own
+# find_best_config() call (not the shared sh_search_result/sh_records module
+# fixtures) since caplog only captures log records emitted during the test
+# itself, and those fixtures are computed once and reused across tests.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.integration
+class TestProgressLogging:
+    def _run(self, split_result, caplog, level):
+        with caplog.at_level(level, logger="network_search.runner"):
+            find_best_config(
+                training_log_path=str(split_result.train_path),
+                test_traces=split_result.test_cases,
+                n_trials=10,
+                round_size=10, promotion_fraction=0.3, min_promoted=2,
+            )
+        return caplog.text
+
+    def test_logs_round_start_and_end(self, split_result, caplog):
+        text = self._run(split_result, caplog, logging.INFO)
+        assert "Round 1: trials 1-10 of 10" in text
+        assert "Round 1 done: 3/10 promoted to rung 2" in text
+
+    def test_logs_search_complete_summary(self, split_result, caplog):
+        text = self._run(split_result, caplog, logging.INFO)
+        assert "Search complete: 10 trials evaluated, best trial #" in text
+
+    def test_discarded_trials_logged_at_debug(self, split_result, caplog):
+        text = self._run(split_result, caplog, logging.DEBUG)
+        # 10 trials, 3 promoted (round(10*0.3)=3 >= min_promoted=2) -> 7 discarded.
+        assert text.count("discarded at rung 1") == 7
+
+    def test_discarded_trials_not_logged_at_info(self, split_result, caplog):
+        text = self._run(split_result, caplog, logging.INFO)
+        assert "discarded at rung 1" not in text
 
 
 # ---------------------------------------------------------------------------

@@ -291,6 +291,25 @@ class TestScreenXorSplits:
         assert result["p_xor"].action == "deterministic"
         assert result["p_xor"].branches["B"].status == "certain"
 
+    def test_single_active_branch_with_fallback_sibling_does_not_crash(self):
+        # Regression test: B is the sole "active" branch (prob=0.85, well above
+        # both xor_prune_threshold and dt_min_prob_to_use), but C is neither
+        # pruned nor active — its probability (0.15) clears xor_prune_threshold
+        # (0.10) but its absolute sample count (0.15*20=3) falls short of
+        # dt_min_samples (5), so C is "fallback". Previously this combination
+        # made action="deterministic" (which only checked len(active_acts)==1)
+        # while no branch was actually promoted to "certain" (that promotion
+        # also requires no sibling to be "fallback") — mine_xor_splits'
+        # next(... status == "certain") then raised StopIteration.
+        _, t_B, t_C, _, p_xor = _xor_net()
+        stats = {"p_xor": XorSplitStats(probabilities={"B": 0.85, "C": 0.15}, total_executions=20)}
+        result = _miner(config=self._config()).screen_xor_splits({p_xor: [t_B, t_C]}, stats)
+        scr = result["p_xor"]
+        assert scr.action != "deterministic"
+        assert all(b.status != "certain" for b in scr.branches.values())
+        assert scr.branches["B"].status == "active"
+        assert scr.branches["C"].status == "fallback"
+
     def test_insufficient_samples_action_fallback(self):
         _, t_B, t_C, _, p_xor = _xor_net()
         stats = {"p_xor": XorSplitStats(probabilities={"B": 0.6, "C": 0.4}, total_executions=3)}
