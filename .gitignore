@@ -196,3 +196,6 @@ src/z3/install/
 data/
 claude_plans/
 graphify*
+optic/release/
+.idea/
+src/evaluation/results/
