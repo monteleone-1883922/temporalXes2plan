@@ -471,6 +471,48 @@ class TestMineXorSplitsFiltering:
         if "p_xor" in result:
             assert "d" not in result["p_xor"].guards
 
+    def test_multiple_splits_parallel_matches_sequential(self):
+        """mine_xor_splits() with 3+ independent dt-screened splits takes the
+        ThreadPoolExecutor path (src/parsing/decision_mining.py) — its output
+        must be identical, split by split, to calling _mine_one_xor_split()
+        directly in sequence for each split (same input, same seed), and the
+        result dict's key order must follow xor_screening's order (not
+        thread completion order)."""
+        place_names = ["p_xor_1", "p_xor_2", "p_xor_3"]
+        xor_firings = {
+            name: [
+                *[_fd("b", pre_state={"risk": "high"}) for _ in range(15)],
+                *[_fd("c", pre_state={"risk": "low"}) for _ in range(15)],
+            ]
+            for name in place_names
+        }
+        plog = _preprocessed(xor_firings=xor_firings)
+
+        def _fresh_screening():
+            return {
+                name: _xor_screening(30, "dt", {"b": (0.5, "active"), "c": (0.5, "active")})
+                for name in place_names
+            }
+
+        cfg = self._config(min_samples=5)
+
+        miner_parallel = _miner(config=cfg)
+        result_parallel = miner_parallel.mine_xor_splits(plog, _fresh_screening())
+
+        miner_sequential = _miner(config=cfg)
+        sequential_screening = _fresh_screening()
+        expected = {}
+        for name in place_names:
+            entry = miner_sequential._mine_one_xor_split(name, sequential_screening[name], plog)
+            if entry is not None:
+                expected[name] = entry[1]
+
+        assert result_parallel.keys() == expected.keys()
+        for name in expected:
+            assert result_parallel[name].guards == expected[name].guards
+            assert result_parallel[name].dt_accuracy == expected[name].dt_accuracy
+        assert list(result_parallel.keys()) == [n for n in place_names if n in result_parallel]
+
 
 # ===========================================================================
 # mine_xor_splits — SOP structure
@@ -1285,6 +1327,49 @@ class TestMineEffectsIntegration:
         result = self._run(plog, ae)
         if "work" in result:
             assert result["work"].total_firings == 40
+
+    def test_multiple_transitions_parallel_matches_sequential(self):
+        """mine_effects() with 3+ independent dt-screened transitions takes
+        the ThreadPoolExecutor path (src/parsing/decision_mining.py) — its
+        output must be identical, transition by transition, to calling
+        _mine_one_transition_effects() directly in sequence for each
+        transition (same input, same seed), and the result dict's key order
+        must follow effect_screening's order (not thread completion order)."""
+        acts = ["work1", "work2", "work3"]
+        n = 20
+        transition_firings = {
+            act: [
+                *[_fd(act, pre_state={"risk": "high"}, changed_attrs={"status": "urgent"})
+                  for _ in range(n)],
+                *[_fd(act, pre_state={"risk": "low"}, changed_attrs={})
+                  for _ in range(n)],
+            ]
+            for act in acts
+        }
+        plog = _preprocessed(transition_firings=transition_firings)
+        ae_dict = {act: self._ae_conditional(n=n) for act in acts}
+        cfg = self._config()
+
+        miner_parallel = DecisionMiner(silent_transitions={}, config=cfg)
+        screening_parallel = miner_parallel.screen_effects(ae_dict)
+        result_parallel = miner_parallel.mine_effects(plog, screening_parallel)
+
+        miner_sequential = DecisionMiner(silent_transitions={}, config=cfg)
+        screening_sequential = miner_sequential.screen_effects(ae_dict)
+        expected = {}
+        for act in acts:
+            entry = miner_sequential._mine_one_transition_effects(
+                act, screening_sequential[act], plog
+            )
+            if entry is not None:
+                expected[act] = entry[1]
+
+        assert result_parallel.keys() == expected.keys()
+        for act in expected:
+            r_effects = {k: (v.appearance_status, v.value_status) for k, v in result_parallel[act].effects.items()}
+            e_effects = {k: (v.appearance_status, v.value_status) for k, v in expected[act].effects.items()}
+            assert r_effects == e_effects
+        assert list(result_parallel.keys()) == [a for a in acts if a in result_parallel]
 
     # --- Screening: never threshold ---
 
