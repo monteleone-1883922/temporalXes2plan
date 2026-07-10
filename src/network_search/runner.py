@@ -48,7 +48,7 @@ import core_utils as utils
 from encoding.domain_builder import DomainBuilder
 from encoding.prepared_input import PreparedDomainInput
 from models import AnalysisConfig, ParseResult
-from parsing.xes_parser import Parser
+from parsing.xes_parser import Parser, PreloadedLogAndNet, load_and_discover
 
 from network_search.metrics import (
     compute_coverage,
@@ -108,6 +108,7 @@ def _evaluate_rung1(
     coverage_percentage: float,
     discovery_algorithm: str,
     original_activity_names: Optional[Set[str]],
+    preloaded: PreloadedLogAndNet,
     base_config: Optional[AnalysisConfig] = None,
 ) -> _Rung1Result:
     """Cheap phase: build the network, compute what's knowable without replay.
@@ -123,6 +124,7 @@ def _evaluate_rung1(
         coverage_percentage=coverage_percentage,
         discovery_algorithm=discovery_algorithm,
         config=config,
+        preloaded=preloaded,
     )
     parse_result = parser.parse_result
     prepared = DomainBuilder().build_prepared_input(parse_result, config=config)
@@ -296,6 +298,8 @@ def find_best_config(
     """
     weights = weights or ScoreWeights()
 
+    preloaded = load_and_discover(training_log_path, coverage_percentage, discovery_algorithm)
+
     records: List[TrialRecord] = []
     study = optuna.create_study(direction="maximize")
     best_score_so_far = float("-inf")
@@ -312,14 +316,19 @@ def find_best_config(
         )
         trials = [study.ask() for _ in range(this_round_size)]
 
-        rung1_results = [
-            _evaluate_rung1(
-                trial, training_log_path, weights,
-                coverage_percentage, discovery_algorithm, original_activity_names,
-                base_config=base_config,
+        rung1_results = []
+        for i, trial in enumerate(trials, start=1):
+            logger.info(
+                "Trial %d (round %d, %d/%d): starting rung 1 evaluation",
+                trial.number, round_num, i, this_round_size,
             )
-            for trial in trials
-        ]
+            rung1_results.append(
+                _evaluate_rung1(
+                    trial, training_log_path, weights,
+                    coverage_percentage, discovery_algorithm, original_activity_names,
+                    preloaded, base_config=base_config,
+                )
+            )
         # Best partial_score first -- ties broken by ask() order (stable sort).
         rung1_results.sort(key=lambda r: r.partial_score, reverse=True)
 

@@ -16,6 +16,7 @@ Steps 4–10 store intermediate results as instance attributes so that
 downstream steps (pruning, filtering, ParseResult assembly) can access them.
 """
 
+import dataclasses
 import json
 import os
 import random
@@ -69,6 +70,55 @@ logger = utils.get_logger(__name__)
 _PROB_FLOOR: float = 1e-3
 
 
+@dataclasses.dataclass
+class PreloadedLogAndNet:
+    """Output of steps 1-2 (log loading/filtering + Petri net discovery) —
+    the only two Parser steps that don't depend on AnalysisConfig, and so
+    can be computed once and reused across trials that share the same
+    log_path/coverage_percentage/discovery_algorithm/use_activity_classifier
+    (see network_search/runner.py::find_best_config)."""
+
+    log: Any
+    full_log: Any
+    full_lifecycle_log: Any
+    attributes: Any
+    attribute_categories: Any
+    petri_net_model: PetriNetModel
+
+
+def load_and_discover(
+    log_path: str,
+    coverage_percentage: float,
+    discovery_algorithm: str = 'inductive',
+    use_activity_classifier: bool = False,
+) -> PreloadedLogAndNet:
+    """Steps 1-2 of Parser.__init__, extracted verbatim so callers that run
+    many trials against the same log/discovery settings (but varying
+    AnalysisConfig) can compute this once — see PreloadedLogAndNet."""
+    # --- Step 1: log loading and filtering ---
+    logger.info("Loading and filtering log: %s", log_path)
+    processor = LogProcessor(log_path, use_activity_classifier)
+    log, full_log, full_lifecycle_log = processor.load_and_filter_log(coverage_percentage)
+    attributes, attribute_categories = processor.initialize_attributes(full_log)
+    logger.info("Log loaded: %d traces, %d attributes", len(log), len(attributes))
+
+    # --- Step 2: Petri net discovery ---
+    logger.info("Starting Petri net discovery [%s]", discovery_algorithm)
+    petri_net_model: PetriNetModel = ModelDiscoverer(discovery_algorithm).discover(log)
+    logger.info("Petri net discovered: %d places, %d transitions, %d XOR splits",
+                len(petri_net_model.petrinet.places), len(petri_net_model.petrinet.transitions),
+                len(petri_net_model.xor_splits))
+
+    return PreloadedLogAndNet(
+        log=log,
+        full_log=full_log,
+        full_lifecycle_log=full_lifecycle_log,
+        attributes=attributes,
+        attribute_categories=attribute_categories,
+        petri_net_model=petri_net_model,
+    )
+
+
 class Parser:
     """Facade orchestrating the XES → encoder-ready analysis pipeline.
 
@@ -88,6 +138,7 @@ class Parser:
         external_durations: Optional[Dict[str, ExternalDuration]] = None,
         discretizer_cache_path: Optional[Path] = None,
         force_rediscretize: bool = False,
+        preloaded: Optional[PreloadedLogAndNet] = None,
     ) -> None:
         """Run the full analysis pipeline up to and including DT mining.
 
@@ -103,28 +154,26 @@ class Parser:
             external_durations: Optional user-supplied duration bounds per
                 activity.  These take priority over log-derived estimates.
                 Activities not listed fall back to lifecycle or inter-event data.
+            preloaded: Result of load_and_discover(log_path, coverage_percentage,
+                discovery_algorithm, use_activity_classifier) computed ahead of
+                time — when given, steps 1-2 are skipped entirely and their
+                results are taken from here instead. Callers that run many
+                trials against the same log/discovery settings should compute
+                this once and pass it to every Parser() call.
         """
         self.config = config or AnalysisConfig()
 
-        # --- Step 1: log loading and filtering ---
-        logger.info("Loading and filtering log: %s", log_path)
-        processor = LogProcessor(log_path, use_activity_classifier)
-        self.log, self.full_log, self.full_lifecycle_log = processor.load_and_filter_log(coverage_percentage)
-        self.attributes, self.attribute_categories = processor.initialize_attributes(
-            self.full_log
-        )
-        logger.info("Log loaded: %d traces, %d attributes",
-                    len(self.log), len(self.attributes))
-
-        # --- Step 2: Petri net discovery ---
-        logger.info("Starting Petri net discovery [%s]", discovery_algorithm)
-        self.petri_net_model: PetriNetModel = ModelDiscoverer(
-            discovery_algorithm
-        ).discover(self.log)
+        if preloaded is None:
+            preloaded = load_and_discover(
+                log_path, coverage_percentage, discovery_algorithm, use_activity_classifier
+            )
+        self.log = preloaded.log
+        self.full_log = preloaded.full_log
+        self.full_lifecycle_log = preloaded.full_lifecycle_log
+        self.attributes = preloaded.attributes
+        self.attribute_categories = preloaded.attribute_categories
+        self.petri_net_model = preloaded.petri_net_model
         pnm = self.petri_net_model
-        logger.info("Petri net discovered: %d places, %d transitions, %d XOR splits",
-                    len(pnm.petrinet.places), len(pnm.petrinet.transitions),
-                    len(pnm.xor_splits))
 
         # --- Step 3: numeric attribute discretization ---
         numeric_attrs = [

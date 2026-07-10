@@ -23,7 +23,7 @@ from typing import Any, Dict, List
 
 from pm4py.objects.log.obj import EventLog, Trace, Event
 
-from parsing.xes_parser import Parser
+from parsing.xes_parser import Parser, load_and_discover
 from models import (
     ActionDurationStats,
     AnalysisConfig,
@@ -539,3 +539,49 @@ class TestFilterEffectsLevel3:
         act_info = p._transition_effect_info.get("act", {})
         assert "color" in act_info
         assert act_info["color"].appearance_level == 1
+
+
+@pytest.mark.integration
+class TestPreloadedEquivalence:
+    """Parser(preloaded=...) must be behavior-preserving vs. Parser() running
+    steps 1-2 itself — see docs/network_search_trial_caching_plan.md."""
+
+    def test_parse_result_matches_with_and_without_preloaded(self, tmp_path_factory):
+        tmp = tmp_path_factory.mktemp("parser_preloaded_equivalence")
+        xes_path = str(tmp / "xor_log.xes")
+        pm4py.write_xes(_make_xor_log(), xes_path)
+
+        config = AnalysisConfig(
+            dt_min_samples=20,
+            probability_min_samples=5,
+            snapshot_dir=str(tmp / "snapshots"),
+        )
+
+        direct = Parser(
+            xes_path, coverage_percentage=0.8, discovery_algorithm="inductive", config=config,
+        ).parse_result
+
+        preloaded = load_and_discover(xes_path, coverage_percentage=0.8, discovery_algorithm="inductive")
+        via_preloaded = Parser(
+            xes_path, coverage_percentage=0.8, discovery_algorithm="inductive", config=config,
+            preloaded=preloaded,
+        ).parse_result
+
+        assert direct.transitions.keys() == via_preloaded.transitions.keys()
+        for name, d_trans in direct.transitions.items():
+            p_trans = via_preloaded.transitions[name]
+            assert set(d_trans.effects.keys()) == set(p_trans.effects.keys())
+            for attr, d_effect in d_trans.effects.items():
+                p_effect = p_trans.effects[attr]
+                assert d_effect.appearance_level == p_effect.appearance_level
+                assert d_effect.value_level == p_effect.value_level
+                assert d_effect.value_probabilities == p_effect.value_probabilities
+
+            d_branches = d_trans.xor_branches or []
+            p_branches = p_trans.xor_branches or []
+            assert len(d_branches) == len(p_branches)
+            for d_b, p_b in zip(d_branches, p_branches):
+                assert d_b.place_name == p_b.place_name
+                assert d_b.cascade_level == p_b.cascade_level
+                assert d_b.routing_source == p_b.routing_source
+                assert d_b.guards == p_b.guards
