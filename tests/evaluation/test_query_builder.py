@@ -284,22 +284,40 @@ class TestGoalFromFinalEvent:
         result = _goal_from_final_event({"status": "unknown_val"}, _CATALOG_MIXED)
         assert result == [[]]
 
+    def test_categorical_attr_matches_original_case(self):
+        """possible_values holds the raw, unsanitized values observed in the
+        log (e.g. "NIL", "A") — a raw_value with the same original casing
+        must match directly, without lowercasing either side."""
+        catalog = {"dismissal": {
+            "type": "categorical", "possible_values": ["NIL", "A"], "bin_boundaries": [],
+        }}
+        result = _goal_from_final_event({"dismissal": "NIL"}, catalog)
+        assert result == [[{"attribute": "dismissal", "predicate": "=", "value": "NIL"}]]
+
     def test_boolean_attr_included(self):
         result = _goal_from_final_event({"critical": "true"}, _CATALOG_MIXED)
         assert result == [[{"attribute": "critical", "predicate": "=", "value": "true"}]]
 
     def test_numerical_attr_binned(self):
-        result = _goal_from_final_event({"score": 75.0}, _CATALOG_MIXED)
+        # final_attrs holds values already discretized into their bin label
+        # by TraceReplayer._normalize_event_value (never a raw float) — see
+        # _goal_from_final_event's docstring.
+        result = _goal_from_final_event({"score": "gte_50_0"}, _CATALOG_MIXED)
         conds = result[0]
         assert len(conds) == 1
         assert conds[0]["attribute"] == "score"
-        # 75 > 50 → second bin → "gte_50_0"
         assert conds[0]["value"] == "gte_50_0"
 
     def test_numerical_attr_first_bin(self):
-        result = _goal_from_final_event({"score": 20.0}, _CATALOG_MIXED)
+        result = _goal_from_final_event({"score": "lte_50_0"}, _CATALOG_MIXED)
         conds = result[0]
         assert conds[0]["value"] == "lte_50_0"
+
+    def test_numerical_attr_unknown_bin_label_skipped(self):
+        """A bin label not among the catalog's possible_values (e.g. stale
+        cache, mismatched discretizer boundaries) is skipped, not an error."""
+        result = _goal_from_final_event({"score": "gte_999_0"}, _CATALOG_MIXED)
+        assert result == [[]]
 
     def test_multiple_attrs_combined(self):
         result = _goal_from_final_event(

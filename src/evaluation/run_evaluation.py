@@ -330,8 +330,10 @@ def evaluate_log(
             # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
             replayer = TraceReplayer(prepared, petri_net_model, config=analysis_cfg)
             query_results: List[QueryResult] = []
-            for trace in tts.test_cases:
+            n_test_cases = len(tts.test_cases)
+            for test_idx, trace in enumerate(tts.test_cases, start=1):
                 trace_id = str(trace.attributes.get("concept:name", "unknown")).replace(" ", "_")
+                logger.info("[%s] Test case %d/%d: %s", log_id, test_idx, n_test_cases, trace_id)
                 prefix = _sample_prefix(
                     trace, replayer,
                     min_prefix_pct=cfg.min_prefix_pct,

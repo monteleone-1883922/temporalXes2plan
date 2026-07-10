@@ -17,7 +17,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import core_utils
 from evaluation.trace_sampler import PrefixSample
 
 logger = logging.getLogger(__name__)
@@ -186,14 +185,28 @@ def _goal_from_final_event(
 ) -> List[List[Dict[str, Any]]]:
     """Build a single-AND-clause goal from the final prefix event's attributes.
 
-    Only attributes present in the catalog are included. Numerical attributes
-    are matched against bin_boundaries to find the discretized interval label
-    from the catalog's possible_values. Categorical and boolean attributes are
-    matched directly against possible_values (case-insensitive for booleans).
-    Attributes whose value does not match any known catalog value are skipped.
+    final_attrs comes from TraceReplayer.replay_evaluation_split()'s
+    expected_final_attributes — the log-observed accumulated state (see
+    trace_replayer.py's _build_snapshots/_normalize_event_value) — which
+    already carries values in the *same representation* as
+    attribute_catalog's possible_values: numerical values are already
+    discretized into their bin label (e.g. "gte_10_lte_20"), and categorical
+    values are the raw, unsanitized strings observed in the log (PDDL
+    sanitization only happens later, at problem/domain render time via
+    core_utils.sanitize_value — see prepared_schema_builder.py). So matching
+    is a direct string comparison for both — no re-discretization, no
+    sanitize_name(), which previously always mismatched (re-discretizing an
+    already-discretized label raised ValueError; lowercasing a categorical
+    value before comparing it against possible_values' original casing never
+    matched) and made every Q3 goal come out empty in practice.
+
+    Only attributes present in the catalog are included. Boolean attributes
+    are matched case-insensitively. Attributes whose value does not match any
+    known catalog value are skipped.
 
     Args:
-        final_attrs: Dict of attribute name → raw value from the last prefix event.
+        final_attrs: Dict of attribute name → value from the final replayed
+            state (see docstring above for its representation).
         attribute_catalog: Serialized catalog from current.json.
 
     Returns:
@@ -209,25 +222,15 @@ def _goal_from_final_event(
 
         attr_type = entry.get("type", "")
         possible_values: List[str] = entry.get("possible_values", [])
-        bin_boundaries: List[float] = entry.get("bin_boundaries", [])
 
         matched_label: Optional[str] = None
 
-        if attr_type == "numerical" and bin_boundaries:
-            try:
-                numeric = float(raw_value)
-            except (TypeError, ValueError):
-                continue
-            label = core_utils.discretize_value(attr, numeric, {attr: bin_boundaries})
-            matched_label = label if label in possible_values else None
-
-        elif attr_type == "boolean":
+        if attr_type == "boolean":
             str_val = str(raw_value).lower()
             if str_val in ("true", "false") and str_val in possible_values:
                 matched_label = str_val
-
         else:
-            str_val = core_utils.sanitize_name(str(raw_value))
+            str_val = str(raw_value)
             if str_val in possible_values:
                 matched_label = str_val
 
