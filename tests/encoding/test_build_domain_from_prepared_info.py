@@ -341,6 +341,75 @@ class TestDurativeAction:
         assert domain.has_deadline is False  # no duration data -> no durative action
 
 
+class TestDurationRescale:
+    """domain_builder._maybe_rescale_durations — see
+    encoding/domain_builder.py::_FD_MAX_DURATION_VALUE for why this exists:
+    Fast Downward silently corrupts its internal search state (does not
+    raise a clean error) when a durative action's duration exceeds
+    INT32_MAX/1000 ~= 2,147,483.647."""
+
+    _FD_MAX = 2147483.647
+
+    def test_no_rescale_when_under_limit(self):
+        duration = ActionDurationStats(effective_min=5.0, effective_max=10.0, source="external")
+        prepared = _simple_prepared(duration=duration)
+        domain = build_domain_from_prepared_info(prepared, use_durative=True)
+        assert domain.duration_scale_factor == 1.0
+        action = next(a for a in domain.actions if a.name == "execute_activity_a")
+        assert action.duration_min == 5.0
+        assert action.duration_max == 10.0
+
+    def test_rescale_applied_when_over_limit(self):
+        duration = ActionDurationStats(
+            effective_min=12990198.67, effective_max=60021504.9, source="external",
+        )
+        prepared = _simple_prepared(duration=duration)
+        domain = build_domain_from_prepared_info(prepared, use_durative=True)
+        assert domain.duration_scale_factor > 1.0
+        action = next(a for a in domain.actions if a.name == "execute_activity_a")
+        assert action.duration_max <= self._FD_MAX
+        assert action.duration_min <= self._FD_MAX
+        # Original ratio between min/max must be preserved (uniform scaling).
+        assert action.duration_max == 60021504.9 / domain.duration_scale_factor
+        assert action.duration_min == 12990198.67 / domain.duration_scale_factor
+
+    def test_rescale_picks_finest_sufficient_unit(self):
+        # 5,000,000s: /60 (minutes) -> 83333.3, still way under the limit but
+        # /1 already fails, so the finest candidate that clears the bar is
+        # minutes (60) -- not hours/days/weeks.
+        duration = ActionDurationStats(effective_min=0.0, effective_max=5_000_000.0, source="external")
+        prepared = _simple_prepared(duration=duration)
+        domain = build_domain_from_prepared_info(prepared, use_durative=True)
+        assert domain.duration_scale_factor == 60.0
+
+    def test_rescale_never_leaves_value_over_limit(self):
+        duration = ActionDurationStats(effective_min=0.0, effective_max=6e11, source="external")
+        prepared = _simple_prepared(duration=duration)
+        domain = build_domain_from_prepared_info(prepared, use_durative=True)
+        action = next(a for a in domain.actions if a.name == "execute_activity_a")
+        assert action.duration_max <= self._FD_MAX
+
+    def test_rescale_applies_uniformly_to_every_durative_action(self):
+        """A single over-limit action must trigger the same scale factor for
+        every OTHER durative action too — different actions on different time
+        axes within the same plan would be meaningless."""
+        big_duration = ActionDurationStats(effective_min=0.0, effective_max=6_000_000.0, source="external")
+        small_duration = ActionDurationStats(effective_min=1.0, effective_max=2.0, source="external")
+        prepared = _sequence_prepared(duration=big_duration)
+        prepared.transitions["activity_b"] = PreparedTransition(
+            activity_name="activity_b", input_places=["p_mid"], preconditions=[], effect_groups=[],
+            duration=small_duration,
+        )
+        domain = build_domain_from_prepared_info(prepared, use_durative=True)
+        factor = domain.duration_scale_factor
+        assert factor > 1.0
+        action_a = next(a for a in domain.actions if a.name == "execute_activity_a")
+        action_b = next(a for a in domain.actions if a.name == "execute_activity_b")
+        assert action_a.duration_max == 6_000_000.0 / factor
+        assert action_b.duration_max == 2.0 / factor
+        assert action_b.duration_min == 1.0 / factor
+
+
 class TestTauAction:
     def test_plain_tau_produces_execute_action(self):
         nodes = [

@@ -20,6 +20,7 @@ This file only orchestrates them and assembles the final PDDLDomain.
 """
 from typing import Dict, List, Optional, Tuple
 
+import core_utils as utils
 from encoding.effect_group_builder import _prepared_effect_groups
 from encoding.prepared_graph_utils import (
     _prepared_graph_index, _prepared_negated_attributes, _prepared_xor_branch_of,
@@ -31,6 +32,77 @@ from encoding.prepared_schema_builder import _prepared_constants, _prepared_pred
 from encoding.pddl_model import PDDLAction, PDDLBaseAction, PDDLCondition, PDDLDomain, PDDLDurativeAction, PDDLEffect
 from encoding.transition_action_builder import _build_prepared_transition_actions
 from models import AnalysisConfig, ParseResult
+
+logger = utils.get_logger(__name__)
+
+# Fast Downward represents durative-action numeric values (durations, costs)
+# internally as integers scaled by 1000 (confirmed by FD's own "rounding
+# numeric constants ... to an accuracy of 0.001" warning) — so the largest
+# representable value is INT32_MAX / 1000. Domains built from real event-log
+# timing data (durations spanning months/years, in raw seconds) can exceed
+# this by a wide margin, which silently overflows FD's internal state during
+# search instead of raising a clean error (see _maybe_rescale_durations).
+_FD_MAX_DURATION_VALUE = 2147483.647
+
+# Candidate rescale units, finest first — _maybe_rescale_durations picks the
+# smallest factor (finest unit) that brings the domain's max duration back
+# under _FD_MAX_DURATION_VALUE, to lose as little precision as possible.
+_DURATION_RESCALE_UNITS: List[Tuple[float, str]] = [
+    (60.0, "minutes"),
+    (3600.0, "hours"),
+    (86400.0, "days"),
+    (604800.0, "weeks"),
+]
+
+
+def _maybe_rescale_durations(domain: PDDLDomain) -> None:
+    """Rescale every durative action's duration bounds when the domain's max
+    duration exceeds Fast Downward's internal numeric limit, so the planner
+    doesn't silently corrupt its own search state (see _FD_MAX_DURATION_VALUE).
+
+    Sets domain.duration_scale_factor (1.0 if no rescale was needed) and logs
+    a WARNING describing the unit shift whenever one is applied — callers
+    that build a deadline (TIL) for this domain must divide it by the same
+    factor to stay on the same PDDL time axis as the (now rescaled) actions.
+    """
+    durative_actions = [a for a in domain.actions if isinstance(a, PDDLDurativeAction)]
+    max_duration = max((a.duration_max for a in durative_actions), default=0.0)
+
+    if max_duration <= _FD_MAX_DURATION_VALUE:
+        domain.duration_scale_factor = 1.0
+        logger.debug(
+            "Duration rescale check: max action duration %.3fs is within "
+            "Fast Downward's internal limit (%.3fs) — no shift needed.",
+            max_duration, _FD_MAX_DURATION_VALUE,
+        )
+        return
+
+    factor: Optional[float] = None
+    unit_name = ""
+    for candidate_factor, candidate_unit in _DURATION_RESCALE_UNITS:
+        if max_duration / candidate_factor <= _FD_MAX_DURATION_VALUE:
+            factor, unit_name = candidate_factor, candidate_unit
+            break
+    if factor is None:
+        # Extreme fallback: not even weeks are enough — compute a custom
+        # factor with a safety margin instead of leaving the domain broken.
+        factor = max_duration / (_FD_MAX_DURATION_VALUE * 0.9)
+        unit_name = f"custom(/{factor:.6g})"
+
+    for action in durative_actions:
+        action.duration_min /= factor
+        action.duration_max /= factor
+    domain.duration_scale_factor = factor
+
+    logger.warning(
+        "Duration unit shift applied: max action duration %.1fs exceeds "
+        "Fast Downward's internal limit (~%.1fs) — rescaled all durative "
+        "action bounds by /%.4g (seconds -> %s) to avoid numeric overflow "
+        "during search. duration_scale_factor=%.6g stored on the domain; "
+        "any deadline (TIL) built for this domain must be divided by this "
+        "same factor to stay on the same time axis.",
+        max_duration, _FD_MAX_DURATION_VALUE, factor, unit_name, factor,
+    )
 
 
 class DomainBuilder:
@@ -190,6 +262,7 @@ def build_domain_with_variant_map(
         has_costs=has_costs,
         has_deadline=effective_deadline,
     )
+    _maybe_rescale_durations(domain)
     return domain, variant_map
 
 

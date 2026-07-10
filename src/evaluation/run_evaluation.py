@@ -347,21 +347,21 @@ def evaluate_log(
                 # Q1 — process completion, no deadline
                 q1_spec = build_q1(prefix, cfg.cost_weight)
                 query_results.append(
-                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable)
+                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
                 )
 
                 # Q2 — completion within remaining time budget
                 q2_spec = build_q2(prefix, cfg.cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
                     )
 
                 # Q3 — completion within budget + attribute constraints
                 q3_spec = build_q3(prefix, serialized, cfg.cost_weight)
                 if q3_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable)
+                        _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
                     )
                 else:
                     query_id = f"{log_id}_{trace_id}_Q3"
@@ -417,8 +417,19 @@ def _run_query(
     variant_map: Dict[str, Any],
     pddl_dir: Optional[Path] = None,
     is_replayable: bool = True,
+    duration_scale_factor: float = 1.0,
 ) -> QueryResult:
     query_id = f"{log_id}_{trace_id}_{spec.query_type}"
+
+    # spec.deadline is always real-world seconds (QuerySpec's own semantics,
+    # unchanged) — divide by duration_scale_factor here, at the point it
+    # enters the PDDL, so it stays on the same time axis as the domain's
+    # (possibly rescaled) action durations. See
+    # encoding/domain_builder.py::_maybe_rescale_durations.
+    scaled_deadline = (
+        spec.deadline / duration_scale_factor
+        if spec.deadline is not None else None
+    )
 
     problem_text = api.build_problem(
         serialized=serialized,
@@ -428,7 +439,7 @@ def _run_query(
         metric=spec.metric,
         cost_weight=spec.cost_weight,
         require_completion=spec.require_completion,
-        deadline=spec.deadline,
+        deadline=scaled_deadline,
         temporal=True
     )
 

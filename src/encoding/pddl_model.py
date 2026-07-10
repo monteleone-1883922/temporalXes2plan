@@ -578,6 +578,13 @@ class PDDLDomain:
     has_costs: bool = False
     has_deadline: bool = False
     deadline_predicate: str = "deadline_ok"
+    # Set by domain_builder.py's post-build rescale step when at least one
+    # durative action's duration exceeds Fast Downward's internal numeric
+    # limit (~2,147,483.647, INT32_MAX/1000) — 1.0 means no rescale happened.
+    # Any deadline (TIL) built for a problem targeting this domain must be
+    # divided by this same factor to stay on the same PDDL time axis as the
+    # actions.
+    duration_scale_factor: float = 1.0
 
     def __post_init__(self) -> None:
         if self.has_deadline:

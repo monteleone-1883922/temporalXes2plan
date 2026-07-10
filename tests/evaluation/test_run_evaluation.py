@@ -21,6 +21,7 @@ from evaluation.run_evaluation import (
     EvalConfig,
     _load_log_result,
     _prompt_csv_mapping,
+    _run_query,
     build_parser,
     evaluate_log,
     main,
@@ -404,6 +405,54 @@ class TestEvaluateLogSuccess:
         q3_records = [q for q in lr.queries if q.query_type == "Q3"]
         assert len(q3_records) == 1
         assert q3_records[0].solvability == "skipped_no_attributes"
+
+
+# ---------------------------------------------------------------------------
+# _run_query — deadline must be divided by duration_scale_factor before
+# entering the PDDL problem, to stay on the domain's (possibly rescaled)
+# time axis — see encoding/domain_builder.py::_maybe_rescale_durations.
+# ---------------------------------------------------------------------------
+
+class TestRunQueryDurationScale:
+    def _spec(self, deadline):
+        spec = MagicMock()
+        spec.query_type = "Q2"
+        spec.init_places = ["p_start"]
+        spec.init_effects = []
+        spec.goal_sop = [[]]
+        spec.metric = "minimize_weighted"
+        spec.cost_weight = 0.001
+        spec.require_completion = True
+        spec.deadline = deadline
+        return spec
+
+    def _call(self, tmp_path, deadline, duration_scale_factor):
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+        prefix = _make_prefix()
+        plan_result = MagicMock(success=False, plan_steps=None, solvability="unsolvable_resource", search_time_s=1.0)
+
+        with patch("evaluation.run_evaluation._run_with_retry", return_value=(plan_result, 1)), \
+             patch("evaluation.run_evaluation.q2_metrics", return_value={}):
+            _run_query(
+                "log_1", "case1", self._spec(deadline), "(define (domain test))",
+                api, cfg, _make_serialized(), tmp_path / "failures", prefix,
+                MagicMock(), {}, pddl_dir=tmp_path / "pddl",
+                duration_scale_factor=duration_scale_factor,
+            )
+        return api
+
+    def test_no_deadline_stays_none_regardless_of_scale(self, tmp_path):
+        api = self._call(tmp_path, deadline=None, duration_scale_factor=3600.0)
+        assert api.build_problem.call_args.kwargs["deadline"] is None
+
+    def test_deadline_divided_by_scale_factor(self, tmp_path):
+        api = self._call(tmp_path, deadline=7200.0, duration_scale_factor=3600.0)
+        assert api.build_problem.call_args.kwargs["deadline"] == 2.0
+
+    def test_deadline_unchanged_when_no_rescale(self, tmp_path):
+        api = self._call(tmp_path, deadline=7200.0, duration_scale_factor=1.0)
+        assert api.build_problem.call_args.kwargs["deadline"] == 7200.0
 
 
 # ---------------------------------------------------------------------------
