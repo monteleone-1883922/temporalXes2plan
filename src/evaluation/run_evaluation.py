@@ -224,7 +224,7 @@ def evaluate_log(
                     )
                     domain, variant_map = build_domain_with_variant_map(
                         prepared, config=analysis_cfg,
-                        use_durative=True, use_costs=True,
+                        use_durative=True, use_costs=True, has_deadline=True
                     )
                     n_activities = len(petri_net_model.activities)
                     used_optimizer = False

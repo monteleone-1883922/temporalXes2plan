@@ -6,6 +6,7 @@ are built once, up front, independently of the per-transition action loop.
 """
 from typing import Dict, Set
 
+import core_utils
 from encoding.pddl_model import (
     PDDLConstants, PDDLObject, PDDLPredicate, PDDLPredicates, PDDLType, PDDLTypes,
 )
@@ -46,7 +47,7 @@ def _prepared_constants(prepared: PreparedDomainInput) -> PDDLConstants:
         if entry.attribute_type in ("categorical", "numerical"):
             type_name = f"{attr_name}_val"
             for val in sorted(str(v) for v in entry.possible_values):
-                constants.add(PDDLObject(val, type_name))
+                constants.add(PDDLObject(core_utils.sanitize_value(attr_name, val), type_name))
 
     return constants
 

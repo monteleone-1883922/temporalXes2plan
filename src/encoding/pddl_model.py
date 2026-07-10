@@ -365,6 +365,8 @@ class PDDLBaseAction:
     additional_cost: Optional[float] = None
     effect_probability: float = 1.0
     effect_attributes: Set[str] = field(default_factory=set)
+    has_costs: bool = False
+    has_deadline: bool = False
 
     # ------------------------------------------------------------------
     # Rendering helpers shared by PDDLAction / PDDLDurativeAction
@@ -455,15 +457,13 @@ class PDDLAction(PDDLBaseAction):
 
     def to_pddl(
         self,
-        has_costs: bool = False,
-        has_deadline: bool = False,
         deadline_predicate: str = "deadline_ok",
     ) -> str:
         """Render to a complete (:action ...) block."""
-        deadline_atoms = [f"({deadline_predicate})"] if has_deadline else []
-        cost = self._total_cost() if has_costs else None
+        deadline_atoms = [f"({deadline_predicate})"] if self.has_deadline else []
+        cost = self._total_cost() if self.has_costs else None
         lines = [
-            f"  (:action {self.name}",
+            f"  (:action {core_utils.sanitize_name(self.name)}",
             self._render_parameters_block(),
             self._render_condition_block(
                 ":precondition", self.preconditions,
@@ -513,20 +513,18 @@ class PDDLDurativeAction(PDDLBaseAction):
 
     def to_pddl(
         self,
-        has_costs: bool = False,
-        has_deadline: bool = False,
         deadline_predicate: str = "deadline_ok",
     ) -> str:
         """Render to a complete (:durative-action ...) block."""
-        lines = [f"  (:durative-action {self.name}", self._render_parameters_block(),
+        lines = [f"  (:durative-action {core_utils.sanitize_name(self.name)}", self._render_parameters_block(),
                  f"    :duration (and (>= ?duration {self.duration_min})"
                  f" (<= ?duration {self.duration_max}))"]
 
         condition_parts = []
         if self.conditions_at_start:
             condition_parts.append(self._render_timed_block("at start", self.conditions_at_start))
-        if self.conditions_over_all or has_deadline:
-            condition_parts.append(self._render_timed_block("over all", self.conditions_over_all, [f"({deadline_predicate})"] if has_deadline else []))
+        if self.conditions_over_all or self.has_deadline:
+            condition_parts.append(self._render_timed_block("over all", self.conditions_over_all, [f"({deadline_predicate})"] if self.has_deadline else []))
         if self.conditions_at_end:
             condition_parts.append(self._render_timed_block("at end", self.conditions_at_end))
 
@@ -540,7 +538,7 @@ class PDDLDurativeAction(PDDLBaseAction):
                 lines.append(f"      {part}")
             lines.append("    )")
 
-        cost = self._total_cost() if has_costs else None
+        cost = self._total_cost() if self.has_costs else None
         effect_parts = []
         if self.effects_at_start:
             effect_parts.append(self._render_timed_effect_block("at start", self.effects_at_start))
@@ -584,6 +582,11 @@ class PDDLDomain:
     def __post_init__(self) -> None:
         if self.has_deadline:
             self.predicates.add(PDDLPredicate(self.deadline_predicate))
+            for act in self.actions:
+                act.has_deadline = True
+        if self.has_costs:
+            for act in self.actions:
+                act.has_costs = True
 
     def write(self, path: Path) -> str:
         """Serialize this domain to PDDL text, write it to path, and return the text."""
@@ -604,10 +607,6 @@ class PDDLDomain:
         if self.has_costs:
             sections.append("  (:functions\n    (total-cost)\n  )")
         for action in self.actions:
-            sections.append(action.to_pddl(
-                has_costs=self.has_costs,
-                has_deadline=self.has_deadline,
-                deadline_predicate=self.deadline_predicate,
-            ))
+            sections.append(str(action))
         sections.append(")")
         return "\n\n".join(sections) + "\n"

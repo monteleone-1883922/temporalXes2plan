@@ -178,6 +178,7 @@ class Pipeline:
             domain_name=domain_name,
             use_durative=use_durative,
             use_costs=use_costs,
+            has_deadline=use_durative
         )
 
         return BuildResult(
