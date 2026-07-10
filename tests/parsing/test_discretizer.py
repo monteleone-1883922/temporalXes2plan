@@ -4,6 +4,7 @@ Tests for parsing.discretizer.Discretizer — pure unit tests.
 All tests build synthetic pm4py EventLogs in-memory; no XES files are read.
 """
 import numpy as np
+import pm4py
 import pytest
 from unittest.mock import patch
 
@@ -38,6 +39,24 @@ def _tiny_cluster_log():
     """Log with a dominant cluster (95%) and a tiny outlier cluster (5%)."""
     traces = [make_trace(make_event("A", crp=5.0 + i * 0.1), case_id=f"main_{i}") for i in range(38)]
     traces += [make_trace(make_event("A", crp=200.0), case_id=f"tiny_{i}") for i in range(2)]
+    return make_log(*traces)
+
+
+def _multi_attr_log(n: int = 40):
+    """Log with 4 independent numeric attributes, each with a different
+    distribution — used to exercise fit()'s parallel (multi-attribute) path."""
+    traces = []
+    for i in range(n):
+        traces.append(make_trace(
+            make_event(
+                "A",
+                bimodal=5.0 + i * 0.1 if i < n // 2 else 100.0 + i * 0.1,
+                skewed=float(i % 7) ** 2,
+                uniform=float(i),
+                constant=42.0,
+            ),
+            case_id=f"c{i}",
+        ))
     return make_log(*traces)
 
 
@@ -87,6 +106,37 @@ class TestDiscretizerFit:
         d = Discretizer()
         d.fit(_bimodal_log(), numeric_attributes=[])
         assert d.boundaries == {}
+
+    def test_fit_parallel_path_matches_sequential_per_attribute_results(self):
+        """fit() with multiple attributes takes the ThreadPoolExecutor path
+        (src/parsing/discretizer.py:fit) — its output must be identical,
+        attribute by attribute, to calling _find_best_boundaries() directly
+        in sequence for each attribute (same log, same config, same seed)."""
+        log = _multi_attr_log()
+        attrs = ["bimodal", "skewed", "uniform", "constant"]
+
+        d_parallel = Discretizer()
+        d_parallel.fit(log, numeric_attributes=attrs)
+
+        d_sequential = Discretizer()
+        df = pm4py.convert_to_dataframe(log)
+        expected: dict = {}
+        for attr in attrs:
+            values = df[attr].dropna().to_numpy(dtype=float)
+            values = values[~np.isnan(values)]
+            n_unique = len(np.unique(values))
+            if len(values) < 2 or n_unique < 2:
+                continue
+            bounds = d_sequential._find_best_boundaries(attr, values, n_unique)
+            if bounds:
+                expected[attr] = bounds
+
+        assert d_parallel.boundaries == expected
+        # Determinism: key insertion order follows numeric_attributes order,
+        # not thread completion order.
+        assert list(d_parallel.boundaries.keys()) == [
+            a for a in attrs if a in d_parallel.boundaries
+        ]
 
 
 class TestClusterResiduals:

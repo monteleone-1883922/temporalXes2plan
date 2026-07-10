@@ -1,6 +1,8 @@
+import concurrent.futures
 import jenkspy
 import json
 import numpy as np
+import os
 import pm4py
 from pathlib import Path
 from pm4py.objects.log.obj import EventLog
@@ -79,6 +81,8 @@ class Discretizer:
 
         df = pm4py.convert_to_dataframe(log)
 
+        # --- Sequential: cheap column lookup + array extraction, unchanged logic ---
+        work_items: List[Tuple[str, np.ndarray, int]] = []
         for attr in numeric_attributes:
             col = self._find_column(df, attr)
             if col is None:
@@ -105,7 +109,29 @@ class Discretizer:
                 )
                 continue
 
-            bounds = self._find_best_boundaries(attr, values, n_unique)
+            work_items.append((attr, values, n_unique))
+
+        # --- Parallel: each attribute's KDE + Jenks pipeline is independent
+        # (see _find_best_boundaries — only reads self.config, no shared
+        # mutable state) and mostly runs in GIL-releasing C extensions
+        # (scipy's gaussian_kde, jenkspy). executor.map() preserves
+        # work_items order in its results regardless of completion order, so
+        # the self.boundaries merge below stays deterministic. ---
+        if len(work_items) > 1:
+            max_workers = min(len(work_items), os.cpu_count() or 4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                all_bounds = list(executor.map(
+                    lambda item: self._find_best_boundaries(item[0], item[1], item[2]),
+                    work_items,
+                ))
+        else:
+            all_bounds = [
+                self._find_best_boundaries(attr, values, n_unique)
+                for attr, values, n_unique in work_items
+            ]
+
+        # --- Sequential merge: unchanged logic, deterministic order ---
+        for (attr, _, _), bounds in zip(work_items, all_bounds):
             if bounds:
                 self.boundaries[attr] = bounds
                 logger.info("Discretizer: '%s' → %d bins, boundaries=%s", attr, len(bounds) + 1, bounds)
