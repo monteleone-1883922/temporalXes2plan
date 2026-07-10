@@ -5,7 +5,9 @@ scanning the raw PetriNetLog.  All sanitization, discretization, and
 ignored-attribute filtering has already been performed during preprocessing.
 """
 
+import concurrent.futures
 import numpy as np
+import os
 import pandas as pd
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -197,62 +199,95 @@ class DecisionMiner:
         Returns:
             Dict mapping place name to XorSplitGuards (only "dt" successes).
         """
+        candidates = [
+            (place_name, screening)
+            for place_name, screening in xor_screening.items()
+            if screening.action == "dt"
+        ]
+
+        if len(candidates) > 1:
+            max_workers = min(len(candidates), os.cpu_count() or 4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                mined = list(executor.map(
+                    lambda item: self._mine_one_xor_split(item[0], item[1], preprocessed_log),
+                    candidates,
+                ))
+        else:
+            mined = [
+                self._mine_one_xor_split(place_name, screening, preprocessed_log)
+                for place_name, screening in candidates
+            ]
+
         result: Dict[str, XorSplitGuards] = {}
-
-        for place_name, screening in xor_screening.items():
-            if screening.action != "dt":
-                continue
-
-            active_branches = {
-                name for name, branch in screening.branches.items()
-                if branch.status == "active"
-            }
-            fallback_branches = {name for name, branch in screening.branches.items() if branch.status == "fallback"}
-
-            X, y = self._build_feature_matrix(
-                preprocessed_log, place_name, active_branches
-            )
-            if X.empty or y.nunique() < 2:
-                logger.debug(
-                    "[XOR '%s'] DT skipped — feature matrix has %d rows and %d distinct class(es) "
-                    "after excluding low-probability branches (need ≥2 classes). "
-                    "Falling back to probabilistic costs.",
-                    place_name, len(X), y.nunique() if not X.empty else 0,
-                )
-                screening.action = "fallback"
-                continue
-
-            guards, accuracy = self._train_and_extract(X, y)
-
-            if accuracy < self.config.dt_min_accuracy:
-                logger.debug(
-                    "[XOR '%s'] DT accuracy %.3f < threshold %.2f — "
-                    "guards discarded, falling back to probabilistic costs.",
-                    place_name, accuracy, self.config.dt_min_accuracy,
-                )
-                screening.action = "fallback"
-                continue
-            for name in fallback_branches:
-                guards.pop(name, [])
-            if not guards:
-                logger.debug(
-                    "[XOR '%s'] DT produced no guards — falling back to probabilistic costs.",
-                    place_name,
-                )
-                screening.action = "fallback"
-                continue
-
-            result[place_name] = XorSplitGuards(
-                guards=guards,
-                total_samples=screening.total_samples,
-                dt_accuracy=round(accuracy, 4),
-            )
-            logger.debug(
-                "[XOR '%s'] DT accepted — accuracy=%.3f, guards produced for %d branch(es): %s.",
-                place_name, accuracy, len(guards), sorted(guards.keys()),
-            )
-
+        for entry in mined:
+            if entry is not None:
+                place_name, guards = entry
+                result[place_name] = guards
         return result
+
+    def _mine_one_xor_split(
+        self,
+        place_name: str,
+        screening: XorSplitScreening,
+        preprocessed_log: PreprocessedLog,
+    ) -> Optional[Tuple[str, XorSplitGuards]]:
+        """Train (or fall back) for a single XOR split — the independent unit
+        of work parallelized by mine_xor_splits(). Mutates screening.action
+        in place on fallback, exactly like the code this was extracted from;
+        safe to run concurrently across different place_name/screening pairs
+        since each call only touches its own screening object.
+
+        Returns:
+            (place_name, XorSplitGuards) if guards were produced, else None.
+        """
+        active_branches = {
+            name for name, branch in screening.branches.items()
+            if branch.status == "active"
+        }
+        fallback_branches = {name for name, branch in screening.branches.items() if branch.status == "fallback"}
+
+        X, y = self._build_feature_matrix(
+            preprocessed_log, place_name, active_branches
+        )
+        if X.empty or y.nunique() < 2:
+            logger.debug(
+                "[XOR '%s'] DT skipped — feature matrix has %d rows and %d distinct class(es) "
+                "after excluding low-probability branches (need ≥2 classes). "
+                "Falling back to probabilistic costs.",
+                place_name, len(X), y.nunique() if not X.empty else 0,
+            )
+            screening.action = "fallback"
+            return None
+
+        guards, accuracy = self._train_and_extract(X, y)
+
+        if accuracy < self.config.dt_min_accuracy:
+            logger.debug(
+                "[XOR '%s'] DT accuracy %.3f < threshold %.2f — "
+                "guards discarded, falling back to probabilistic costs.",
+                place_name, accuracy, self.config.dt_min_accuracy,
+            )
+            screening.action = "fallback"
+            return None
+        for name in fallback_branches:
+            guards.pop(name, [])
+        if not guards:
+            logger.debug(
+                "[XOR '%s'] DT produced no guards — falling back to probabilistic costs.",
+                place_name,
+            )
+            screening.action = "fallback"
+            return None
+
+        logger.debug(
+            "[XOR '%s'] DT accepted — accuracy=%.3f, guards produced for %d branch(es): %s.",
+            place_name, accuracy, len(guards), sorted(guards.keys()),
+        )
+        return place_name, XorSplitGuards(
+            guards=guards,
+            total_samples=screening.total_samples,
+            dt_accuracy=round(accuracy, 4),
+        )
 
     # -------------------------------------------------------------------------
     # Private: XOR feature matrix
@@ -673,83 +708,119 @@ class DecisionMiner:
         Returns:
             Dict mapping transition name to TransitionEffects.
         """
+        items = list(effect_screening.items())
+
+        if len(items) > 1:
+            max_workers = min(len(items), os.cpu_count() or 4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                mined = list(executor.map(
+                    lambda item: self._mine_one_transition_effects(item[0], item[1], preprocessed_log),
+                    items,
+                ))
+        else:
+            mined = [
+                self._mine_one_transition_effects(act, t_scr, preprocessed_log)
+                for act, t_scr in items
+            ]
+
         result: Dict[str, TransitionEffects] = {}
-
-        for act, t_scr in effect_screening.items():
-            matrix_built = False
-            X: pd.DataFrame = pd.DataFrame()
-            y_presence: Dict[str, pd.Series] = {}
-            y_value: Dict[str, pd.Series] = {}
-
-            effects: Dict[str, ConditionalEffect] = {}
-
-            for attr, attr_scr in t_scr.attributes.items():
-                p = attr_scr.presence_probability
-                possible_values = list(attr_scr.values.keys())
-
-                # --- 2A — appearance ---
-                app_guards: Optional[EffectGuards] = None
-                if attr_scr.appearance_action == "dt":
-                    if not matrix_built:
-                        X, y_presence, y_value = self._build_effect_matrix(
-                            preprocessed_log, act
-                        )
-                        matrix_built = True
-                    if attr not in y_presence or X.empty:
-                        app_status = "fallback"
-                        attr_scr.appearance_action = "fallback"
-                    else:
-                        app_guards, app_status = self._mine_appearance(
-                            X, y_presence[attr]
-                        )
-                        if app_status != "dt":
-                            attr_scr.appearance_action = app_status
-                else:
-                    app_status = attr_scr.appearance_action
-
-                # --- 2B — value ---
-                val_guards: Optional[EffectGuards] = None
-                if attr_scr.value_action == "dt":
-                    if not matrix_built:
-                        X, y_presence, y_value = self._build_effect_matrix(
-                            preprocessed_log, act
-                        )
-                        matrix_built = True
-                    if attr not in y_value or X.empty:
-                        val_status = "fallback"
-                        attr_scr.value_action = "fallback"
-                    else:
-                        active_vals = {
-                            str(v) for v, vs in attr_scr.values.items()
-                            if vs.status == "active"
-                        }
-                        val_guards, val_status = self._mine_value(
-                            X, y_value[attr],
-                            active_vals if active_vals else None,
-                        )
-                        if val_status != "dt":
-                            attr_scr.value_action = val_status
-                else:
-                    val_status = attr_scr.value_action
-
-                effects[attr] = ConditionalEffect(
-                    attribute=attr,
-                    presence_probability=round(p, 4),
-                    possible_values=possible_values,
-                    appearance=app_guards,
-                    appearance_status=app_status,
-                    value=val_guards,
-                    value_status=val_status,
-                )
-
-            if effects:
-                result[act] = TransitionEffects(
-                    transition_name=act,
-                    total_firings=t_scr.total_firings,
-                    effects=effects,
-                )
-
+        for entry in mined:
+            if entry is not None:
+                act, transition_effects = entry
+                result[act] = transition_effects
         return result
+
+    def _mine_one_transition_effects(
+        self,
+        act: str,
+        t_scr: TransitionScreening,
+        preprocessed_log: PreprocessedLog,
+    ) -> Optional[Tuple[str, TransitionEffects]]:
+        """Train (or fall back) every DT-screened attribute effect for a single
+        transition — the independent unit of work parallelized by
+        mine_effects(). The lazily-built feature matrix (X/y_presence/y_value)
+        is local to this call and shared only across this transition's own
+        attributes, exactly as in the code this was extracted from. Mutates
+        attr_scr.appearance_action/value_action in place on fallback; safe to
+        run concurrently across different (act, t_scr) pairs since each call
+        only touches its own t_scr.attributes objects.
+
+        Returns:
+            (act, TransitionEffects) if any effect was resolved, else None.
+        """
+        matrix_built = False
+        X: pd.DataFrame = pd.DataFrame()
+        y_presence: Dict[str, pd.Series] = {}
+        y_value: Dict[str, pd.Series] = {}
+
+        effects: Dict[str, ConditionalEffect] = {}
+
+        for attr, attr_scr in t_scr.attributes.items():
+            p = attr_scr.presence_probability
+            possible_values = list(attr_scr.values.keys())
+
+            # --- 2A — appearance ---
+            app_guards: Optional[EffectGuards] = None
+            if attr_scr.appearance_action == "dt":
+                if not matrix_built:
+                    X, y_presence, y_value = self._build_effect_matrix(
+                        preprocessed_log, act
+                    )
+                    matrix_built = True
+                if attr not in y_presence or X.empty:
+                    app_status = "fallback"
+                    attr_scr.appearance_action = "fallback"
+                else:
+                    app_guards, app_status = self._mine_appearance(
+                        X, y_presence[attr]
+                    )
+                    if app_status != "dt":
+                        attr_scr.appearance_action = app_status
+            else:
+                app_status = attr_scr.appearance_action
+
+            # --- 2B — value ---
+            val_guards: Optional[EffectGuards] = None
+            if attr_scr.value_action == "dt":
+                if not matrix_built:
+                    X, y_presence, y_value = self._build_effect_matrix(
+                        preprocessed_log, act
+                    )
+                    matrix_built = True
+                if attr not in y_value or X.empty:
+                    val_status = "fallback"
+                    attr_scr.value_action = "fallback"
+                else:
+                    active_vals = {
+                        str(v) for v, vs in attr_scr.values.items()
+                        if vs.status == "active"
+                    }
+                    val_guards, val_status = self._mine_value(
+                        X, y_value[attr],
+                        active_vals if active_vals else None,
+                    )
+                    if val_status != "dt":
+                        attr_scr.value_action = val_status
+            else:
+                val_status = attr_scr.value_action
+
+            effects[attr] = ConditionalEffect(
+                attribute=attr,
+                presence_probability=round(p, 4),
+                possible_values=possible_values,
+                appearance=app_guards,
+                appearance_status=app_status,
+                value=val_guards,
+                value_status=val_status,
+            )
+
+        if not effects:
+            return None
+        return act, TransitionEffects(
+            transition_name=act,
+            total_firings=t_scr.total_firings,
+            effects=effects,
+        )
 
     # -------------------------------------------------------------------------
     # Private: effect feature matrix
