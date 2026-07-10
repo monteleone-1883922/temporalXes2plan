@@ -90,15 +90,84 @@ class PetriNetLogBuilder:
         Returns:
             PetriNetLog with one TraceExecution per accepted trace.
         """
-        replay_log = log
+        replay_log = self.prepare_replay_log(log)
+        raw_replay_result = self.run_raw_replay(replay_log)
+        return self.build_from_raw_replay(replay_log, raw_replay_result)
+
+    def prepare_replay_log(self, log: Any) -> Any:
+        """
+        Lifecycle detection + annotation — the config-independent half of
+        replay-log preparation (see run_raw_replay/build_from_raw_replay for
+        the rest). Callers that run many replays against the same log/net
+        with only config.replay_min_fitness varying (network_search) can
+        compute this once and reuse it.
+
+        Args:
+            log: A pm4py EventLog. May be full lifecycle (start + complete) or
+                 complete-only. Both forms are handled transparently.
+
+        Returns:
+            The log ready to hand to run_raw_replay: lifecycle-annotated if
+            start events were detected, unchanged otherwise.
+        """
         if self._has_lifecycle_start_events(log):
             logger.info(
                 "PetriNetLogBuilder: lifecycle log detected — "
                 "filtering to complete events and annotating durations."
             )
-            replay_log = self._filter_and_annotate_lifecycle(log)
+            return self._filter_and_annotate_lifecycle(log)
+        return log
 
-        pairs = self._resolve_alignment(replay_log)
+    def run_raw_replay(self, replay_log: Any) -> Any:
+        """
+        Run the configured replay engine's underlying pm4py conformance call
+        and return its raw, unfiltered result — the expensive, config-independent
+        part of replay (depends only on replay_log/petrinet/markings, not on
+        config.replay_min_fitness). config.replay_engine/replay_alignment_variant
+        select which pm4py function runs but aren't Optuna-tuned, so this can be
+        computed once and reused across many build_from_raw_replay() calls that
+        only vary replay_min_fitness.
+
+        Args:
+            replay_log: Output of prepare_replay_log(log).
+
+        Returns:
+            The raw pm4py result list — one entry per trace in replay_log, in
+            the shape expected by build_from_raw_replay (token-based replay's
+            dicts with 'trace_fitness'/'activated_transitions', or alignments'
+            dicts with 'fitness'/'alignment', matching self.config.replay_engine).
+        """
+        if self.config.replay_engine == "alignments":
+            return self._run_alignments_raw(replay_log)
+        return self._run_token_based_replay_raw(replay_log)
+
+    def build_from_raw_replay(
+        self, replay_log: Any, raw_replay_result: Any, bypass_fitness_filter: bool = False,
+    ) -> PetriNetLog:
+        """
+        Cheap phase: filter raw_replay_result by config.replay_min_fitness (unless
+        bypassed), align each accepted trace, and build its TraceExecution.
+
+        Args:
+            replay_log: Output of prepare_replay_log(log) — must be the same log
+                run_raw_replay(replay_log) was called with.
+            raw_replay_result: Output of run_raw_replay(replay_log).
+            bypass_fitness_filter: When True, every trace with a successful
+                replay is accepted regardless of config.replay_min_fitness —
+                used to build a duration-extraction-only PetriNetLog once
+                per search, independent of the per-trial fitness threshold.
+
+        Returns:
+            PetriNetLog with one TraceExecution per accepted trace.
+        """
+        if self.config.replay_engine == "alignments":
+            pairs = self._filter_and_align_alignments(
+                replay_log, raw_replay_result, bypass_fitness_filter,
+            )
+        else:
+            pairs = self._filter_and_align_token_based(
+                replay_log, raw_replay_result, bypass_fitness_filter,
+            )
         executions = [self._build_execution(trace, aligned) for trace, aligned in pairs]
         return PetriNetLog(
             executions=executions,
@@ -185,43 +254,46 @@ class PetriNetLogBuilder:
 
         return filtered
 
-    def _resolve_alignment(
-        self, log: Any
-    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
+    def _run_token_based_replay_raw(self, log: Any) -> Any:
         """
-        Dispatch to the configured replay engine (config.replay_engine) and return,
-        for each accepted trace, its (trace, aligned) pair — aligned already being
-        the final List[(Transition, attributes)] sequence, engine-agnostic.
-        """
-        if self.config.replay_engine == "alignments":
-            return self._replay_log_alignments(log)
-        return self._replay_log_token_based(log)
-
-    def _replay_log_token_based(
-        self, log: Any
-    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
-        """
-        Run token-based replay and return (trace, aligned) pairs for traces
-        that meet the minimum fitness threshold.
+        The expensive, config-independent part of token-based replay: just the
+        pm4py conformance call — no fitness filtering, no alignment.
 
         Args:
-            log: A pm4py EventLog.
+            log: A pm4py EventLog (already prepare_replay_log()-processed).
+
+        Returns:
+            pm4py's raw list of per-trace replay result dicts.
+        """
+        logger.info("Running token-based replay to build PetriNetLog...")
+        return pm4py.conformance_diagnostics_token_based_replay(
+            log, self.petrinet, self.initial_marking, self.final_marking,
+            opt_parameters={"return_object_names": False},
+        )
+
+    def _filter_and_align_token_based(
+        self, log: Any, replayed: Any, bypass_fitness_filter: bool = False,
+    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
+        """
+        Cheap phase: filter raw token-based replay results by fitness threshold
+        and align each accepted trace.
+
+        Args:
+            log: The same log run_raw_replay was called with.
+            replayed: Output of _run_token_based_replay_raw(log).
+            bypass_fitness_filter: When True, accept every trace regardless of
+                config.replay_min_fitness.
 
         Returns:
             List of (original_trace, aligned) pairs above the fitness threshold,
             aligned being the lockstep-paired List[(Transition, attributes)].
         """
-        logger.info("Running token-based replay to build PetriNetLog...")
-        replayed = pm4py.conformance_diagnostics_token_based_replay(
-            log, self.petrinet, self.initial_marking, self.final_marking,
-            opt_parameters={"return_object_names": False},
-        )
         total = len(replayed)
         skipped = 0
         pairs = []
         for trace, result in zip(log, replayed):
             fitness = result.get("trace_fitness", 0.0)
-            if fitness < self.config.replay_min_fitness:
+            if not bypass_fitness_filter and fitness < self.config.replay_min_fitness:
                 skipped += 1
             else:
                 activated_transitions = result.get("activated_transitions", [])
@@ -236,23 +308,18 @@ class PetriNetLogBuilder:
             logger.info(f"PetriNetLog: all {total} traces accepted.")
         return pairs
 
-    def _replay_log_alignments(
-        self, log: Any
-    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
+    def _run_alignments_raw(self, log: Any) -> Any:
         """
-        Run optimal alignments (config.replay_alignment_variant) and return
-        (trace, aligned) pairs for traces that meet the minimum fitness threshold.
-
-        Unlike token-based replay, alignments resolve each move exactly (including
-        which silent transition fired, via ret_tuple_as_trans_desc=True), so no
-        separate lockstep pass is needed — _align_trace_via_alignment converts the
-        alignment directly into the final List[(Transition, attributes)] sequence.
+        The expensive, config-independent part of alignment-based replay: just
+        the pm4py conformance call — no fitness filtering, no move conversion.
+        config.replay_alignment_variant selects the search variant but isn't
+        Optuna-tuned, so this is safe to compute once and reuse.
 
         Args:
-            log: A pm4py EventLog.
+            log: A pm4py EventLog (already prepare_replay_log()-processed).
 
         Returns:
-            List of (original_trace, aligned) pairs above the fitness threshold.
+            pm4py's raw list of per-trace alignment result dicts.
         """
         variant = _ALIGNMENT_VARIANTS.get(self.config.replay_alignment_variant)
         if variant is None:
@@ -266,16 +333,38 @@ class PetriNetLogBuilder:
             "Running alignments (%s) to build PetriNetLog...",
             self.config.replay_alignment_variant,
         )
-        aligned_results = pm4py.conformance_diagnostics_alignments(
+        return pm4py.conformance_diagnostics_alignments(
             log, self.petrinet, self.initial_marking, self.final_marking,
             variant_str=variant, ret_tuple_as_trans_desc=True,
         )
+
+    def _filter_and_align_alignments(
+        self, log: Any, aligned_results: Any, bypass_fitness_filter: bool = False,
+    ) -> List[Tuple[Any, List[Tuple[Transition, Dict[str, Any]]]]]:
+        """
+        Cheap phase: filter raw alignment results by fitness threshold and
+        convert each accepted trace's alignment into the final move sequence.
+
+        Unlike token-based replay, alignments resolve each move exactly (including
+        which silent transition fired, via ret_tuple_as_trans_desc=True), so no
+        separate lockstep pass is needed — _align_trace_via_alignment converts the
+        alignment directly into the final List[(Transition, attributes)] sequence.
+
+        Args:
+            log: The same log run_raw_replay was called with.
+            aligned_results: Output of _run_alignments_raw(log).
+            bypass_fitness_filter: When True, accept every trace regardless of
+                config.replay_min_fitness.
+
+        Returns:
+            List of (original_trace, aligned) pairs above the fitness threshold.
+        """
         total = len(aligned_results)
         skipped = 0
         pairs = []
         for trace, result in zip(log, aligned_results):
             fitness = result.get("fitness", 0.0)
-            if fitness < self.config.replay_min_fitness:
+            if not bypass_fitness_filter and fitness < self.config.replay_min_fitness:
                 skipped += 1
             else:
                 pairs.append(
@@ -321,7 +410,12 @@ class PetriNetLogBuilder:
         # these dicts are the source of truth for "all transitions" everywhere
         # else in this class (see _build_execution), and callers are only
         # required to pass a populated PetriNet object, not populated maps.
-        transitions_by_name = {
+        # Elements are actually pm4py.PetriNet.Transition (built from
+        # petrinet.arcs in ModelDiscoverer._build_arc_maps), not the
+        # pm4py.objects.powl.obj.Transition this module type-hints them as
+        # (that alias is shared with models.py/model_discoverer.py) — hence
+        # the explicit annotation, since only PetriNet.Transition has .name.
+        transitions_by_name: Dict[str, PetriNet.Transition] = {
             t.name: t for t in set(self._trans_inputs) | set(self._trans_outputs)
         }
         event_iter = iter(trace)

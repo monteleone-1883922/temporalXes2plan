@@ -63,7 +63,7 @@ class LogProcessor:
                 if 'complete' in lifecycle_values:
                     n_traces_before = len(log)
                     events_before = sum(len(t) for t in log)
-                    log = pm4py.filter_event_attribute_values(log, 'lifecycle:transition', 'complete')
+                    log = pm4py.filter_event_attribute_values(log, 'lifecycle:transition', ['complete'])
                     n_traces_after = len(log)
                     events_after = sum(len(t) for t in log)
                     logger.info(

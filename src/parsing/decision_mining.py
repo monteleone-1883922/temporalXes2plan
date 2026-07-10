@@ -408,7 +408,7 @@ class DecisionMiner:
             Dict mapping predicted activity name to List[List[Guard]].
         """
         tree_ = clf.tree_
-        node_feature = [
+        node_feature: list[str] = [
             feature_names[i] if i != _tree.TREE_UNDEFINED else ""
             for i in tree_.feature
         ]

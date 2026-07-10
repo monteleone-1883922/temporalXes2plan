@@ -305,7 +305,7 @@ class AttributeEffect:
 # ---------------------------------------------------------------------------
 # Screening dataclasses — decisions made BEFORE DT training
 # ---------------------------------------------------------------------------
-
+@dataclass
 class ScreeningBase:
     """Mixin for screening dataclasses that need JSON serialization.
 

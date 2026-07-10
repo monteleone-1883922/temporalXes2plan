@@ -23,7 +23,7 @@ from typing import Any, Dict, List
 
 from pm4py.objects.log.obj import EventLog, Trace, Event
 
-from parsing.xes_parser import Parser, load_and_discover
+from parsing.xes_parser import Parser, load_and_discover, preload_replay
 from models import (
     ActionDurationStats,
     AnalysisConfig,
@@ -585,3 +585,44 @@ class TestPreloadedEquivalence:
                 assert d_b.cascade_level == p_b.cascade_level
                 assert d_b.routing_source == p_b.routing_source
                 assert d_b.guards == p_b.guards
+
+    def test_parse_result_matches_with_and_without_preloaded_replay(self, tmp_path_factory):
+        """preloaded_replay caches the raw token-replay call + duration stats
+        (computed once, ahead of the per-trial replay_min_fitness filter) —
+        see docs plan for the network_search caching work. The resulting
+        ParseResult must match a Parser() run that recomputes both from
+        scratch, except duration_stats which is expected to differ slightly
+        since it's computed on all successfully-replayed traces rather than
+        only the ones surviving this particular config's fitness threshold."""
+        tmp = tmp_path_factory.mktemp("parser_preloaded_replay_equivalence")
+        xes_path = str(tmp / "xor_log.xes")
+        pm4py.write_xes(_make_xor_log(), xes_path)
+
+        config = AnalysisConfig(
+            dt_min_samples=20,
+            probability_min_samples=5,
+            snapshot_dir=str(tmp / "snapshots"),
+        )
+
+        direct = Parser(
+            xes_path, coverage_percentage=0.8, discovery_algorithm="inductive", config=config,
+        ).parse_result
+
+        preloaded = load_and_discover(xes_path, coverage_percentage=0.8, discovery_algorithm="inductive")
+        preloaded_replay = preload_replay(preloaded, config)
+        via_preloaded = Parser(
+            xes_path, coverage_percentage=0.8, discovery_algorithm="inductive", config=config,
+            preloaded=preloaded, preloaded_replay=preloaded_replay,
+        ).parse_result
+
+        assert direct.transitions.keys() == via_preloaded.transitions.keys()
+        for name, d_trans in direct.transitions.items():
+            p_trans = via_preloaded.transitions[name]
+            assert set(d_trans.effects.keys()) == set(p_trans.effects.keys())
+
+        # duration_stats: same set of activities have duration data, even
+        # though the two Parser()s computed it from slightly different trace
+        # sets (fitness-filtered vs. all successfully-replayed traces).
+        direct_durations = {t.activity_name for t in direct.transitions.values() if t.duration is not None}
+        preloaded_durations = {t.activity_name for t in via_preloaded.transitions.values() if t.duration is not None}
+        assert direct_durations == preloaded_durations

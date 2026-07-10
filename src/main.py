@@ -83,9 +83,9 @@ if __name__ == "__main__":
     pddl_out = os.path.abspath(args.pddl_out)
 
     pddl_path = Pipeline().run(
-        log_path=log_path,
-        data_dir=data_dir,
-        pddl_output_dir=pddl_out,
+        log_path=str(log_path),
+        data_dir=str(data_dir),
+        pddl_output_dir=str(pddl_out),
         domain_name=args.domain_name,
         discovery_algorithm=args.algorithm,
         coverage_percentage=args.coverage,

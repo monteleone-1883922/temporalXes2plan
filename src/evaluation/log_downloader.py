@@ -18,7 +18,7 @@ import io
 import logging
 import zipfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import re
 import pandas as pd
 import requests
@@ -402,34 +402,11 @@ def _extract_from_archive(
         ValueError: If the archive format is unrecognized or the target file
             cannot be found inside.
     """
-    data: bytes
-
-    # --- Try ZIP first ---
+    # --- Try ZIP first, else tar/tar.gz --- (each helper returns (data, entry) or raises)
     if zipfile.is_zipfile(io.BytesIO(content)):
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
-            entries = zf.namelist()
-            entry = _find_target_in_archive(entries, fmt, filenames)
-            logger.debug("Extracting '%s' from zip archive", entry)
-            data = zf.read(entry)
-
-    # --- Try tar/tar.gz ---
+        data, entry = _extract_zip_entry(content, fmt, filenames)
     else:
-        try:
-            with tarfile.open(fileobj=io.BytesIO(content)) as tf:
-                entries = [m.name for m in tf.getmembers() if m.isfile()]
-                entry = _find_target_in_archive(entries, fmt, filenames)
-                logger.debug("Extracting '%s' from tar archive", entry)
-                member = tf.getmember(entry)
-                f = tf.extractfile(member)
-                if f is None:
-                    raise ValueError(
-                        f"Cannot read '{entry}' from tar archive (extractfile returned None)"
-                    )
-                data = f.read()
-        except (tarfile.TarError, Exception) as e:
-            raise ValueError(
-                f"Content is neither a valid zip nor tar archive: {e}"
-            ) from e
+        data, entry = _extract_tar_entry(content, fmt, filenames)
 
     # Decompress if the entry itself is gzipped
     # --- Post-extraction decompression / nested archive handling ---
@@ -446,6 +423,51 @@ def _extract_from_archive(
         data = _extract_from_archive(data, fmt, filenames)
 
     return data
+
+
+def _extract_zip_entry(
+    content: bytes, fmt: str, filenames: List[str] | None
+) -> Tuple[bytes, str]:
+    """Extract the target entry from a zip archive.
+
+    Returns:
+        (raw bytes of the extracted entry, entry name).
+    """
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        entries = zf.namelist()
+        entry = _find_target_in_archive(entries, fmt, filenames)
+        logger.debug("Extracting '%s' from zip archive", entry)
+        return zf.read(entry), entry
+
+
+def _extract_tar_entry(
+    content: bytes, fmt: str, filenames: List[str] | None
+) -> Tuple[bytes, str]:
+    """Extract the target entry from a tar/tar.gz archive.
+
+    Returns:
+        (raw bytes of the extracted entry, entry name).
+
+    Raises:
+        ValueError: If content is not a valid tar archive or the target file
+            cannot be found/read inside it.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(content)) as tf:
+            entries = [m.name for m in tf.getmembers() if m.isfile()]
+            entry = _find_target_in_archive(entries, fmt, filenames)
+            logger.debug("Extracting '%s' from tar archive", entry)
+            member = tf.getmember(entry)
+            f = tf.extractfile(member)
+            if f is None:
+                raise ValueError(
+                    f"Cannot read '{entry}' from tar archive (extractfile returned None)"
+                )
+            return f.read(), entry
+    except (tarfile.TarError, Exception) as e:
+        raise ValueError(
+            f"Content is neither a valid zip nor tar archive: {e}"
+        ) from e
 
 
 def _fmt_from_dataset_format(dataset_format: str) -> str:

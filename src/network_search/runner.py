@@ -48,7 +48,13 @@ import core_utils as utils
 from encoding.domain_builder import DomainBuilder
 from encoding.prepared_input import PreparedDomainInput
 from models import AnalysisConfig, ParseResult
-from parsing.xes_parser import Parser, PreloadedLogAndNet, load_and_discover
+from parsing.xes_parser import (
+    Parser,
+    PreloadedLogAndNet,
+    PreloadedReplay,
+    load_and_discover,
+    preload_replay,
+)
 
 from network_search.metrics import (
     compute_coverage,
@@ -109,6 +115,7 @@ def _evaluate_rung1(
     discovery_algorithm: str,
     original_activity_names: Optional[Set[str]],
     preloaded: PreloadedLogAndNet,
+    preloaded_replay: PreloadedReplay,
     base_config: Optional[AnalysisConfig] = None,
 ) -> _Rung1Result:
     """Cheap phase: build the network, compute what's knowable without replay.
@@ -125,6 +132,7 @@ def _evaluate_rung1(
         discovery_algorithm=discovery_algorithm,
         config=config,
         preloaded=preloaded,
+        preloaded_replay=preloaded_replay,
     )
     parse_result = parser.parse_result
     prepared = DomainBuilder().build_prepared_input(parse_result, config=config)
@@ -299,6 +307,7 @@ def find_best_config(
     weights = weights or ScoreWeights()
 
     preloaded = load_and_discover(training_log_path, coverage_percentage, discovery_algorithm)
+    preloaded_replay = preload_replay(preloaded, base_config)
 
     records: List[TrialRecord] = []
     study = optuna.create_study(direction="maximize")
@@ -326,7 +335,7 @@ def find_best_config(
                 _evaluate_rung1(
                     trial, training_log_path, weights,
                     coverage_percentage, discovery_algorithm, original_activity_names,
-                    preloaded, base_config=base_config,
+                    preloaded, preloaded_replay, base_config=base_config,
                 )
             )
         # Best partial_score first -- ties broken by ask() order (stable sort).

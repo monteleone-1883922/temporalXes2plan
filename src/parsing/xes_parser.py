@@ -119,6 +119,75 @@ def load_and_discover(
     )
 
 
+@dataclasses.dataclass
+class PreloadedReplay:
+    """Output of the config-independent part of Step 4 (token replay) plus a
+    once-computed Step 4.5 (duration extraction) — see preload_replay(). Only
+    config.replay_min_fitness (Optuna-tuned) varies per trial; everything here
+    is safe to compute once and reuse across trials that share the same
+    log/net/replay_engine (see network_search/runner.py::find_best_config)."""
+
+    replay_log: Any
+    raw_replay_result: Any
+    replay_engine: str
+    duration_stats: Dict[str, ActionDurationStats]
+
+
+def preload_replay(
+    preloaded: PreloadedLogAndNet,
+    config: Optional[AnalysisConfig] = None,
+    external_durations: Optional[Dict[str, ExternalDuration]] = None,
+) -> PreloadedReplay:
+    """Runs the expensive pm4py replay/alignment call once and extracts
+    duration stats once, both ahead of any per-trial config.replay_min_fitness
+    filtering.
+
+    config is only consulted for replay_engine/replay_alignment_variant —
+    neither is Optuna-tuned (search_space.py §4.6), so they're constant for
+    the whole search; callers should pass base_config (or None for
+    AnalysisConfig()'s defaults), not a per-trial config.
+
+    duration_stats is computed from every trace with a successful replay,
+    ignoring config.replay_min_fitness entirely (bypass_fitness_filter=True)
+    — an accepted approximation since duration stats are insensitive to the
+    small number of traces near the fitness threshold.
+    """
+    config = config or AnalysisConfig()
+    pnm = preloaded.petri_net_model
+    builder = PetriNetLogBuilder(
+        petrinet=pnm.petrinet,
+        initial_marking=pnm.initial_marking,
+        final_marking=pnm.final_marking,
+        trans_inputs=pnm.trans_inputs,
+        trans_outputs=pnm.trans_outputs,
+        silent_transitions=pnm.silent_transitions,
+        config=config,
+    )
+    replay_log = builder.prepare_replay_log(preloaded.full_lifecycle_log)
+    raw_replay_result = builder.run_raw_replay(replay_log)
+
+    logger.info("Starting duration extraction")
+    full_pn_log = builder.build_from_raw_replay(
+        replay_log, raw_replay_result, bypass_fitness_filter=True
+    )
+    duration_stats: Dict[str, ActionDurationStats] = TemporalExtractor().extract(
+        external_durations=external_durations,
+        fallback_to_inter_event=True,
+        petri_net_log=full_pn_log,
+    )
+    logger.info(
+        "Duration extraction complete: %d activities with duration data",
+        len(duration_stats),
+    )
+
+    return PreloadedReplay(
+        replay_log=replay_log,
+        raw_replay_result=raw_replay_result,
+        replay_engine=config.replay_engine,
+        duration_stats=duration_stats,
+    )
+
+
 class Parser:
     """Facade orchestrating the XES → encoder-ready analysis pipeline.
 
@@ -139,6 +208,7 @@ class Parser:
         discretizer_cache_path: Optional[Path] = None,
         force_rediscretize: bool = False,
         preloaded: Optional[PreloadedLogAndNet] = None,
+        preloaded_replay: Optional[PreloadedReplay] = None,
     ) -> None:
         """Run the full analysis pipeline up to and including DT mining.
 
@@ -160,6 +230,13 @@ class Parser:
                 results are taken from here instead. Callers that run many
                 trials against the same log/discovery settings should compute
                 this once and pass it to every Parser() call.
+            preloaded_replay: Result of preload_replay(preloaded, config)
+                computed ahead of time — when given (and its replay_engine
+                matches config.replay_engine), the expensive part of step 4
+                and all of step 4.5 are skipped; only the cheap per-trial
+                fitness filter and duration_stats lookup run. Callers that run
+                many trials with only config.replay_min_fitness varying should
+                compute this once and pass it to every Parser() call.
         """
         self.config = config or AnalysisConfig()
 
@@ -193,7 +270,6 @@ class Parser:
         self.sanitized_value_catalog = {attr: discretizer.all_bin_labels(attr) for attr in discretizer.boundaries.keys()}
 
         # --- Step 4: token replay → PetriNetLog ---
-        logger.info("Starting token replay")
         builder = PetriNetLogBuilder(
             petrinet=pnm.petrinet,
             initial_marking=pnm.initial_marking,
@@ -203,20 +279,37 @@ class Parser:
             silent_transitions=pnm.silent_transitions,
             config=self.config,
         )
-        self.pn_log = builder.build(self.full_lifecycle_log)
-        logger.info("Token replay complete: %d traces accepted", len(self.pn_log.executions))
+        if preloaded_replay is not None and preloaded_replay.replay_engine == self.config.replay_engine:
+            logger.info("Starting token replay (reusing cached raw replay)")
+            self.pn_log = builder.build_from_raw_replay(
+                preloaded_replay.replay_log, preloaded_replay.raw_replay_result
+            )
+            logger.info("Token replay complete: %d traces accepted", len(self.pn_log.executions))
 
-        # --- Step 4.5: duration extraction ---
-        logger.info("Starting duration extraction")
-        self.duration_stats: Dict[str, ActionDurationStats] = TemporalExtractor().extract(
-            external_durations=external_durations,
-            fallback_to_inter_event=True,
-            petri_net_log=self.pn_log,
-        )
-        logger.info(
-            "Duration extraction complete: %d activities with duration data",
-            len(self.duration_stats),
-        )
+            # --- Step 4.5: duration extraction (reused, computed once ahead of the per-trial fitness filter) ---
+            self.duration_stats: Dict[str, ActionDurationStats] = preloaded_replay.duration_stats
+        else:
+            if preloaded_replay is not None:
+                logger.warning(
+                    "preloaded_replay.replay_engine (%s) does not match config.replay_engine "
+                    "(%s) — recomputing replay and durations for this trial instead of reusing the cache.",
+                    preloaded_replay.replay_engine, self.config.replay_engine,
+                )
+            logger.info("Starting token replay")
+            self.pn_log = builder.build(self.full_lifecycle_log)
+            logger.info("Token replay complete: %d traces accepted", len(self.pn_log.executions))
+
+            # --- Step 4.5: duration extraction ---
+            logger.info("Starting duration extraction")
+            self.duration_stats: Dict[str, ActionDurationStats] = TemporalExtractor().extract(
+                external_durations=external_durations,
+                fallback_to_inter_event=True,
+                petri_net_log=self.pn_log,
+            )
+            logger.info(
+                "Duration extraction complete: %d activities with duration data",
+                len(self.duration_stats),
+            )
 
         # --- Step 5: single-pass log preprocessing ---
         logger.info("Starting log preprocessing")
@@ -470,14 +563,26 @@ class Parser:
                     if prob > max_prob:
                         max_act = act_name
                         max_prob = prob
-            self._xor_branch_info[max_act].append(XorBranchInfo(
-                place_name=place_name,
-                probability=max_prob,
-                total_samples=screening.total_samples,
-                cascade_level=2,
-                guards=None,
-                routing_source="probabilistic",
-            ))
+            if max_act is None:
+                # Every branch was pruned (all below xor_prune_threshold) —
+                # same degradation as the "weighted" mode's all-pruned case
+                # below: no branch is registered, so this split simply won't
+                # appear in _xor_branch_info (its transitions get
+                # xor_branches=None in _build_parse_result).
+                logger.debug(
+                    "[XOR '%s'] FALLBACK majority_only — all %d branch(es) pruned "
+                    "(below xor_prune_threshold=%.2f); no branch registered.",
+                    place_name, len(screening.branches), self.config.xor_prune_threshold,
+                )
+            else:
+                self._xor_branch_info[max_act].append(XorBranchInfo(
+                    place_name=place_name,
+                    probability=max_prob,
+                    total_samples=screening.total_samples,
+                    cascade_level=2,
+                    guards=None,
+                    routing_source="probabilistic",
+                ))
 
         elif mode == "weighted":
             for act_name, xor_branch in screening.branches.items():

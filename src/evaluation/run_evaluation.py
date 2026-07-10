@@ -693,7 +693,7 @@ def main(args: argparse.Namespace) -> None:
         w_dup=args.w_dup,
     )
 
-    selection = get_log_selection(Path(args.metadata), log_ids=[cfg.log_id])
+    selection = get_log_selection(Path(args.metadata), log_ids=[str(cfg.log_id)])
     if len(selection) != 1:
         raise ValueError(
             f"Expected exactly one log matching --log-id {cfg.log_id} in "

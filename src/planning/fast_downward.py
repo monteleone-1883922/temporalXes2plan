@@ -180,9 +180,13 @@ def run(
     plan_actions: List[str] = []
 
     if plan_files:
-        plan_text = plan_files[0].read_text(encoding="utf-8")
-        (pddl_dir / "plan.txt").write_text(plan_text, encoding="utf-8")
-        plan_actions = _parse_classical_plan(plan_text)
+        # read_text() always returns a str (never None); the read result is
+        # kept in its own str-typed local so downstream calls in this block
+        # don't need to re-narrow the Optional[str] `plan_text` declared above.
+        plan_text_content: str = plan_files[0].read_text(encoding="utf-8")
+        plan_text = plan_text_content
+        (pddl_dir / "plan.txt").write_text(plan_text_content, encoding="utf-8")
+        plan_actions = _parse_classical_plan(plan_text_content)
         _log(f"Plan saved — {len(plan_actions)} action(s)")
         _cleanup(pddl_dir, keep={"domain.pddl", "problem.pddl", "plan.txt"})
 
