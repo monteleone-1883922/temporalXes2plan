@@ -202,6 +202,64 @@ class TestWriteLogSummary:
 
 
 # ---------------------------------------------------------------------------
+# Planner failure-mode ratios (timeout / out_of_memory) — see
+# planning/fast_downward.py::_classify().
+# ---------------------------------------------------------------------------
+
+class TestTimeoutAndOutOfMemoryStats:
+    def _log_with_solvabilities(self, *solvabilities, log_id="log_1"):
+        queries = [
+            _make_query_result(query_id=f"q{i}", solvability=s)
+            for i, s in enumerate(solvabilities)
+        ]
+        return _make_log_result(log_id=log_id, queries=queries)
+
+    def test_top_level_keys_present(self, tmp_path):
+        result = self._log_with_solvabilities("solved")
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert "timeout_ratio_mean" in data
+        assert "out_of_memory_ratio_mean" in data
+
+    def test_timeout_ratio_computed_across_all_query_types(self, tmp_path):
+        result = self._log_with_solvabilities("solved", "timeout", "timeout", "unsolvable_structural")
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["timeout_ratio_mean"] == pytest.approx(0.5)
+        assert data["per_log"][0]["pct_timeout"] == pytest.approx(0.5)
+
+    def test_out_of_memory_ratio_computed(self, tmp_path):
+        result = self._log_with_solvabilities("out_of_memory", "solved", "solved", "solved")
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["out_of_memory_ratio_mean"] == pytest.approx(0.25)
+        assert data["per_log"][0]["pct_out_of_memory"] == pytest.approx(0.25)
+
+    def test_zero_when_no_timeout_or_oom_present(self, tmp_path):
+        result = self._log_with_solvabilities("solved", "unsolvable_structural")
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["timeout_ratio_mean"] == 0.0
+        assert data["out_of_memory_ratio_mean"] == 0.0
+
+    def test_none_when_no_queries(self, tmp_path):
+        # _make_log_result(queries=[]) falls back to its default (non-empty)
+        # query list — `[] or [...]` — so LogResult is built directly here to
+        # get a genuinely empty queries list.
+        result = LogResult(
+            log_id="log_1", log_name="Test Log", log_fmt="xes",
+            n_train_cases=80, n_test_cases=0, n_activities=10,
+            pipeline_ok=True, pipeline_error=None, queries=[],
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["timeout_ratio_mean"] is None
+        assert data["out_of_memory_ratio_mean"] is None
+        assert data["per_log"][0]["pct_timeout"] is None
+        assert data["per_log"][0]["pct_out_of_memory"] is None
+
+
+# ---------------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------------
 

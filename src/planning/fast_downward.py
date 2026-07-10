@@ -159,7 +159,7 @@ def run(
     except subprocess.TimeoutExpired:
         _log("Timeout expired.")
         return {**_empty,
-                "solvability": "unsolvable_resource",
+                "solvability": "timeout",
                 "message": f"Planner timed out after {timeout}s"}
     except Exception as exc:
         return {**_empty, "solvability": "error",
@@ -195,6 +195,8 @@ def run(
     message = (
         f"Plan found — {len(plan_actions)} action(s)" if success
         else "Problem proved unsolvable" if solvability == "unsolvable_structural"
+        else f"Planner ran out of memory (exit {proc.returncode})" if solvability == "out_of_memory"
+        else f"Planner ran out of time (exit {proc.returncode})" if solvability == "timeout"
         else f"No solution found (exit {proc.returncode})"
     )
     _log(message)
@@ -255,17 +257,28 @@ def _parse_fd_metrics(stdout: str, stderr: str) -> Dict[str, Any]:
     return metrics
 
 
+# Fast Downward's own documented exit codes (vendor/downward/driver/returncodes.py)
+# that distinguish an out-of-memory give-up from an out-of-time give-up —
+# used so the evaluation summary can report the two separately instead of
+# lumping every resource-limit failure into "unsolvable_resource".
+_FD_OUT_OF_MEMORY_CODES = {20, 22, 24}  # TRANSLATE/SEARCH_OUT_OF_MEMORY(_AND_TIME)
+_FD_OUT_OF_TIME_CODES = {21, 23}        # TRANSLATE/SEARCH_OUT_OF_TIME
+
+
 def _classify(return_code: int, plan_exists: bool, stdout: str, stderr: str) -> str:
     combined = (stdout + "\n" + stderr).lower()
     if return_code == 0 and plan_exists:
         return "solved"
     if return_code in (10, 11) or "completely explored state space" in combined:
         return "unsolvable_structural"
-    if return_code in (12, 20, 21, 22, 23, 24):
-        return "unsolvable_resource"
-    for kw in ("out of memory", "memory exhausted", "out of time", "time limit"):
-        if kw in combined:
-            return "unsolvable_resource"
+    if return_code in _FD_OUT_OF_MEMORY_CODES or any(
+        kw in combined for kw in ("out of memory", "memory exhausted")
+    ):
+        return "out_of_memory"
+    if return_code in _FD_OUT_OF_TIME_CODES or any(
+        kw in combined for kw in ("out of time", "time limit")
+    ):
+        return "timeout"
     return "unsolvable_resource"
 
 

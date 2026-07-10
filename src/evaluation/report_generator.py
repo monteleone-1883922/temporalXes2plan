@@ -215,6 +215,13 @@ def _build_summary(
     q3_search_time: List[float] = []
     q3_alignment: List[float] = []
 
+    # Planner failure-mode ratios (timeout / out_of_memory among ALL queries
+    # for a log, across Q1/Q2/Q3 — these are planner resource-limit
+    # failures, not query-type-specific) — mean of per-log ratios, same
+    # convention as solved_ratio_mean.
+    timeout_ratios: List[float] = []
+    out_of_memory_ratios: List[float] = []
+
     # Replayability cross-check: solved despite the trace not being
     # replayable, and not-solved despite the trace being replayable —
     # accumulated per query type across logs (mean of per-log ratios,
@@ -235,6 +242,13 @@ def _build_summary(
         q2_wr = _ratio_metric(log_q2, "within_budget")
         q3_cr = _ratio_metric(log_q3, "correct")
 
+        log_timeout_ratio = _solvability_ratio(lr.queries, "timeout")
+        log_oom_ratio = _solvability_ratio(lr.queries, "out_of_memory")
+        if log_timeout_ratio is not None:
+            timeout_ratios.append(log_timeout_ratio)
+        if log_oom_ratio is not None:
+            out_of_memory_ratios.append(log_oom_ratio)
+
         replay_stats = _replayability_stats(lr.queries)
         per_log_rows.append({
             "log_id": lr.log_id,
@@ -245,6 +259,8 @@ def _build_summary(
             "q2_solved_ratio": q2_sr,
             "q2_within_budget_ratio": q2_wr,
             "q3_correct_ratio": q3_cr,
+            "pct_timeout": log_timeout_ratio,
+            "pct_out_of_memory": log_oom_ratio,
             "n_traces_replayable": replay_stats["n_traces_replayable"],
             "n_traces_not_replayable": replay_stats["n_traces_not_replayable"],
             "pct_traces_replayable": replay_stats["pct_traces_replayable"],
@@ -330,6 +346,11 @@ def _build_summary(
         "n_logs_ok": n_logs_ok,
         "n_queries_total": n_queries_total,
         "cost_weight": cost_weight,
+        # Planner failure-mode ratios across ALL queries (Q1+Q2+Q3) — see
+        # planning/fast_downward.py::_classify() for how "timeout" and
+        # "out_of_memory" solvability values are produced.
+        "timeout_ratio_mean": _mean(timeout_ratios),
+        "out_of_memory_ratio_mean": _mean(out_of_memory_ratios),
         "q1": {
             "solved_ratio_mean": _mean(q1_solved),
             "within_budget_ratio_mean": _mean(q1_within),
@@ -438,6 +459,18 @@ def _mean(values: List[float]) -> Optional[float]:
 
 def _std(values: List[float]) -> Optional[float]:
     return statistics.stdev(values) if len(values) > 1 else (0.0 if values else None)
+
+
+def _solvability_ratio(queries: List[QueryResult], value: str) -> Optional[float]:
+    """Fraction of queries whose solvability equals value. None if list is empty.
+
+    Used for planner-failure-mode stats (timeout, out_of_memory) — see
+    planning/fast_downward.py::_classify() for how these solvability values
+    are produced.
+    """
+    if not queries:
+        return None
+    return sum(1 for q in queries if q.solvability == value) / len(queries)
 
 
 def _ratio(queries: List[QueryResult], bool_key: str) -> Optional[float]:

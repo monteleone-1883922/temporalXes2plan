@@ -26,7 +26,10 @@ from evaluation.eval_api import EvalAPI, PlanResult
 
 logger = logging.getLogger(__name__)
 
-_NON_RETRYABLE = {"unsolvable_structural", "unsolvable_resource", "unsolvable_parse", "timeout"}
+_NON_RETRYABLE = {
+    "unsolvable_structural", "unsolvable_resource", "unsolvable_parse",
+    "timeout", "out_of_memory",
+}
 
 
 # ---------------------------------------------------------------------------

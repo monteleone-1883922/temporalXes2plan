@@ -2,6 +2,7 @@
 
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -152,25 +153,44 @@ def run(
     _log(f"Timeout: {timeout}s  Memory: {memory_mb}MB")
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             cwd=str(OPTIC_DIR),
+            # New session (own process group) so a timeout can kill the
+            # whole bash -> optic-clp.sh -> optic-clp chain via killpg
+            # below, not just the outer `bash -c` process — cmd's shebang-
+            # less optic-clp.sh (see OPTIC_SH) is itself interpreted by a
+            # nested shell that forks the actual optic-clp binary, so
+            # subprocess.run(timeout=...)'s default .kill() (SIGKILL to the
+            # immediate child only) leaves that binary orphaned and still
+            # running/consuming memory in the background after we've
+            # already reported "timeout" and moved on to the next query.
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        _log("Timeout expired.")
-        return {**_empty,
-                "solvability": "timeout",
-                "message": f"Planner timed out after {timeout}s"}
     except Exception as exc:
         return {**_empty, "solvability": "error",
                 "stderr": str(exc), "message": f"Execution error: {exc}"}
 
-    _log(f"Planner finished (exit code {proc.returncode})")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _log("Timeout expired.")
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already exited between the timeout and the killpg call
+        proc.communicate()  # reap the process, discard partial output
+        return {**_empty,
+                "solvability": "timeout",
+                "message": f"Planner timed out after {timeout}s"}
 
-    plan_lines, plan_actions, makespan = _parse_optic_stdout(proc.stdout)
+    returncode = proc.returncode
+    _log(f"Planner finished (exit code {returncode})")
+
+    plan_lines, plan_actions, makespan = _parse_optic_stdout(out)
     plan_text: Optional[str] = None
 
     if plan_actions:
@@ -178,15 +198,16 @@ def run(
         (pddl_dir / "plan.txt").write_text(plan_text, encoding="utf-8")
         _log(f"Plan saved — {len(plan_actions)} action(s)")
 
-    metrics = _parse_optic_metrics(proc.stdout, proc.stderr, makespan)
+    metrics = _parse_optic_metrics(out, err, makespan)
     metrics["solution_length"] = len(plan_actions) if plan_actions else None
 
-    solvability = _classify(proc.returncode, plan_text is not None, proc.stdout, proc.stderr)
+    solvability = _classify(returncode, plan_text is not None, out, err)
     success = solvability == "solved"
     message = (
         f"Plan found — {len(plan_actions)} action(s)" if success
         else "Problem proved unsolvable" if solvability == "unsolvable_structural"
-        else f"No solution found (exit {proc.returncode})"
+        else f"Planner ran out of memory (exit {returncode})" if solvability == "out_of_memory"
+        else f"No solution found (exit {returncode})"
     )
     _log(message)
 
@@ -196,8 +217,8 @@ def run(
         "plan_text": plan_text,
         "plan_actions": plan_actions,
         "metrics": metrics,
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
+        "stdout": out,
+        "stderr": err,
         "message": message,
     }
 
@@ -277,6 +298,19 @@ def _parse_optic_metrics(stdout: str, stderr: str, makespan: Optional[float] = N
     return metrics
 
 
+# OPTIC is invoked under `ulimit -v {memory_kb}` (see run()) — when it
+# exceeds that cap, malloc/new fails and (since OPTIC doesn't catch the
+# allocation failure) the process terminates via std::terminate() -> abort(),
+# i.e. SIGABRT, observed as return_code 134 (128 + signal 6) with
+# "terminate called after throwing an instance of 'std::bad_alloc'" on
+# stderr — confirmed directly from a real failure
+# (results/55/failures/55_S74983_Q3.json). Detected here so the evaluation
+# summary can report out-of-memory failures separately from other
+# resource-limit ones instead of lumping everything into
+# "unsolvable_resource".
+_OPTIC_OOM_RETURN_CODE = 134
+
+
 def _classify(return_code: int, plan_exists: bool, stdout: str, stderr: str) -> str:
     combined = (stdout + "\n" + stderr).lower()
     if plan_exists:
@@ -289,6 +323,10 @@ def _classify(return_code: int, plan_exists: bool, stdout: str, stderr: str) -> 
         "could not evaluate", "type error",
     )):
         return "unsolvable_parse"
+    if return_code == _OPTIC_OOM_RETURN_CODE or any(
+        kw in combined for kw in ("bad_alloc", "cannot allocate memory", "out of memory")
+    ):
+        return "out_of_memory"
     if return_code != 0:
         return "unsolvable_resource"
     return "unsolvable_resource"
