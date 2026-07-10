@@ -119,6 +119,7 @@ class Discretizer:
         # the self.boundaries merge below stays deterministic. ---
         if len(work_items) > 1:
             max_workers = min(len(work_items), os.cpu_count() or 4)
+            logger.debug(f"Using {max_workers} workers for discretization")
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 all_bounds = list(executor.map(
                     lambda item: self._find_best_boundaries(item[0], item[1], item[2]),

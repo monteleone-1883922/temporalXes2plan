@@ -207,6 +207,7 @@ class DecisionMiner:
 
         if len(candidates) > 1:
             max_workers = min(len(candidates), os.cpu_count() or 4)
+            logger.debug(f"Using {max_workers} workers for XOR split mining")
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 mined = list(executor.map(
                     lambda item: self._mine_one_xor_split(item[0], item[1], preprocessed_log),
@@ -712,6 +713,7 @@ class DecisionMiner:
 
         if len(items) > 1:
             max_workers = min(len(items), os.cpu_count() or 4)
+            logger.debug(f"Using {max_workers} workers for decision tree mining")
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 mined = list(executor.map(
                     lambda item: self._mine_one_transition_effects(item[0], item[1], preprocessed_log),
