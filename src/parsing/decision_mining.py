@@ -101,8 +101,16 @@ class DecisionMiner:
                 raw[act] = (status, prob)
 
             active_acts = [a for a, (s, _) in raw.items() if s == "active"]
+            # A branch is only "certain" (and the split "deterministic") when
+            # it's the sole active branch AND no other branch is "fallback" —
+            # a coexisting fallback branch means we're not confident enough to
+            # call it deterministic, so both the "certain" promotion below and
+            # the action decision must share this exact condition (previously
+            # they didn't, which meant action could be "deterministic" without
+            # any branch actually promoted to "certain").
+            is_deterministic = len(active_acts) == 1 and all(s != "fallback" for (s, _) in raw.values())
 
-            if len(active_acts) == 1 and all(s != "fallback" for (s, _) in raw.values()):
+            if is_deterministic:
                 sole = active_acts[0]
                 raw[sole] = ("certain", raw[sole][1])
 
@@ -113,7 +121,7 @@ class DecisionMiner:
 
             if len(active_acts) == 0:
                 action = "fallback"
-            elif len(active_acts) == 1:
+            elif is_deterministic:
                 action = "deterministic"
             elif total_samples < self.config.dt_min_samples:
                 action = "fallback"
