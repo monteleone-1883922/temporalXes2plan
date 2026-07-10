@@ -27,6 +27,7 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 ZENODO_ZIP_URL =  "https://zenodo.org/records/16268743/files/Collection_Event_Logs.zip?download=1"
+METADATA_CSV_URL = "https://zenodo.org/records/16268743/files/Metadata.csv?download=1"
 _zenodo_zip_cache: zipfile.ZipFile | None = None
 
 # ---------------------------------------------------------------------------
@@ -38,11 +39,40 @@ def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def download_metadata_if_needed(metadata_csv: Path, force: bool = False) -> Path:
+    """Ensure Metadata.csv is available on disk, downloading it from Zenodo
+    if missing.
+
+    Args:
+        metadata_csv: Local path where Metadata.csv should live.
+        force: If True, re-download even if the file already exists.
+
+    Returns:
+        The same path, guaranteed to exist on disk.
+
+    Raises:
+        requests.HTTPError: If the download fails.
+    """
+    metadata_csv = Path(metadata_csv)
+    if metadata_csv.exists() and not force:
+        return metadata_csv
+
+    logger.info("Downloading Metadata.csv from Zenodo to %s ...", metadata_csv)
+    metadata_csv.parent.mkdir(parents=True, exist_ok=True)
+    response = requests.get(METADATA_CSV_URL, timeout=120)
+    response.raise_for_status()
+    metadata_csv.write_bytes(response.content)
+    return metadata_csv
+
+
 def get_log_selection(
     metadata_csv: Path,
     log_ids: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """Load the BPM 2025 metadata CSV and optionally filter by log ID.
+
+    Downloads Metadata.csv from Zenodo first if it's not already present at
+    the given path (see download_metadata_if_needed()).
 
     Args:
         metadata_csv: Path to a locally stored Metadata.csv.
@@ -52,6 +82,7 @@ def get_log_selection(
     Returns:
         Filtered DataFrame with the same columns as analysis_logs.filter_logs().
     """
+    metadata_csv = download_metadata_if_needed(Path(metadata_csv))
     df = pd.read_csv(metadata_csv)
     df = clean_columns(df)
 
