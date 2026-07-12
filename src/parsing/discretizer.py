@@ -1,5 +1,5 @@
+import ckwrap
 import concurrent.futures
-import jenkspy
 import json
 import numpy as np
 import os
@@ -15,15 +15,15 @@ from models import AnalysisConfig
 
 logger = utils.get_logger(__name__)
 
-RNG_RETRY = 2
 
 class Discretizer:
-    """Pre-computes Jenks Natural Breaks boundaries for numerical attributes.
+    """Pre-computes discretization boundaries for numerical attributes.
 
     Uses a 3-stage pipeline robust to skewed distributions:
       Stage 1 — short-circuit for few unique values.
       Stage 2 — KDE-based dominant region extraction.
-      Stage 3 — Jenks Natural Breaks on residuals with GVF-based k selection.
+      Stage 3 — Ckmeans.1d.dp (optimal 1D clustering) on residuals with
+        GVF-based k selection.
 
     Must be fit() before any DT training so that all downstream components
     (decision_mining, effect_analyzer, correlation_miner) share the same
@@ -111,10 +111,10 @@ class Discretizer:
 
             work_items.append((attr, values, n_unique))
 
-        # --- Parallel: each attribute's KDE + Jenks pipeline is independent
-        # (see _find_best_boundaries — only reads self.config, no shared
-        # mutable state) and mostly runs in GIL-releasing C extensions
-        # (scipy's gaussian_kde, jenkspy). executor.map() preserves
+        # --- Parallel: each attribute's KDE + Ckmeans.1d.dp pipeline is
+        # independent (see _find_best_boundaries — only reads self.config,
+        # no shared mutable state) and mostly runs in GIL-releasing C
+        # extensions (scipy's gaussian_kde, ckwrap). executor.map() preserves
         # work_items order in its results regardless of completion order, so
         # the self.boundaries merge below stays deterministic. ---
         if len(work_items) > 1:
@@ -316,7 +316,7 @@ class Discretizer:
         return dominant_centers, residuals
 
     # ------------------------------------------------------------------
-    # Stage 3 — Jenks Natural Breaks on residuals
+    # Stage 3 — Ckmeans.1d.dp on residuals
     # ------------------------------------------------------------------
 
     def _cluster_residuals(
@@ -326,7 +326,7 @@ class Discretizer:
             cfg: AnalysisConfig,
             n_dominant: int,
     ) -> List[float]:
-        """Jenks Natural Breaks on residual values with GVF-based k selection.
+        """Ckmeans.1d.dp (optimal 1D clustering) on residuals with GVF-based k selection.
 
         Args:
             attr: Attribute name (for logging).
@@ -350,64 +350,45 @@ class Discretizer:
         n_unique_res = len(np.unique(residuals))
         k_max = min(max_k_residual, n_unique_res)
 
-        # Global best across all retries
         best_k = 1
         best_breaks: Optional[List[float]] = None
         best_gvf: float = 0.0
-        best_found = False
 
-        retry_sample_loops = RNG_RETRY if len(residuals) > cfg.jenks_sample_size else 1
-        for i in range(retry_sample_loops):
-            if best_found:
+        # Per-run state for marginal gain early stop
+        prev_gvf_local: Optional[float] = None
+
+        for k in range(2, k_max + 1):
+            try:
+                centers = ckwrap.ckmeans(residuals, k).centers
+            except Exception as exc:
+                logger.warning(
+                    "Discretizer: '%s' Stage 3 — ckwrap failed at k=%d (%s) — stopping k search.",
+                    attr, k, exc,
+                )
                 break
 
-            # Stratified sample for Jenks DP (O(n²k) — too slow on large arrays)
-            if len(residuals) > cfg.jenks_sample_size:
-                rng = np.random.default_rng(42 + i)
-                idx = rng.choice(len(residuals), size=cfg.jenks_sample_size, replace=False)
-                sample = np.sort(residuals[idx])
-                logger.debug(
-                    "Discretizer: '%s' Stage 3 — sampling %d/%d points for Jenks (seed=%d)",
-                    attr, cfg.jenks_sample_size, len(residuals), 42 + i,
-                )
-            else:
-                sample = residuals
+            breaks = self._centers_to_breaks(residuals, centers)
+            gvf = self._gvf(residuals, breaks)
+            logger.debug("Discretizer: '%s' Stage 3 k=%d GVF=%.4f", attr, k, gvf)
 
-            # Per-retry state for marginal gain early stop
-            prev_gvf_local: Optional[float] = None
+            # Early stop a: excellent fit reached
+            if gvf >= cfg.gvf_target:
+                best_k = k
+                best_breaks = breaks
+                best_gvf = gvf
+                break
 
-            for k in range(2, k_max + 1):
-                try:
-                    breaks = jenkspy.jenks_breaks(sample.tolist(), n_classes=k)
-                except Exception as exc:
-                    logger.warning(
-                        "Discretizer: '%s' Stage 3 — jenkspy failed at k=%d (%s) — stopping k search.",
-                        attr, k, exc,
-                    )
-                    break
+            # Early stop b: marginal gain too small — stop searching higher k
+            if prev_gvf_local is not None and (gvf - prev_gvf_local) < cfg.min_gvf_improvement:
+                break
 
-                gvf = self._gvf(residuals, breaks)
-                logger.debug("Discretizer: '%s' Stage 3 k=%d GVF=%.4f (retry %d)", attr, k, gvf, i)
+            # Update global best if this k is better than anything found so far
+            if gvf > best_gvf:
+                best_k = k
+                best_breaks = breaks
+                best_gvf = gvf
 
-                # Early stop a: excellent fit reached
-                if gvf >= cfg.gvf_target:
-                    best_k = k
-                    best_breaks = breaks
-                    best_gvf = gvf
-                    best_found = True
-                    break
-
-                # Early stop b: marginal gain too small within this retry — stop searching higher k
-                if prev_gvf_local is not None and (gvf - prev_gvf_local) < cfg.min_gvf_improvement:
-                    break
-
-                # Update global best if this k is better than anything found so far
-                if gvf > best_gvf:
-                    best_k = k
-                    best_breaks = breaks
-                    best_gvf = gvf
-
-                prev_gvf_local = gvf
+            prev_gvf_local = gvf
 
         # Quality gate: best partition must explain enough variance
         if best_k == 1 or best_breaks is None or best_gvf < cfg.min_gvf_threshold:
@@ -417,7 +398,7 @@ class Discretizer:
             )
             return [float(residuals.mean())]
 
-        return self._jenks_bin_centers(residuals, best_breaks)
+        return self._bin_centers(residuals, best_breaks)
 
     # ------------------------------------------------------------------
     # Static helpers
@@ -428,8 +409,8 @@ class Discretizer:
         """Goodness of Variance Fit: 1 - WCSS/TSS.
 
         Args:
-            values: 1-D array of all residual values (not just the sample).
-            breaks: Jenks breaks [min_val, b1, ..., max_val] — k+1 elements for k bins.
+            values: 1-D array of all residual values.
+            breaks: Bin edges [min_val, b1, ..., max_val] — k+1 elements for k bins.
 
         Returns:
             GVF in [0.0, 1.0]. Returns 1.0 for constant arrays (TSS=0).
@@ -451,12 +432,12 @@ class Discretizer:
         return 1.0 - wcss / tss
 
     @staticmethod
-    def _jenks_bin_centers(values: np.ndarray, breaks: List[float]) -> List[float]:
-        """Return the mean of values in each Jenks bin as the bin center.
+    def _bin_centers(values: np.ndarray, breaks: List[float]) -> List[float]:
+        """Return the mean of values in each bin as the bin center.
 
         Args:
-            values: Full residual array (all points, not just the sample).
-            breaks: Jenks breaks [min, b1, ..., max] for k bins.
+            values: Full residual array.
+            breaks: Bin edges [min, b1, ..., max] for k bins.
 
         Returns:
             Sorted list of k center floats (one per non-empty bin).
@@ -470,6 +451,24 @@ class Discretizer:
             if mask.any():
                 centers.append(float(values[mask].mean()))
         return sorted(centers)
+
+    @staticmethod
+    def _centers_to_breaks(values: np.ndarray, centers: np.ndarray) -> List[float]:
+        """Convert Ckmeans.1d.dp cluster centers into bin edges.
+
+        Ckmeans.1d.dp returns cluster centers, not edges — this mirrors the
+        edge format jenkspy used to return ([min, b1, ..., max], k+1 elements
+        for k bins) so downstream code (_gvf, _bin_centers) stays unchanged.
+
+        Args:
+            values: Full residual array the clustering was computed on.
+            centers: Sorted cluster centers from ckwrap.ckmeans(...).centers.
+
+        Returns:
+            Bin edges [min, b1, ..., max] — len(centers) + 1 elements.
+        """
+        sorted_centers = np.sort(centers)
+        return [float(values.min())] + Discretizer._midpoints_between(sorted_centers) + [float(values.max())]
 
     @staticmethod
     def _midpoints_between(sorted_vals: np.ndarray) -> List[float]:

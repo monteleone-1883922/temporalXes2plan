@@ -171,12 +171,11 @@ class TestCategoricalFields:
 
 class TestExcludedFieldsStayAtDefault:
     def test_pre_discretization_performance_knobs_untouched(self, configs):
-        # jenks_sample_size/kde_grid_points/kde_extrema_order stay fixed --
-        # unlike the rest of §4.7, these are performance/resolution knobs,
-        # not quality knobs (see the analysis doc).
+        # kde_grid_points/kde_extrema_order stay fixed -- unlike the rest of
+        # §4.7, these are performance/resolution knobs, not quality knobs
+        # (see the analysis doc).
         default = AnalysisConfig()
         for cfg in configs:
-            assert cfg.jenks_sample_size == default.jenks_sample_size
             assert cfg.kde_grid_points == default.kde_grid_points
             assert cfg.kde_extrema_order == default.kde_extrema_order
 
@@ -204,7 +203,6 @@ class TestExcludedFieldsStayAtDefault:
 # ---------------------------------------------------------------------------
 
 CUSTOM_BASE_CONFIG = AnalysisConfig(
-    jenks_sample_size=12345,
     kde_grid_points=222,
     kde_extrema_order=9,
     xor_screen_prune_branches=False,
@@ -236,7 +234,6 @@ def configs_with_base_config():
 class TestBaseConfigOverride:
     def test_untouched_fields_equal_base_config(self, configs_with_base_config):
         for cfg in configs_with_base_config:
-            assert cfg.jenks_sample_size == CUSTOM_BASE_CONFIG.jenks_sample_size
             assert cfg.kde_grid_points == CUSTOM_BASE_CONFIG.kde_grid_points
             assert cfg.kde_extrema_order == CUSTOM_BASE_CONFIG.kde_extrema_order
             assert cfg.xor_screen_prune_branches == CUSTOM_BASE_CONFIG.xor_screen_prune_branches
@@ -269,5 +266,5 @@ class TestBaseConfigOverride:
         trial = study.ask()
         cfg = suggest_config(trial, base_config=None)
         default = AnalysisConfig()
-        assert cfg.jenks_sample_size == default.jenks_sample_size
+        assert cfg.kde_grid_points == default.kde_grid_points
         assert cfg.snapshot_dir == default.snapshot_dir

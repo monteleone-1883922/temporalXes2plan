@@ -167,7 +167,7 @@ class TestClusterResiduals:
     def test_high_gvf_threshold_forces_single_bin(self):
         """Setting min_gvf_threshold above the achievable GVF at k=2 must force single bin.
 
-        For uniform U(0,1000) Jenks with k=2 achieves GVF ≈ 0.75 (theoretical: 1 - 1/k²).
+        For uniform U(0,1000), k=2 achieves GVF ≈ 0.75 (theoretical: 1 - 1/k²).
         kmeans_max_k=2 caps the search at k=2 — with higher k allowed, GVF keeps
         improving (k=3 already reaches ≈0.89) and the threshold would be satisfied,
         which is not what this test is checking. With min_gvf_threshold=0.80 the
@@ -191,15 +191,12 @@ class TestClusterResiduals:
         centers_b = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
         assert centers_a == centers_b
 
-    def test_sampling_activates_for_large_input(self):
-        """Arrays exceeding jenks_sample_size must be sampled; result still correct."""
+    def test_correctness_on_large_input(self):
+        """Large residual arrays are clustered exactly (no subsampling); result still correct."""
         rng = np.random.default_rng(99)
-        # Two clear clusters × 15k points each = 30k total > default 20k
+        # Two clear clusters × 15k points each = 30k total
         residuals = np.concatenate([rng.normal(0, 1, 15000), rng.normal(100, 1, 15000)])
-        d = Discretizer(AnalysisConfig(
-            kmeans_max_k=5, min_residual_points=10,
-            jenks_sample_size=20000,
-        ))
+        d = Discretizer(AnalysisConfig(kmeans_max_k=5, min_residual_points=10))
         centers = d._cluster_residuals("x", residuals, d.config, n_dominant=0)
         assert len(centers) >= 2
         assert centers == sorted(centers)

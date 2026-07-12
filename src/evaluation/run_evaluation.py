@@ -80,7 +80,6 @@ class EvalConfig:
     min_gvf_threshold: float = 0.70
     gvf_target: float = 0.90
     min_gvf_improvement: float = 0.01
-    jenks_sample_size: int = 20000
     # network_search optimizer — used by default to pick the AnalysisConfig;
     # the discretizer params above still apply as the base_config for the
     # fields the optimizer doesn't tune (see network_search/search_space.py).
@@ -220,7 +219,6 @@ def evaluate_log(
                         min_gvf_threshold=cfg.min_gvf_threshold,
                         gvf_target=cfg.gvf_target,
                         min_gvf_improvement=cfg.min_gvf_improvement,
-                        jenks_sample_size=cfg.jenks_sample_size,
                     )
                     domain, variant_map = build_domain_with_variant_map(
                         prepared, config=analysis_cfg,
@@ -242,7 +240,6 @@ def evaluate_log(
                         min_gvf_threshold=cfg.min_gvf_threshold,
                         gvf_target=cfg.gvf_target,
                         min_gvf_improvement=cfg.min_gvf_improvement,
-                        jenks_sample_size=cfg.jenks_sample_size,
                     )
                     search_weights = ScoreWeights(
                         w_det_xor=cfg.w_det_xor, w_det_eff=cfg.w_det_eff,
@@ -609,19 +606,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "dominio/rete da zero, rieseguendo l'optimizer se attivo.")
     # Discretizer params
     p.add_argument("--kmeans-max-k", dest="kmeans_max_k", type=int, default=5,
-                   help="Stage 1 threshold (few unique values) and max-k cap for Stage 3 Jenks.")
+                   help="Stage 1 threshold (few unique values) and max-k cap for Stage 3 Ckmeans.1d.dp.")
     p.add_argument("--dominance-threshold", dest="dominance_threshold", type=float, default=0.30,
                    help="Stage 2: minimum mass fraction for a KDE region to be dominant.")
     p.add_argument("--min-residual-points", dest="min_residual_points", type=int, default=50,
-                   help="Stage 3: minimum residual points required to attempt Jenks (else single bin).")
+                   help="Stage 3: minimum residual points required to attempt clustering (else single bin).")
     p.add_argument("--min-gvf-threshold", dest="min_gvf_threshold", type=float, default=0.70,
                    help="Stage 3: GVF at k=2 below this forces single bin (no structure).")
     p.add_argument("--gvf-target", dest="gvf_target", type=float, default=0.90,
                    help="Stage 3: GVF early-stop target — accept k once GVF exceeds this.")
     p.add_argument("--min-gvf-improvement", dest="min_gvf_improvement", type=float, default=0.01,
                    help="Stage 3: stop incrementing k when marginal GVF gain falls below this.")
-    p.add_argument("--jenks-sample-size", dest="jenks_sample_size", type=int, default=20000,
-                   help="Stage 3: max points for Jenks DP; larger arrays are sampled.")
     # network_search optimizer
     p.add_argument("--no-optimizer", dest="no_optimizer", action="store_true",
                    help="Disable the Optuna optimizer and use the fixed discretizer "
@@ -693,7 +688,6 @@ def main(args: argparse.Namespace) -> None:
         min_gvf_threshold=args.min_gvf_threshold,
         gvf_target=args.gvf_target,
         min_gvf_improvement=args.min_gvf_improvement,
-        jenks_sample_size=args.jenks_sample_size,
         use_optimizer=not args.no_optimizer,
         search_n_trials=args.search_n_trials,
         w_det_xor=args.w_det_xor,

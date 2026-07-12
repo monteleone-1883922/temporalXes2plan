@@ -19,6 +19,6 @@ dependencies:
     - beautifulsoup4
     - scipy
     - rustxes
-    - jenkspy==0.4.1
+    - ckwrap==1.2.3
     - flask
     - optuna==4.9.0

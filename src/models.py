@@ -549,11 +549,10 @@ class AnalysisConfig:
     kmeans_max_k: int = 5           # Stage 1 threshold and max-k cap for Stage 3
     dominance_threshold: float = 0.30
     min_residual_points: int = 50
-    # Stage 3 — Jenks Natural Breaks + GVF
+    # Stage 3 — Ckmeans.1d.dp (optimal 1D clustering) + GVF
     min_gvf_threshold: float = 0.70   # GVF at k=2 below this → single bin (no structure)
     gvf_target: float = 0.90          # Early stop when GVF exceeds this (excellent fit)
     min_gvf_improvement: float = 0.01 # Early stop when marginal GVF gain falls below this
-    jenks_sample_size: int = 20000    # Max points for Jenks DP (O(n²k)); sample if exceeded
     kde_grid_points: int = 1000
     kde_extrema_order: int = 5
 

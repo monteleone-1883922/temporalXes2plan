@@ -44,7 +44,7 @@ def suggest_config(trial: optuna.Trial, base_config: Optional[AnalysisConfig] = 
     consequence of the reparametrization (see the analysis doc).
 
     Every AnalysisConfig field not set explicitly below
-    (replay_engine/replay_alignment_variant, jenks_sample_size/kde_grid_points/
+    (replay_engine/replay_alignment_variant, kde_grid_points/
     kde_extrema_order, the dead
     attr_precondition_*/effect_appearance_threshold/xor_screen_prune_branches
     fields, and fixed/logging/path fields) is sourced from `base_config`
@@ -116,9 +116,9 @@ def suggest_config(trial: optuna.Trial, base_config: Optional[AnalysisConfig] = 
     replay_min_fitness = trial.suggest_float("replay_min_fitness", 0.5, 0.95, step=0.05)
 
     # --- §4.7 pre-discretizzazione numerica ---
-    # jenks_sample_size/kde_grid_points/kde_extrema_order stay fixed at their
-    # AnalysisConfig() default -- performance/numerical-resolution knobs, not
-    # quality knobs (see the analysis doc).
+    # kde_grid_points/kde_extrema_order stay fixed at their AnalysisConfig()
+    # default -- performance/numerical-resolution knobs, not quality knobs
+    # (see the analysis doc).
     kmeans_max_k = trial.suggest_int("kmeans_max_k", 3, 8, step=1)
     dominance_threshold = trial.suggest_float("dominance_threshold", 0.15, 0.50, step=0.05)
     min_residual_points = trial.suggest_int("min_residual_points", 20, 100, step=10)
@@ -158,7 +158,6 @@ def suggest_config(trial: optuna.Trial, base_config: Optional[AnalysisConfig] = 
         min_gvf_improvement=min_gvf_improvement,
         # --- fields Optuna doesn't tune: sourced from base_config, not a
         # hardcoded default (docs/network_improvement_loop.md §4.6/§4.7) ---
-        jenks_sample_size=base.jenks_sample_size,
         kde_grid_points=base.kde_grid_points,
         kde_extrema_order=base.kde_extrema_order,
         xor_screen_prune_branches=base.xor_screen_prune_branches,
