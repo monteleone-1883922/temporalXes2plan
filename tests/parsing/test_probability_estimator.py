@@ -169,6 +169,21 @@ class TestComputeXorProbabilities:
         assert stats.probabilities["B"] == 1.0
         assert stats.probabilities["C"] == 0.0
 
+    def test_rare_branch_probability_survives_rounding(self):
+        """2 out of 500 firings (0.004) must not collapse to 0.0 -- rounding
+        to only 2 decimals would silently make this branch appear
+        impossible and, downstream, drop its -log(prob) action cost."""
+        net = _xor_net()
+        decision_points = {net["p_xor"]: [net["t_b"], net["t_c"]]}
+
+        firings = [_fd("B")] * 498 + [_fd("C")] * 2
+        plog = _preprocessed(xor_firings={net["p_xor"].name: firings})
+        result = _make_estimator().compute_xor_probabilities(plog, decision_points)
+
+        stats = result[net["p_xor"].name]
+        assert stats.probabilities["C"] == pytest.approx(0.004)
+        assert stats.probabilities["C"] > 0.0
+
 
 # ===========================================================================
 # _normalize_branch_counts
@@ -310,6 +325,17 @@ class TestComputeAttributeEffectProbabilities:
         result = _make_estimator().compute_attribute_effect_probabilities(plog)
 
         assert result["a"].presence_probabilities["crp"] == 0.5
+
+    def test_rare_presence_probability_survives_rounding(self):
+        """crp changes in 2 of 500 firings (0.004) must not collapse to 0.0
+        -- see the XOR-branch rounding regression test above for why."""
+        firings = [_fd("a", changed_attrs={"crp": 2.1})] * 2
+        firings += [_fd("a", changed_attrs={})] * 498
+        plog = _preprocessed(transition_firings={"a": firings})
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
+
+        assert result["a"].presence_probabilities["crp"] == pytest.approx(0.004)
+        assert result["a"].presence_probabilities["crp"] > 0.0
 
     def test_multiple_attrs_in_same_firing(self):
         """Two attributes change in the same firing — both counted."""

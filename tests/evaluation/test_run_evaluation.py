@@ -456,6 +456,51 @@ class TestRunQueryDurationScale:
 
 
 # ---------------------------------------------------------------------------
+# _run_query — Q3 must skip the planner entirely (no build_problem, no
+# _run_with_retry) when is_q3_reachable() finds the goal structurally
+# unreachable from the current marking, and record solvability=
+# "skipped_unreachable" with metrics={} (same shape as the existing
+# "skipped_no_attributes" record built in evaluate_log()).
+# ---------------------------------------------------------------------------
+
+class TestRunQueryQ3Unreachable:
+    def _spec(self):
+        spec = MagicMock()
+        spec.query_type = "Q3"
+        spec.init_places = ["p_start"]
+        spec.init_effects = []
+        spec.goal_sop = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        spec.metric = "minimize_weighted"
+        spec.cost_weight = 0.001
+        spec.require_completion = True
+        spec.deadline = None
+        return spec
+
+    def test_skips_planner_when_goal_unreachable(self, tmp_path):
+        # _make_serialized() has an empty graph and end_place="p_end", which
+        # is never in the marking — is_q3_reachable() is False regardless of
+        # goal_sop, so the planner must never be invoked.
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+        prefix = _make_prefix()
+
+        with patch("evaluation.run_evaluation._run_with_retry") as mock_run:
+            result = _run_query(
+                "log_1", "case1", self._spec(), "(define (domain test))",
+                api, cfg, _make_serialized(), tmp_path / "failures", prefix,
+                MagicMock(), {}, pddl_dir=tmp_path / "pddl",
+            )
+
+        mock_run.assert_not_called()
+        api.build_problem.assert_not_called()
+        assert result.solvability == "skipped_unreachable"
+        assert result.attempts == 0
+        assert result.metrics == {}
+        assert result.planner_duration_s is None
+        assert result.validation is None
+
+
+# ---------------------------------------------------------------------------
 # evaluate_log — current.json cache (skip parse/encode/optimizer when it
 # already exists, unless force_rebuild)
 # ---------------------------------------------------------------------------

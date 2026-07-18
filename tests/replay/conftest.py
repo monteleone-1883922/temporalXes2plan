@@ -55,3 +55,39 @@ def tau_seq_net():
         place_inputs={p_mid1: [t_a], p_mid2: [t_tau], p_out: [t_b]},
     )
     return model
+
+
+@pytest.fixture
+def loop_net():
+    """p_loop self-loop on t_a("A"); t_b("B") exits the loop into p_out.
+
+    Lets a trace fire "A" any number of times in a row (p_loop -> A -> p_loop)
+    before finally firing "B" (p_loop -> B -> p_out) -- the structural shape
+    needed to exercise TraceReplayer._walk's handling of the same ambiguous
+    transition firing repeatedly (a process loop), see trace_replayer.py's
+    _collapse_no_impact / dead_states.
+    """
+    t_a = PetriNet.Transition("t_a", "A")
+    t_b = PetriNet.Transition("t_b", "B")
+    p_loop = PetriNet.Place("p_loop")
+    p_out = PetriNet.Place("p_out")
+
+    net = PetriNet("loop_net")
+    net.places.update([p_loop, p_out])
+    net.transitions.update([t_a, t_b])
+    _wire(net, (p_loop, t_a), (t_a, p_loop), (p_loop, t_b), (t_b, p_out))
+
+    trans_inputs = {t_a: {p_loop}, t_b: {p_loop}}
+    trans_outputs = {t_a: {p_loop}, t_b: {p_out}}
+
+    return PetriNetModel(
+        petrinet=net,
+        initial_marking=Marking({p_loop: 1}),
+        final_marking=Marking({p_out: 1}),
+        activities={"A", "B"},
+        silent_transitions={},
+        trans_inputs=trans_inputs,
+        trans_outputs=trans_outputs,
+        xor_splits={},
+        place_inputs={p_loop: [t_a, t_b]},
+    )

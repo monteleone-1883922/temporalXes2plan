@@ -531,3 +531,31 @@ class TestDurativeActionRendering:
     def test_parentheses_balanced_with_durative(self):
         text = str(self._domain())
         assert text.count("(") == text.count(")")
+
+
+class TestMultiWordAttributeNameRendering:
+    """PDDLCondition/PDDLEffect.to_pddl() must sanitize the attribute name
+    used to build the VALUE constant, not just the predicate name -- both
+    to_pddl() must call sanitize_value(attr, ...) with the already-sanitized
+    `attr`, not the raw self.attribute. A raw attribute name containing a
+    space (e.g. "organization involved", straight from an XES column) would
+    otherwise leak that space into the value constant (e.g.
+    "organization involved_val_none" instead of
+    "organization_involved_val_none"), producing a 2-token predicate call
+    that doesn't match any :constants declaration."""
+
+    def test_condition_value_constant_uses_sanitized_attribute(self):
+        cond = PDDLCondition.attr_is("organization involved", "none")
+        assert cond.to_pddl() == "(organization_involved_is organization_involved_val_none)"
+
+    def test_condition_attr_is_not_value_constant_uses_sanitized_attribute(self):
+        cond = PDDLCondition.attr_is_not("organization involved", "none")
+        assert cond.to_pddl() == "(organization_involved_is_not organization_involved_val_none)"
+
+    def test_effect_value_constant_uses_sanitized_attribute(self):
+        eff = PDDLEffect.set_attr_is("organization involved", "none")
+        assert eff.to_pddl() == "(organization_involved_is organization_involved_val_none)"
+
+    def test_effect_clear_value_constant_uses_sanitized_attribute(self):
+        eff = PDDLEffect.clear_attr_is("organization involved", "none")
+        assert eff.to_pddl() == "(not (organization_involved_is organization_involved_val_none))"

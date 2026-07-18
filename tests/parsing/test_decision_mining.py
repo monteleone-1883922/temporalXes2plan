@@ -257,6 +257,32 @@ class TestFormatCondition:
         result = self.m._format_condition("crp", "<=", 6.5, set(), set())
         assert result is None
 
+    def test_categorical_value_literally_true_returns_value_guard(self):
+        # "confirmed" is categorical (not boolean) but one of its possible
+        # values is literally the string "true" -- its one-hot dummy column
+        # is named "confirmed_true", identical in shape to the boolean
+        # one-hot convention. The categorical check must win: this must
+        # resolve to Guard("confirmed", "true", ...), not be misread as the
+        # boolean _true/_false convention.
+        result = self.m._format_condition("confirmed_true", ">", 0.5, {"confirmed"}, set())
+        assert result == Guard("confirmed", "true", False)
+
+    def test_categorical_value_literally_true_op_lte_returns_none(self):
+        result = self.m._format_condition("confirmed_true", "<=", 0.5, {"confirmed"}, set())
+        assert result is None
+
+    def test_categorical_value_literally_false_returns_value_guard(self):
+        result = self.m._format_condition("confirmed_false", ">", 0.5, {"confirmed"}, set())
+        assert result == Guard("confirmed", "false", False)
+
+    def test_genuine_boolean_column_unaffected_by_categorical_priority(self):
+        # A genuine boolean column ("flag") must still resolve via the
+        # bool_cols path even though the categorical-first check runs ahead
+        # of it -- "flag" is not in categorical_cols, so _get_base_feature
+        # falls through to the plain name and the bool_cols branch applies.
+        result = self.m._format_condition("flag", ">", 0.5, {"confirmed"}, {"flag"})
+        assert result == Guard("flag", None, False)
+
 
 # ===========================================================================
 # screen_xor_splits

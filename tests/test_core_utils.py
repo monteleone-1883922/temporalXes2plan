@@ -132,6 +132,16 @@ class TestConvertIntervalToLteGte:
     def test_zero_lower_bound_inf(self):
         assert convert_interval_to_lte_gte("(-inf-0.0]") == "lte_0_0"
 
+    def test_negative_lower_bound(self):
+        # A naive split('-') on "-5.0-10.0" breaks it into 3 parts (the
+        # bound's own leading '-' is mistaken for the separator) instead of
+        # 2 -- must resolve to the two numeric bounds, not fall through to
+        # returning the raw (bracketed) input unchanged.
+        assert convert_interval_to_lte_gte("(-5.0-10.0]") == "gte_neg5_0_lte_10_0"
+
+    def test_both_bounds_negative(self):
+        assert convert_interval_to_lte_gte("(-10.0--5.0]") == "gte_neg10_0_lte_neg5_0"
+
 
 # ---------------------------------------------------------------------------
 # discretize_value

@@ -90,14 +90,17 @@ class TestComputeXorScore:
         fallback_score = compute_xor_score(fallback_screening, WEIGHTS)
         assert pruned_score < fallback_score < 0.5
 
-    def test_active_branch_under_dt_action_is_neutral(self):
+    def test_active_branch_under_dt_action_is_fully_rewarded(self):
+        # An "active" branch under a "dt" action is a routing decision fully
+        # explained by a mined guard — the best possible outcome (1.0), not
+        # merely neutral (see compute_xor_score's active/dt branch).
         xor_screening = {
             "p1": XorSplitScreening(
                 total_samples=100, action="dt",
                 branches={"a": _xor_branch("active", "a")},
             )
         }
-        assert compute_xor_score(xor_screening, WEIGHTS) == 0.5
+        assert compute_xor_score(xor_screening, WEIGHTS) == 1
 
     def test_active_branch_under_fallback_action_is_penalized(self):
         xor_screening = {

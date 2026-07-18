@@ -557,7 +557,11 @@ class TestConstants:
         }
         domain = build_domain_from_prepared_info(_sequence_prepared(catalog))
         diag_vals = {c.name for c in domain.constants if c.type_name == "diagnosis_val"}
-        assert diag_vals == {"flu", "cold", "covid"}
+        # Constant names always carry the "{attr}_val_{value}" prefix (see
+        # core_utils.sanitize_value) so a bare value like "flu" can never
+        # collide with a differently-attributed constant sharing the same
+        # raw value.
+        assert diag_vals == {"diagnosis_val_flu", "diagnosis_val_cold", "diagnosis_val_covid"}
 
     def test_no_value_objects_for_boolean(self):
         catalog = {"urgent": AttributeCatalogEntry(attribute_type="boolean", possible_values=set())}

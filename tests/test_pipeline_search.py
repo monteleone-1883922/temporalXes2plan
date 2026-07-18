@@ -160,7 +160,15 @@ class TestPipelineRunWithSearch:
         # blocked on elsewhere (see the other failing tests in this class).
         data_dir = str(tmp_path / "data5")
         pddl_dir = str(tmp_path / "pddl5")
-        custom = AnalysisConfig(attr_precondition_min_firings=99, ignored_attributes={"custom_attr"})
+        # ignored_attributes is a full replacement, not a merge (dataclass
+        # field) -- extend AnalysisConfig()'s own default set instead of
+        # overwriting it outright, or the pm4py meta-keys it normally
+        # filters out (time:timestamp, concept:name, ...) stop being
+        # excluded from attribute-effect mining. Without this, time:timestamp
+        # leaks into effect_groups as a raw datetime value and breaks JSON
+        # serialization in save_original_and_current.
+        custom_ignored = AnalysisConfig().ignored_attributes | {"custom_attr"}
+        custom = AnalysisConfig(attr_precondition_min_firings=99, ignored_attributes=custom_ignored)
 
         captured = {}
         original = pipeline_module.find_best_config
@@ -183,4 +191,4 @@ class TestPipelineRunWithSearch:
 
         assert captured["base_config"] is custom
         assert captured["base_config"].attr_precondition_min_firings == 99
-        assert captured["base_config"].ignored_attributes == {"custom_attr"}
+        assert captured["base_config"].ignored_attributes == custom_ignored

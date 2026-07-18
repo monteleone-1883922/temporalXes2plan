@@ -61,15 +61,68 @@ _SERIALIZED_EMPTY: Dict[str, Any] = {
 }
 
 
-def _serialized_with_effect(attr: str, value: str) -> Dict[str, Any]:
+def _transition(input_places, assignments=None):
     return {
-        **_SERIALIZED_EMPTY,
-        "transitions": {
-            "act_a": {
-                "effects": {attr: {value: {"probability": 1.0, "guard": []}}},
-                "effect_groups": [],
-            }
+        "input_places": input_places,
+        "preconditions": [],
+        "effect_groups": (
+            [{"assignments": assignments, "guard": [], "probability": 1.0}]
+            if assignments else []
+        ),
+        "cost": 0.0,
+        "duration": None,
+    }
+
+
+def _serialized_with_effect(attr: str, value: str) -> Dict[str, Any]:
+    """Minimal reachable net: p_start -> act_a -> p_end, act_a sets attr=value."""
+    return {
+        "graph": {
+            "nodes": [
+                {"id": "p_start", "type": "place", "label": "p_start"},
+                {"id": "t_a", "type": "transition", "label": "act_a"},
+                {"id": "p_end", "type": "place", "label": "p_end"},
+            ],
+            "edges": [
+                {"source": "p_start", "target": "t_a"},
+                {"source": "t_a", "target": "p_end"},
+            ],
         },
+        "transitions": {
+            "act_a": _transition(["p_start"], [{"attribute": attr, "value": value}]),
+        },
+        "attribute_catalog": _CATALOG_MIXED,
+        "metadata": {"start_place": "p_start", "end_place": "p_end"},
+    }
+
+
+def _serialized_with_unreachable_effect(attr: str, value: str) -> Dict[str, Any]:
+    """act_a (sets attr=value) only fires from p_isolated, which the marking
+    starting at p_start never reaches — p_start reaches p_end via act_b
+    instead, whose effect does not match the goal."""
+    return {
+        "graph": {
+            "nodes": [
+                {"id": "p_start", "type": "place", "label": "p_start"},
+                {"id": "t_b", "type": "transition", "label": "act_b"},
+                {"id": "p_end", "type": "place", "label": "p_end"},
+                {"id": "p_isolated", "type": "place", "label": "p_isolated"},
+                {"id": "t_a", "type": "transition", "label": "act_a"},
+                {"id": "p_after_a", "type": "place", "label": "p_after_a"},
+            ],
+            "edges": [
+                {"source": "p_start", "target": "t_b"},
+                {"source": "t_b", "target": "p_end"},
+                {"source": "p_isolated", "target": "t_a"},
+                {"source": "t_a", "target": "p_after_a"},
+            ],
+        },
+        "transitions": {
+            "act_b": _transition(["p_start"]),
+            "act_a": _transition(["p_isolated"], [{"attribute": attr, "value": value}]),
+        },
+        "attribute_catalog": _CATALOG_MIXED,
+        "metadata": {"start_place": "p_start", "end_place": "p_end"},
     }
 
 
@@ -341,16 +394,16 @@ class TestIsQ3Reachable:
     def test_reachable_true_when_effect_exists(self):
         serialized = _serialized_with_effect("status", "discharged")
         goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
-        assert is_q3_reachable(goal, serialized) is True
+        assert is_q3_reachable(goal, serialized, ["p_start"]) is True
 
     def test_reachable_false_when_no_effect(self):
         goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
-        assert is_q3_reachable(goal, _SERIALIZED_EMPTY) is False
+        assert is_q3_reachable(goal, _SERIALIZED_EMPTY, ["p_start"]) is False
 
     def test_reachable_false_when_wrong_value(self):
         serialized = _serialized_with_effect("status", "admitted")
         goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
-        assert is_q3_reachable(goal, serialized) is False
+        assert is_q3_reachable(goal, serialized, ["p_start"]) is False
 
     def test_reachable_true_when_one_clause_covered(self):
         # Two clauses: first unsatisfied, second satisfied
@@ -359,7 +412,7 @@ class TestIsQ3Reachable:
             [{"attribute": "status", "predicate": "=", "value": "discharged"}],
             [{"attribute": "critical", "predicate": "=", "value": "true"}],
         ]
-        assert is_q3_reachable(goal, serialized) is True
+        assert is_q3_reachable(goal, serialized, ["p_start"]) is True
 
     def test_reachable_false_when_partial_clause_match(self):
         # Clause needs both attrs; only one is reachable
@@ -368,14 +421,95 @@ class TestIsQ3Reachable:
             {"attribute": "status", "predicate": "=", "value": "discharged"},
             {"attribute": "critical", "predicate": "=", "value": "true"},
         ]]
-        assert is_q3_reachable(goal, serialized) is False
+        assert is_q3_reachable(goal, serialized, ["p_start"]) is False
 
     def test_empty_clause_skipped(self):
         goal = [[]]
-        assert is_q3_reachable(goal, _SERIALIZED_EMPTY) is False
+        assert is_q3_reachable(goal, _SERIALIZED_EMPTY, ["p_start"]) is False
 
     def test_empty_goal_returns_false(self):
-        assert is_q3_reachable([], _SERIALIZED_EMPTY) is False
+        assert is_q3_reachable([], _SERIALIZED_EMPTY, ["p_start"]) is False
+
+    def test_reachable_false_when_effect_transition_not_reachable_from_marking(self):
+        """The effect exists somewhere in the net, but only on a transition
+        gated behind a place the current marking never reaches — this is the
+        exact case the structural pre-check must catch: an effect existing
+        'somewhere' is not enough, it must be reachable from init_places."""
+        serialized = _serialized_with_unreachable_effect("status", "discharged")
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        assert is_q3_reachable(goal, serialized, ["p_start"]) is False
+
+    def test_reachable_true_when_marking_starts_past_the_gate(self):
+        """Same net as above, but the marking already sits at p_isolated, so
+        act_a (and its effect) is reachable and p_after_a — reused here as
+        the end place — is reached."""
+        serialized = _serialized_with_unreachable_effect("status", "discharged")
+        serialized["metadata"]["end_place"] = "p_after_a"
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        assert is_q3_reachable(goal, serialized, ["p_isolated"]) is True
+
+    def test_reachable_false_when_end_place_unreachable(self):
+        """The attribute effect is reachable, but the declared end place is
+        not connected to the net at all — the goal must not be reported
+        reachable if the process can never complete."""
+        serialized = _serialized_with_effect("status", "discharged")
+        serialized["metadata"]["end_place"] = "p_unreachable_end"
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        assert is_q3_reachable(goal, serialized, ["p_start"]) is False
+
+    def test_reachable_true_through_multi_hop_chain_in_adversarial_node_order(self):
+        """t_2 needs the output of t_1, but t_2 is listed BEFORE t_1 in the
+        graph's node order — the worklist BFS must still propagate p_start
+        (via t_1 -> p_mid) to unblock t_2, regardless of node/edge order.
+        Also exercises a transition (t_1) with no attribute effect of its
+        own sitting in the middle of the chain."""
+        serialized = {
+            "graph": {
+                "nodes": [
+                    {"id": "t_2", "type": "transition", "label": "act_2"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                    {"id": "p_mid", "type": "place", "label": "p_mid"},
+                    {"id": "t_1", "type": "transition", "label": "act_1"},
+                    {"id": "p_start", "type": "place", "label": "p_start"},
+                ],
+                "edges": [
+                    {"source": "p_mid", "target": "t_2"},
+                    {"source": "t_2", "target": "p_end"},
+                    {"source": "p_start", "target": "t_1"},
+                    {"source": "t_1", "target": "p_mid"},
+                ],
+            },
+            "transitions": {
+                "act_1": _transition(["p_start"]),
+                "act_2": _transition(["p_mid"], [{"attribute": "status", "value": "discharged"}]),
+            },
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        assert is_q3_reachable(goal, serialized, ["p_start"]) is True
+
+    def test_source_transition_with_no_input_places_fires_unconditionally(self):
+        """A transition with no input places at all (a net source) must
+        still fire and propagate its output, even from an empty marking."""
+        serialized = {
+            "graph": {
+                "nodes": [
+                    {"id": "t_src", "type": "transition", "label": "act_src"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                ],
+                "edges": [
+                    {"source": "t_src", "target": "p_end"},
+                ],
+            },
+            "transitions": {
+                "act_src": _transition([], [{"attribute": "status", "value": "discharged"}]),
+            },
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        assert is_q3_reachable(goal, serialized, []) is True
 
     def test_all_queries_use_minimize_weighted(self):
         ps = _make_prefix_sample(

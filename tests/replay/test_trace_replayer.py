@@ -138,6 +138,118 @@ class TestEffectGroupBacktracking:
         assert "B" in outcome.error_reason
 
 
+class TestLoopSafety:
+    """A process loop repeats the same ambiguous transition many times in
+    one trace -- _walk's DFS-with-backtracking is otherwise a
+    product-of-candidates-per-choice-point in the worst case (see the
+    module's loop-blowup analysis). _collapse_no_impact and dead_states
+    mitigate this without changing correctness; these tests exercise both
+    on a real repeating transition (loop_net: p_loop -> A -> p_loop, exits
+    via B)."""
+
+    def test_all_candidates_no_impact_on_repeat_firing(self, loop_net):
+        # 3 candidates for "A": one sets both attributes at once, the other
+        # two set one each. Seed flag=x/risk=high via the log-observed
+        # prefix (replay_evaluation_split's cut point derives split_attributes
+        # from the raw event, no effect-group interpretation -- see
+        # _build_snapshots) so the FIRST tail "A" firing already sees the
+        # state all three candidates would produce -- i.e. ALL THREE are
+        # simultaneously no-impact right from the start, deliberately
+        # sidestepping _rank_candidates' own tie-break preference for
+        # "leaner" candidates (which would otherwise favor a singleton group
+        # over group_both on an ambiguous FIRST firing and never exercise
+        # the all-no-impact collapse at all).
+        group_both = PreparedEffectGroup(assignments=[("flag", "x"), ("risk", "high")], guard=[], probability=1.0)
+        group_flag_only = PreparedEffectGroup(assignments=[("flag", "x")], guard=[], probability=0.5)
+        group_risk_only = PreparedEffectGroup(assignments=[("risk", "high")], guard=[], probability=0.5)
+        trans_a = PreparedTransition(
+            activity_name="A", input_places=["p_loop"], preconditions=[],
+            effect_groups=[group_both, group_flag_only, group_risk_only],
+        )
+        trans_b = PreparedTransition(activity_name="B", input_places=["p_loop"], preconditions=[], effect_groups=[])
+        replayer = _replayer(loop_net, {"A": trans_a, "B": trans_b})
+        trace = make_trace(
+            make_event("A", flag="x", risk="high"),  # seed event, stays before the cut
+            make_event("A"),                          # first TAIL firing -- all 3 candidates no-impact
+            make_event("B", flag="x", risk="high"),
+        )
+
+        outcome = replayer.replay_evaluation_split(trace, n_prefix=1)
+
+        assert outcome.reached_end
+        assert outcome.matches_expected_final_state
+        assert outcome.split_attributes == {"flag": "x", "risk": "high"}
+        assert outcome.final_attributes == {"flag": "x", "risk": "high"}
+
+    def test_repeated_no_impact_group_collapses_to_a_single_candidate(self, loop_net):
+        # Two candidates that, once flag is already "x", are BOTH no-ops --
+        # group_reassert re-asserts the same value flag=x already holds,
+        # group_noop_risk re-asserts risk=high which was set by the first
+        # "A" firing too. On the second "A" firing both are no-impact
+        # simultaneously -> must collapse to a single representative, so no
+        # _EffectChoicePoint (and therefore no ambiguity/backtracking) is
+        # needed for that firing at all.
+        group_flag = PreparedEffectGroup(assignments=[("flag", "x"), ("risk", "high")], guard=[], probability=1.0)
+        group_reassert = PreparedEffectGroup(assignments=[("flag", "x")], guard=[], probability=0.5)
+        group_noop_risk = PreparedEffectGroup(assignments=[("risk", "high")], guard=[], probability=0.5)
+        trans_a_first = PreparedTransition(
+            activity_name="A", input_places=["p_loop"], preconditions=[], effect_groups=[group_flag],
+        )
+        replayer = _replayer(loop_net, {"A": trans_a_first, "B": PreparedTransition(
+            activity_name="B", input_places=["p_loop"], preconditions=[], effect_groups=[],
+        )})
+        # Swap in the ambiguous-but-all-no-impact effect groups only for the
+        # SECOND firing by mutating the shared PreparedTransition's
+        # effect_groups after the fact is awkward with one dict entry per
+        # activity name (the replayer looks up "A" once per step, same
+        # PreparedTransition every time) -- instead, verify the collapse
+        # directly via the module-level helper, which is what _walk calls
+        # at every firing.
+        from replay.trace_replayer import _collapse_no_impact
+        pddl_state = {"flag": "x", "risk": "high"}
+        candidates = [group_reassert, group_noop_risk]
+        collapsed = _collapse_no_impact(candidates, pddl_state)
+        assert len(collapsed) == 1
+        assert collapsed[0] in candidates
+
+    def test_mixed_impact_candidates_are_not_collapsed(self, loop_net):
+        # Only genuinely-redundant (no-impact) candidates get merged --
+        # group_real still changes state and must survive collapsing
+        # alongside the one kept no-impact representative.
+        from replay.trace_replayer import _collapse_no_impact
+        group_noop = PreparedEffectGroup(assignments=[("flag", "x")], guard=[], probability=0.5)
+        group_real = PreparedEffectGroup(assignments=[("flag", "y")], guard=[], probability=0.5)
+        pddl_state = {"flag": "x"}
+        collapsed = _collapse_no_impact([group_noop, group_real], pddl_state)
+        assert len(collapsed) == 2
+
+    def test_evaluation_split_terminates_when_repeated_ambiguity_cannot_match_target(self, loop_net):
+        # Two REAL (non-collapsible) candidates on every "A" firing, none of
+        # which ever touch "risk" -- the target snapshot below requires
+        # risk=high, which no combination of A's choices can ever produce,
+        # so every branch of the exhaustive backtrack is doomed. Must still
+        # terminate (not hang) and correctly report a mismatch rather than
+        # a false positive.
+        group_x = PreparedEffectGroup(assignments=[("flag", "x")], guard=[], probability=0.5)
+        group_y = PreparedEffectGroup(assignments=[("flag", "y")], guard=[], probability=0.5)
+        trans_a = PreparedTransition(
+            activity_name="A", input_places=["p_loop"], preconditions=[],
+            effect_groups=[group_x, group_y],
+        )
+        trans_b = PreparedTransition(activity_name="B", input_places=["p_loop"], preconditions=[], effect_groups=[])
+        replayer = _replayer(loop_net, {"A": trans_a, "B": trans_b})
+        trace = make_trace(
+            make_event("A"), make_event("A"), make_event("A"), make_event("A"),
+            make_event("B", risk="high"),
+        )
+
+        outcome = replayer.replay_evaluation_split(trace, n_prefix=0)
+
+        assert outcome.reached_end is True
+        assert outcome.matches_expected_final_state is False
+        assert outcome.error_step is None
+
+
 class TestReplayPartialTrace:
     """Caso 3: only Phase 1 + the raw final snapshot — no guard/effect-group
     walk at all (docs/trace_replayer_analysis.md: "il replay vero e proprio
