@@ -90,13 +90,18 @@ def sanitize_value(attr_name: str, raw_value: Optional[str]) -> Optional[str]:
     """
     if raw_value is None:
         return None
-    # Force lowercase here (not just on raw_value) so callers that pass an
-    # inconsistently-cased attr_name (e.g. "notificationType" vs the
-    # catalog's "notificationtype") still produce the one PDDL constant name
-    # every other call site (guards, :constants declarations) agrees on —
-    # a case mismatch here means "declared as X but referenced as x", which
-    # Fast Downward treats as two different, undeclared symbols.
-    attr_name = attr_name.strip().lower()
+    # Run attr_name through the same normalization as sanitize_name (not
+    # just .lower()) so callers that pass a raw, un-sanitize_name'd
+    # attribute name (e.g. "Resource Country" with a space, straight from
+    # init_effects) still produce the one PDDL constant name every other
+    # call site (guards, :constants declarations, sanitize_name'd
+    # PDDLEffect/PDDLCondition.to_pddl()) agrees on. Without this, a value
+    # already sanitized once with an unnormalized attr_name (e.g.
+    # "resource country_val_sweden") would fail the idempotency check below
+    # against the properly normalized attr_name ("resource_country"),
+    # since "resource country_val_" != "resource_country_val_" — causing
+    # the "{attr}_val_" prefix to be applied a second time.
+    attr_name = sanitize_name(attr_name)
     if raw_value.lower().startswith(f"{attr_name}_val_"):
         return raw_value.lower()
     cleaned = _replace_special_chars(str(raw_value).strip().lower())
