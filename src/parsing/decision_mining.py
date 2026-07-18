@@ -530,12 +530,17 @@ class DecisionMiner:
         """Convert a DT split (feature op threshold) to a Guard object.
 
         Encoding conventions:
+        - One-hot categorical: > 0.5 → Guard(base, value, False);
+          the <= 0.5 side returns None. Checked first, before the _true/_false
+          suffix convention below — a categorical attribute's own possible
+          values can themselves be the strings "true"/"false" (e.g. a
+          categorical column whose one-hot dummy is literally "{attr}_true"),
+          which must still resolve to Guard(attr, "true", ...) rather than
+          being misread as the boolean convention.
         - One-hot bool (_true/_false suffix): > 0.5 → Guard(attr, None, False),
           <= 0.5 → Guard(attr, None, True). _false columns invert the polarity.
         - Boolean int column: > 0.5 → Guard(attr, None, False),
           <= 0.5 → Guard(attr, None, True).
-        - One-hot categorical: > 0.5 → Guard(base, value, False);
-          the <= 0.5 side returns None.
         - Raw numeric columns: return None.
 
         Args:
@@ -548,6 +553,14 @@ class DecisionMiner:
         Returns:
             Guard, or None if the split produces no meaningful condition.
         """
+        base = self._get_base_feature(feature_name, categorical_cols)
+
+        if base in categorical_cols:
+            if op == ">":
+                value = feature_name[len(base) + 1:]
+                return Guard(attribute=base, value=value, negated=False)
+            return None
+
         lower = feature_name.lower()
 
         if lower.endswith("_true"):
@@ -556,14 +569,6 @@ class DecisionMiner:
         if lower.endswith("_false"):
             base = feature_name[:-6]
             return Guard(attribute=base, value=None, negated=(op == ">"))
-
-        base = self._get_base_feature(feature_name, categorical_cols)
-
-        if base in categorical_cols:
-            if op == ">":
-                value = feature_name[len(base) + 1:]
-                return Guard(attribute=base, value=value, negated=False)
-            return None
 
         if base in bool_cols:
             return Guard(attribute=base, value=None, negated=(op == "<="))

@@ -89,7 +89,7 @@ class ProbabilityEstimator:
             if total > 0:
                 place_probs = {
                     self._get_activity_name_for_transition(t): round(
-                        counts.get(self._get_activity_name_for_transition(t), 0) / total, 2
+                        counts.get(self._get_activity_name_for_transition(t), 0) / total, 4
                     )
                     for t in transitions
                 }
@@ -99,7 +99,7 @@ class ProbabilityEstimator:
                     f"No replay data for XOR-split '{place.name}' "
                     f"(branches: {branch_names}). Assigning equal probabilities."
                 )
-                equal_prob = round(1.0 / len(transitions), 2) if transitions else 0.0
+                equal_prob = round(1.0 / len(transitions), 4) if transitions else 0.0
                 place_probs = {name: equal_prob for name in branch_names}
 
             if place_probs:
@@ -155,14 +155,14 @@ class ProbabilityEstimator:
                     value_counts[attr][val_key] += 1
 
             presence_probs: Dict[str, float] = {
-                attr: round(count / total, 2)
+                attr: round(count / total, 4)
                 for attr, count in effect_counts.items()
             }
             value_probs: Dict[str, Dict[Any, float]] = {}
             for attr, count in effect_counts.items():
                 attr_total = sum(value_counts[attr].values())
                 value_probs[attr] = {
-                    val: round(cnt / attr_total, 2)
+                    val: round(cnt / attr_total, 4)
                     for val, cnt in value_counts[attr].items()
                 }
 
