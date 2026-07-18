@@ -36,8 +36,14 @@ _GROUPS: Dict[str, List[str]] = {
 
 
 def is_built() -> bool:
-    """Return True if Fast Downward has been compiled (builds/release exists)."""
-    return BUILDS_DIR.is_dir()
+    """Return True if Fast Downward has been compiled.
+
+    Checks for the actual search binary, not just the builds/release
+    directory -- an interrupted or partial CMake build can leave that
+    directory in place (CMakeFiles/ etc.) without ever producing bin/downward,
+    which would otherwise be silently mistaken for a completed build.
+    """
+    return (BUILDS_DIR / "bin" / "downward").is_file()
 
 
 def get_search_configs() -> Dict[str, Any]:

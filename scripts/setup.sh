@@ -11,8 +11,10 @@ if [ ! -f "$DOWNWARD_DIR/build.py" ]; then
     git -C "$PROJECT_ROOT" submodule update --init --depth 1 vendor/downward
 fi
 
-# Build if not already built
-if [ ! -d "$DOWNWARD_DIR/builds/release" ]; then
+# Build if not already built (check the actual binary, not just the
+# builds/release directory -- an interrupted build can leave that directory
+# in place without ever producing bin/downward)
+if [ ! -f "$DOWNWARD_DIR/builds/release/bin/downward" ]; then
     echo "[BUILD] Compiling Fast Downward..."
 
     # Check dependencies
