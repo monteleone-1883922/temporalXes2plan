@@ -151,6 +151,7 @@ def _evaluate_rung1(
         reproducibility_score=None,
         n_test_replayed=0,
         coverage=coverage,
+        full_replayability_score=None,
     )
     partial_score = combine(partial_metrics, weights)
 
@@ -176,6 +177,7 @@ def _discarded_record(rung1: _Rung1Result) -> TrialRecord:
         reproducibility_score=None,
         n_test_replayed=0,
         coverage=rung1.coverage,
+        full_replayability_score=None,
     )
 
     logger.debug(
@@ -207,19 +209,35 @@ def _evaluate_rung2(
     best_score_so_far even if every remaining trace replayed successfully —
     an exact bound, not a statistical estimate, so it never discards a trial
     that would have gone on to win.
+
+    Each test trace is replayed with a single call to
+    replay_evaluation_split(trace, n_prefix=0) rather than two separate
+    replay passes. n_prefix=0 makes the cut point the very start of the
+    trace (cut_idx=0 unconditionally), so the walked tail is the entire
+    trace starting from the true initial marking/empty attributes —
+    semantically identical to replay_full_trace's loose check
+    (outcome.reached_end) — while additionally verifying
+    outcome.matches_expected_final_state (the real log-observed final
+    attribute assignment) in the same guarded/backtracking walk. This is
+    the "full replayability" signal: reached_end AND
+    matches_expected_final_state (mirrors evaluation.trace_sampler's
+    identical boolean combination for is_replayable).
     """
     replayer = TraceReplayer(rung1.prepared, rung1.parse_result.petri_net_model, rung1.config)
 
     n_success = 0
+    n_full_success = 0
     n_processed = 0
     stopped_early = False
     for trace in test_traces:
-        outcome = replayer.replay_full_trace(trace)
+        outcome = replayer.replay_evaluation_split(trace, n_prefix=0)
         n_processed += 1
-        if outcome.is_replayable:
+        if outcome.reached_end:
             n_success += 1
+            if outcome.matches_expected_final_state:
+                n_full_success += 1
         bound = max_reachable_score(
-            n_success, n_processed, len(test_traces),
+            n_success, n_full_success, n_processed, len(test_traces),
             rung1.xor_score, rung1.effect_score, rung1.duplication_score, weights,
         )
         if bound <= best_score_so_far:
@@ -231,6 +249,7 @@ def _evaluate_rung2(
     # docs/network_improvement_loop_plan.md §7's note; the value recorded
     # here is indicative/for debugging only, nothing downstream depends on it.
     reproducibility_score = n_success / len(test_traces) if test_traces else 0.0
+    full_replayability_score = n_full_success / len(test_traces) if test_traces else 0.0
 
     metrics = TrialMetrics(
         xor_score=rung1.xor_score,
@@ -239,14 +258,16 @@ def _evaluate_rung2(
         reproducibility_score=reproducibility_score,
         n_test_replayed=n_processed,
         coverage=rung1.coverage,
+        full_replayability_score=full_replayability_score,
     )
     score = combine(metrics, weights)
 
     logger.info(
         "Trial %d: score=%.4f (xor=%.4f, effect=%.4f, duplication=%.4f, reproducibility=%.4f, "
-        "coverage=%.4f, stopped_early=%s, n_test_replayed=%d/%d)",
+        "full_replayability=%.4f, coverage=%.4f, stopped_early=%s, n_test_replayed=%d/%d)",
         rung1.trial.number, score, rung1.xor_score, rung1.effect_score, rung1.duplication_score,
-        reproducibility_score, rung1.coverage, stopped_early, n_processed, len(test_traces),
+        reproducibility_score, full_replayability_score, rung1.coverage, stopped_early,
+        n_processed, len(test_traces),
     )
 
     return TrialRecord(

@@ -1,6 +1,7 @@
 """Unit tests for network_search.scoring — combine() and the exact
 early-stopping bound max_reachable_score() (docs/network_improvement_loop.md
 §5.4.2, docs/network_improvement_loop_plan.md §9 phase 2)."""
+import dataclasses
 import random
 
 import pytest
@@ -8,6 +9,11 @@ import pytest
 from network_search.scoring import ScoreWeights, TrialMetrics, combine, max_reachable_score
 
 WEIGHTS = ScoreWeights(w_det_xor=1.0, w_det_eff=1.0, w_fb_xor=0.5, w_fb_eff=0.5, w_prune_xor=1.0, w_xor=1.0, w_eff=1.0, w_dup=0.2)
+
+# Isolates the pre-existing components (reproducibility_score, xor/effect/dup)
+# from full_replayability_score's own contribution -- used by tests whose
+# purpose predates and is unrelated to the new term.
+WEIGHTS_NO_FULL_REPLAY = dataclasses.replace(WEIGHTS, w_full_replay=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +55,39 @@ class TestCombine:
         high = TrialMetrics(0.0, 0.0, 5.0, 0.5, 10, 1.0)
         assert combine(high, WEIGHTS) > combine(low, WEIGHTS)
 
+    def test_full_replayability_score_included_with_its_own_weight(self):
+        weights = dataclasses.replace(WEIGHTS, w_full_replay=0.3)
+        metrics = TrialMetrics(
+            xor_score=0.0, effect_score=0.0, duplication_score=0.0,
+            reproducibility_score=0.0, n_test_replayed=10, coverage=1.0,
+            full_replayability_score=0.6,
+        )
+        expected = weights.w_full_replay * 0.6
+        assert combine(metrics, weights) == pytest.approx(expected)
+
+    def test_none_full_replayability_treated_as_zero(self):
+        metrics = TrialMetrics(
+            xor_score=0.3, effect_score=0.1, duplication_score=0.0,
+            reproducibility_score=0.0, n_test_replayed=0, coverage=1.0,
+            full_replayability_score=None,
+        )
+        expected = WEIGHTS.w_xor * 0.3 + WEIGHTS.w_eff * 0.1
+        assert combine(metrics, WEIGHTS) == pytest.approx(expected)
+
+    def test_monotone_increasing_in_full_replayability_when_weight_positive(self):
+        weights = dataclasses.replace(WEIGHTS, w_full_replay=0.3)
+        base = TrialMetrics(
+            xor_score=0.0, effect_score=0.0, duplication_score=0.0,
+            reproducibility_score=0.0, n_test_replayed=10, coverage=1.0,
+            full_replayability_score=0.3,
+        )
+        better = TrialMetrics(
+            xor_score=0.0, effect_score=0.0, duplication_score=0.0,
+            reproducibility_score=0.0, n_test_replayed=10, coverage=1.0,
+            full_replayability_score=0.9,
+        )
+        assert combine(better, weights) > combine(base, weights)
+
 
 # ---------------------------------------------------------------------------
 # max_reachable_score
@@ -60,9 +99,14 @@ class TestMaxReachableScore:
         # equal the actual achievable score for that exact outcome.
         n_test_total = 10
         n_success = 7
-        bound = max_reachable_score(n_success, n_test_total, n_test_total, 0.1, 0.05, 0.5, WEIGHTS)
+        n_full_success = 5
+        bound = max_reachable_score(
+            n_success, n_full_success, n_test_total, n_test_total, 0.1, 0.05, 0.5, WEIGHTS,
+        )
         actual = combine(
-            TrialMetrics(0.1, 0.05, 0.5, n_success / n_test_total, n_test_total, 1.0), WEIGHTS,
+            TrialMetrics(0.1, 0.05, 0.5, n_success / n_test_total, n_test_total, 1.0,
+                         full_replayability_score=n_full_success / n_test_total),
+            WEIGHTS,
         )
         assert bound == pytest.approx(actual)
 
@@ -70,8 +114,8 @@ class TestMaxReachableScore:
         n_test_total = 10
         # After 1 failure among 5 processed vs. after 3 failures among 5 processed:
         # more accumulated failures can only lower (or keep equal) the best-case bound.
-        bound_1_failure = max_reachable_score(4, 5, n_test_total, 0.0, 0.0, 0.0, WEIGHTS)
-        bound_3_failures = max_reachable_score(2, 5, n_test_total, 0.0, 0.0, 0.0, WEIGHTS)
+        bound_1_failure = max_reachable_score(4, 4, 5, n_test_total, 0.0, 0.0, 0.0, WEIGHTS)
+        bound_3_failures = max_reachable_score(2, 2, 5, n_test_total, 0.0, 0.0, 0.0, WEIGHTS)
         assert bound_3_failures < bound_1_failure
 
     def test_never_below_the_true_final_score_along_a_real_continuation(self):
@@ -81,26 +125,55 @@ class TestMaxReachableScore:
         rng = random.Random(0)
         n_test_total = 30
         outcomes = [rng.random() < 0.6 for _ in range(n_test_total)]
+        # full_success is a strict subset of outcomes (matches_expected_final_state
+        # can only be true when reached_end is also true) -- see _evaluate_rung2's
+        # nested increment in runner.py.
+        full_outcomes = [replayable and rng.random() < 0.7 for replayable in outcomes]
         xor_score, effect_score, duplication_score = 0.2, 0.1, 1.0
 
         final_success = sum(outcomes)
+        final_full_success = sum(full_outcomes)
         final_score = combine(
             TrialMetrics(xor_score, effect_score, duplication_score,
-                         final_success / n_test_total, n_test_total, 1.0),
+                         final_success / n_test_total, n_test_total, 1.0,
+                         full_replayability_score=final_full_success / n_test_total),
             WEIGHTS,
         )
 
         n_success = 0
-        for i, replayable in enumerate(outcomes):
+        n_full_success = 0
+        for i, (replayable, full_replayable) in enumerate(zip(outcomes, full_outcomes)):
             n_success += int(replayable)
+            n_full_success += int(full_replayable)
             bound = max_reachable_score(
-                n_success, i + 1, n_test_total, xor_score, effect_score, duplication_score, WEIGHTS,
+                n_success, n_full_success, i + 1, n_test_total,
+                xor_score, effect_score, duplication_score, WEIGHTS,
             )
             assert bound >= final_score - 1e-9
 
     def test_bound_tightens_to_exact_reproducibility_score_component(self):
-        # With xor/effect/duplication scores held at 0, the bound is exactly
-        # best_possible_reproducibility (implicit coefficient 1, no weight).
-        bound = max_reachable_score(3, 5, 10, 0.0, 0.0, 0.0, WEIGHTS)
+        # With xor/effect/duplication scores held at 0 and w_full_replay
+        # neutralized, the bound is exactly best_possible_reproducibility
+        # (implicit coefficient 1, no weight).
+        bound = max_reachable_score(3, 3, 5, 10, 0.0, 0.0, 0.0, WEIGHTS_NO_FULL_REPLAY)
         best_possible_repro = (3 + (10 - 5)) / 10  # 3 successes + all 5 remaining succeeding
         assert bound == pytest.approx(best_possible_repro)
+
+    def test_bound_tightens_to_exact_full_replayability_score_component(self):
+        # Mirror of the reproducibility-only test above, isolating
+        # full_replayability_score's own contribution instead: with
+        # xor/eff/dup weights at 0 and w_full_replay=1.0, combine() reduces
+        # to reproducibility_score + full_replayability_score.
+        weights = ScoreWeights(w_xor=0.0, w_eff=0.0, w_dup=0.0, w_full_replay=1.0)
+        n_success_so_far = 4
+        n_full_success_so_far = 2  # strict subset of n_success_so_far
+        n_processed_so_far = 5
+        n_test_total = 10
+        bound = max_reachable_score(
+            n_success_so_far, n_full_success_so_far, n_processed_so_far, n_test_total,
+            0.0, 0.0, 0.0, weights,
+        )
+        n_remaining = n_test_total - n_processed_so_far
+        best_possible_repro = (n_success_so_far + n_remaining) / n_test_total
+        best_possible_full_replay = (n_full_success_so_far + n_remaining) / n_test_total
+        assert bound == pytest.approx(best_possible_repro + best_possible_full_replay)

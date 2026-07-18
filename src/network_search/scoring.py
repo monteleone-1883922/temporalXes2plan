@@ -35,6 +35,15 @@ class ScoreWeights:
     those already-bounded [0, 1] scores inside the *final* score (see
     combine()) and are ordinary unrestricted weights, same role as w_dup
     already had before this axis split.
+
+    w_full_replay scales full_replayability_score the same way w_xor/w_eff
+    scale their own already-[0, 1]-bounded scores in combine(). Unlike
+    reproducibility_score (implicit coefficient 1, unconditional),
+    full_replayability_score's weight is explicit and **must stay >= 0**:
+    max_reachable_score()'s exact-upper-bound guarantee depends on
+    combine() being monotone increasing in full_replayability_score, which
+    only holds for a non-negative weight — same documented-not-validated
+    convention as the [0, 1]-constrained weights above.
     """
 
     w_det_xor: float = 1.0
@@ -45,6 +54,7 @@ class ScoreWeights:
     w_xor: float = 1.0
     w_eff: float = 1.0
     w_dup: float = 0.2
+    w_full_replay: float = 1.0
 
 
 @dataclass
@@ -55,6 +65,12 @@ class TrialMetrics:
     rung 1 (screening only, no replay) — see
     docs/network_improvement_loop_plan.md §7. reproducibility_score is None
     until rung 2 actually runs.
+
+    full_replayability_score is likewise None until rung 2 — a stricter
+    companion to reproducibility_score: it additionally requires the
+    replayed trace's final attribute assignment to exactly match the
+    log-observed final state ("full replayability", see
+    TraceReplayer.replay_evaluation_split's matches_expected_final_state).
     """
 
     xor_score: float
@@ -63,25 +79,31 @@ class TrialMetrics:
     reproducibility_score: Optional[float]
     n_test_replayed: int
     coverage: float
+    full_replayability_score: Optional[float] = None
 
 
 def combine(metrics: TrialMetrics, weights: ScoreWeights) -> float:
-    """Final trial score — a weighted sum of the four components.
+    """Final trial score — a weighted sum of the components.
 
     reproducibility_score has no weight of its own (implicit coefficient
-    1), so combine() is unconditionally monotone increasing in it — see
-    max_reachable_score()'s docstring for why that property is required.
+    1), so combine() is unconditionally monotone increasing in it.
+    full_replayability_score DOES have its own weight (w_full_replay,
+    default 1.0) — combine() is monotone increasing in it as long as
+    w_full_replay >= 0. See max_reachable_score()'s docstring for why both
+    properties are required.
     """
     return (
         (metrics.reproducibility_score or 0.0)
         + weights.w_xor * metrics.xor_score
         + weights.w_eff * metrics.effect_score
         + weights.w_dup * metrics.duplication_score
+        + weights.w_full_replay * (metrics.full_replayability_score or 0.0)
     )
 
 
 def max_reachable_score(
     n_success_so_far: int,
+    n_full_success_so_far: int,
     n_processed_so_far: int,
     n_test_total: int,
     xor_score: float,
@@ -95,22 +117,34 @@ def max_reachable_score(
     xor_score, effect_score and duplication_score are already fixed by
     rung 1 (they do not depend on the replay); the only thing still
     unknown is how many of the remaining test traces will replay
-    successfully. The best case is all of them do, giving the maximum
-    possible reproducibility_score used here. Comparing this bound against
-    the best score found so far tells the caller whether continuing the
-    replay for this trial could still change the outcome.
+    successfully, in each of two senses: reproducibility_score's loose
+    "reached_end" and full_replayability_score's stricter "reached_end AND
+    matches_expected_final_state" (n_full_success_so_far <= n_success_so_far
+    always, since full success requires loose success too). The best case
+    for each is that every remaining trace succeeds, giving the maximum
+    possible value of that score. Comparing this bound against the best
+    score found so far tells the caller whether continuing the replay for
+    this trial could still change the outcome.
 
     This is an exact bound, not a statistical estimate: it can never reject
     a trial that would go on to beat the current best, unlike an
-    extrapolating pruner (e.g. Optuna's MedianPruner). That guarantee only
-    holds because combine() is monotone increasing in
-    reproducibility_score — since that term always has an implicit
-    coefficient of 1 in combine(), this holds unconditionally (no weight to
-    validate) — if combine() ever stops adding it with a fixed positive
-    coefficient, this bound must be revisited.
+    extrapolating pruner (e.g. Optuna's MedianPruner). That guarantee holds
+    because combine() is linear in (reproducibility_score,
+    full_replayability_score) for fixed xor/effect/duplication scores, and
+    each term's own best-case value is *simultaneously* achievable by the
+    same continuation ("every remaining trace both reaches the end and
+    matches the expected final state" maximizes both counters at once,
+    precisely because full success implies loose success) — so summing the
+    two independently-optimistic terms yields a genuine, tight upper bound,
+    not merely two separate overestimates. reproducibility_score's term is
+    unconditionally monotone (implicit coefficient 1 in combine()).
+    full_replayability_score's term is monotone only when weights.w_full_replay
+    >= 0 — if combine() ever stops adding either term with a fixed
+    non-negative coefficient, this bound must be revisited.
     """
     n_remaining = n_test_total - n_processed_so_far
     best_possible_reproducibility = (n_success_so_far + n_remaining) / n_test_total
+    best_possible_full_replayability = (n_full_success_so_far + n_remaining) / n_test_total
     return combine(
         TrialMetrics(
             xor_score=xor_score,
@@ -119,6 +153,7 @@ def max_reachable_score(
             reproducibility_score=best_possible_reproducibility,
             n_test_replayed=n_processed_so_far,
             coverage=0.0,
+            full_replayability_score=best_possible_full_replayability,
         ),
         weights,
     )

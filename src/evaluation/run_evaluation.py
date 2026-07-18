@@ -96,6 +96,7 @@ class EvalConfig:
     w_xor: float = 1.0
     w_eff: float = 1.0
     w_dup: float = 0.2
+    w_full_replay: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +249,7 @@ def evaluate_log(
                         w_det_xor=cfg.w_det_xor, w_det_eff=cfg.w_det_eff,
                         w_fb_xor=cfg.w_fb_xor, w_fb_eff=cfg.w_fb_eff,
                         w_prune_xor=cfg.w_prune_xor, w_xor=cfg.w_xor, w_eff=cfg.w_eff,
-                        w_dup=cfg.w_dup,
+                        w_dup=cfg.w_dup, w_full_replay=cfg.w_full_replay,
                     ) if cfg.use_optimizer else None
 
                     build_result = api.build_network(
@@ -750,6 +751,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ScoreWeights.w_eff — weight of the effect-axis score in the final score.")
     p.add_argument("--w-dup", dest="w_dup", type=float, default=0.2,
                    help="ScoreWeights.w_dup for the optimizer.")
+    p.add_argument("--w-full-replay", dest="w_full_replay", type=float, default=1.0,
+                   help="ScoreWeights.w_full_replay — weight of the full-replayability "
+                        "score (fraction of test traces that replay to completion AND "
+                        "match the log-observed final attribute assignment) in the final "
+                        "score. Must be >= 0.")
     p.add_argument("--csv-mapping", dest="csv_mapping", type=str, default=None,
                    help="JSON string mapping CSV columns, e.g. '{\"case_id\": \"col_a\"}'.")
     p.add_argument("--log-level", dest="log_level", type=str, default="INFO",
@@ -808,6 +814,7 @@ def main(args: argparse.Namespace) -> None:
         w_xor=args.w_xor,
         w_eff=args.w_eff,
         w_dup=args.w_dup,
+        w_full_replay=args.w_full_replay,
     )
 
     selection = get_log_selection(Path(args.metadata), log_ids=[str(cfg.log_id)])

@@ -139,7 +139,7 @@ def _serialized_with_unreachable_effect(attr: str, value: str) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 class TestComputeCostScaleFactor:
-    def test_ratio_of_mean_duration_to_mean_cost(self):
+    def test_mean_duration_over_durative_actions(self):
         domain = PDDLDomain(
             name="d",
             actions=[
@@ -149,10 +149,10 @@ class TestComputeCostScaleFactor:
                                     base_cost=1.0, additional_cost=1.0),
             ],
         )
-        # mean(duration) = (100+300)/2 = 200, mean(cost) = (1.0 + 2.0)/2 = 1.5
-        assert compute_cost_scale_factor(domain) == pytest.approx(200 / 1.5)
+        # mean(duration) = (100+300)/2 = 200
+        assert compute_cost_scale_factor(domain) == pytest.approx(200)
 
-    def test_tau_actions_contribute_cost_but_no_duration(self):
+    def test_tau_actions_do_not_contribute_duration(self):
         domain = PDDLDomain(
             name="d",
             actions=[
@@ -161,9 +161,9 @@ class TestComputeCostScaleFactor:
                 PDDLAction(name="tau_1", base_cost=1.0, additional_cost=0.0),
             ],
         )
-        # mean(duration) is over durative actions only (100.0); mean(cost)
-        # is over ALL actions, including the instantaneous tau ((1+1)/2=1).
-        assert compute_cost_scale_factor(domain) == pytest.approx(100.0 / 1.0)
+        # mean(duration) is over durative actions only -- tau_1 is a
+        # classical PDDLAction (instantaneous), not counted.
+        assert compute_cost_scale_factor(domain) == pytest.approx(100.0)
 
     def test_default_when_no_durative_actions(self):
         domain = PDDLDomain(
@@ -181,9 +181,6 @@ class TestComputeCostScaleFactor:
         assert compute_cost_scale_factor(domain, default=0.42) == 0.42
 
     def test_default_when_mean_duration_is_zero(self):
-        # base_cost=0.0 is falsy -- (base_cost or 1.0) still yields 1.0, same
-        # convention as PDDLBaseAction._total_cost() -- so the only realistic
-        # way to hit the non-positive guard is an all-zero duration_max.
         domain = PDDLDomain(
             name="d",
             actions=[

@@ -262,6 +262,16 @@ class TestSuccessiveHalvingPromotion:
             )
             assert best_possible <= best_actual + 1e-9
 
+    def test_promoted_trials_have_a_full_replayability_score_bounded_by_reproducibility(self, sh_records):
+        # full_replayability_score requires reached_end AND an exact final-
+        # attribute match, so it can never exceed reproducibility_score
+        # (loose reached_end only) for the same trial -- see
+        # runner._evaluate_rung2's nested n_full_success increment.
+        promoted = [r for r in sh_records if r.promoted_to_rung2]
+        for r in promoted:
+            assert r.metrics.full_replayability_score is not None
+            assert r.metrics.full_replayability_score <= r.metrics.reproducibility_score + 1e-9
+
     def test_every_record_still_has_a_finite_score(self, sh_records):
         for r in sh_records:
             assert r.score is not None
