@@ -122,11 +122,17 @@ def build_q3(
     serialized: Dict[str, Any],
     cost_weight: float = 0.001,
 ) -> Optional[QuerySpec]:
-    """Build Q3: completion within budget with attribute constraints from the final event.
+    """Build Q3: completion with attribute constraints from the final event.
 
-    Returns None when:
-    - No timestamp budget is available (same reason as Q2).
-    - The final event contains no discretized attributes in the catalog.
+    No deadline/time budget — Q3 is goal-completion plus attribute
+    constraints only (time-boxed completion is Q2's job; see
+    claude_plans/time_aware_evaluation_plan.md §6). As a direct
+    consequence, Q3 no longer needs timestamp data to be built (it never
+    used it for anything besides the now-removed deadline) — the only
+    remaining reason to skip is missing discretized attributes.
+
+    Returns None when the final event contains no discretized attributes
+    in the catalog.
 
     Args:
         prefix_sample: Output of trace_sampler.sample_prefix().
@@ -134,13 +140,8 @@ def build_q3(
         cost_weight: Scaling factor α for the weighted metric.
 
     Returns:
-        QuerySpec with deadline and attribute goal, or None if skipped.
+        QuerySpec with no deadline and the attribute goal, or None if skipped.
     """
-    budget = _remaining_budget(prefix_sample)
-    if budget is None:
-        logger.debug("Q3 skipped: no timestamp data available for budget computation.")
-        return None
-
     catalog = serialized.get("attribute_catalog", {})
     goal_sop = _goal_from_final_event(prefix_sample.final_event_attributes, catalog)
 
@@ -160,7 +161,7 @@ def build_q3(
         metric="minimize_weighted",
         cost_weight=cost_weight,
         require_completion=True,
-        deadline=budget,
+        deadline=None,
     )
 
 

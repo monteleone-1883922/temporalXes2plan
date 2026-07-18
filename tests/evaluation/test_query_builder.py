@@ -223,9 +223,15 @@ class TestBuildQ2:
 # ---------------------------------------------------------------------------
 
 class TestBuildQ3:
-    def test_q3_returns_none_when_no_timestamps(self):
+    def test_q3_built_even_without_timestamps(self):
+        # Q3 has no deadline (see test_q3_deadline_is_always_none below), so
+        # it no longer needs timestamp data at all -- only the attribute
+        # goal matters, which comes from replayed attribute state, not time.
         ps = _make_prefix_sample(final_attrs={"status": "discharged"})
-        assert build_q3(ps, _SERIALIZED_EMPTY) is None
+        assert ps.prefix_duration_s is None and ps.full_duration_s is None
+        spec = build_q3(ps, _SERIALIZED_EMPTY)
+        assert spec is not None
+        assert spec.deadline is None
 
     def test_q3_returns_none_when_no_attributes(self):
         # final event has no attributes in the catalog
@@ -266,7 +272,9 @@ class TestBuildQ3:
         assert spec is not None
         assert spec.query_type == "Q3"
 
-    def test_q3_deadline_equals_remaining_budget(self):
+    def test_q3_deadline_is_always_none(self):
+        # Q3 has no time budget at all -- deadline stays None regardless of
+        # how much real time was available (unlike Q2, which uses it).
         ps = _make_prefix_sample(
             prefix_duration_s=900.0,
             full_duration_s=3600.0,
@@ -274,7 +282,7 @@ class TestBuildQ3:
         )
         spec = build_q3(ps, _SERIALIZED_EMPTY)
         assert spec is not None
-        assert spec.deadline == pytest.approx(2700.0)
+        assert spec.deadline is None
 
     def test_q3_uses_minimize_weighted_metric(self):
         ps = _make_prefix_sample(
