@@ -37,7 +37,7 @@ of the walk is treated exactly like any other block: it triggers the same
 backtrack to the next untried candidate.
 """
 import dataclasses
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from encoding.prepared_graph_utils import _prepared_xor_branch_of
 from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup
@@ -248,6 +248,37 @@ def _rank_candidates(
     """
     matching = [g for g in effect_groups if sop_holds(g.guard, pddl_state)]
     return sorted(matching, key=lambda g: _score_effect_group(g, observed))
+
+
+def _collapse_no_impact(
+    ranked_candidates: List[PreparedEffectGroup], pddl_state: Dict[str, str],
+) -> List[PreparedEffectGroup]:
+    """Collapse every "no-impact" candidate into a single representative.
+
+    A candidate is no-impact when every one of its assignments already
+    holds in pddl_state — applying it leaves pddl_state byte-for-byte
+    unchanged. Any two no-impact candidates are therefore behaviorally
+    interchangeable (same resulting state, so identical consequences for
+    every later step and for the final target-match check); keeping more
+    than one of them as separate choice-point alternatives can never
+    change the walk's outcome, only multiply backtracking work — the
+    dominant driver of the combinatorial blow-up on traces where an
+    ambiguous transition fires repeatedly inside a process loop.
+
+    Impactful candidates (assign at least one value the state doesn't
+    already have) are never collapsed with each other — only redundant
+    no-impact ones are pruned, keeping the highest-ranked among them.
+    """
+    result: List[PreparedEffectGroup] = []
+    kept_no_impact = False
+    for g in ranked_candidates:
+        no_impact = all(pddl_state.get(attr) == value for attr, value in g.assignments)
+        if no_impact:
+            if kept_no_impact:
+                continue
+            kept_no_impact = True
+        result.append(g)
+    return result
 
 
 class TraceReplayer:
@@ -518,6 +549,14 @@ class TraceReplayer:
         choice_points: List[_EffectChoicePoint] = []
         warnings: List[str] = []
         duration_total: Optional[float] = 0.0 if accumulate_duration else None
+        # Memoized (step_idx, frozen pddl_state) pairs already proven, on an
+        # earlier backtracking attempt, to have no successful continuation
+        # from here — see _backtrack. firing_steps is fixed and
+        # deterministic, so the same (step_idx, state) pair always leads to
+        # the same outcome; skipping recomputation here is what keeps a
+        # repeatedly-firing ambiguous transition (a process loop) from
+        # multiplying backtracking work across every repetition.
+        dead_states: Set[Tuple[int, FrozenSet[Tuple[str, str]]]] = set()
 
         # Two nested loops, on purpose:
         #  - the INNER loop is a plain forward walk over firing_steps, from
@@ -577,19 +616,47 @@ class TraceReplayer:
                 # we just need to move to the NEXT untried one.
                 top = choice_points[-1] if choice_points else None
                 resuming = top is not None and top.step_index == step_idx
+                memo_block_reason: Optional[str] = None
 
                 if resuming:
                     xor_ok = True  # state_before is unchanged from first visit — already checked
                     candidates = top.candidates
                     chosen = candidates[top.tried_count] if candidates else None
                     is_blocked = bool(effect_groups) and not candidates
+                elif (step_idx, frozenset(pddl_state.items())) in dead_states:
+                    # A DIFFERENT earlier backtracking branch already reached
+                    # this exact (position, attribute state) pair and proved
+                    # -- exhaustively, over every candidate -- that no
+                    # continuation from here matches the target. Since
+                    # firing_steps is fixed, this branch would derive the
+                    # identical candidate list and rediscover the identical
+                    # failure; skip straight to a block instead of redoing
+                    # that work (this is what stops an ambiguous transition
+                    # firing N times in a process loop from costing
+                    # work proportional to (branching factor)^N).
+                    xor_ok = False
+                    candidates = []
+                    chosen = None
+                    is_blocked = True
+                    memo_block_reason = (
+                        f"'{step.activity_name}' at this attribute state was already proven "
+                        f"unreachable-to-target by an earlier backtrack attempt (memoized)."
+                    )
                 else:
                     # First time reaching this step (this attempt): evaluate
                     # the XOR guard (axis B) against the current attribute
                     # state, then rank every effect group (axis C) whose own
-                    # guard also holds, best-match first.
+                    # guard also holds, best-match first. Candidates whose
+                    # assignments are all already true in pddl_state (a
+                    # no-op) are collapsed to a single representative --
+                    # they are behaviorally interchangeable, so keeping
+                    # several as separate alternatives only multiplies
+                    # backtracking work without ever changing the outcome.
                     xor_ok = sop_holds(xor_sop, pddl_state)
-                    candidates = _rank_candidates(effect_groups, pddl_state, observed) if xor_ok else []
+                    candidates = (
+                        _collapse_no_impact(_rank_candidates(effect_groups, pddl_state, observed), pddl_state)
+                        if xor_ok else []
+                    )
                     # Blocked when the XOR guard itself fails, OR when this
                     # transition does carry effect groups but none of their
                     # guards are satisfiable right now (an empty
@@ -613,7 +680,7 @@ class TraceReplayer:
                     # step_idx or appending to steps) and let the outer loop
                     # decide whether a backtrack can rescue this attempt.
                     blocked_step = step_idx
-                    blocked_reason = self._block_reason(step.activity_name, xor_ok, effect_groups)
+                    blocked_reason = memo_block_reason or self._block_reason(step.activity_name, xor_ok, effect_groups)
                     break
 
                 # chosen is None exactly when effect_groups was empty (no
@@ -659,7 +726,7 @@ class TraceReplayer:
             # Whether we got here via a structural block or a target
             # mismatch, the recovery mechanism is identical: pop back to the
             # most recent choice point with an untried candidate left.
-            restored_idx = self._backtrack(choice_points, pddl_state)
+            restored_idx = self._backtrack(choice_points, pddl_state, dead_states)
             if restored_idx is None:
                 # No choice point left to try -- this is a final, terminal
                 # outcome. Which one depends on why we got here:
@@ -729,7 +796,9 @@ class TraceReplayer:
 
     @staticmethod
     def _backtrack(
-        choice_points: List[_EffectChoicePoint], pddl_state: Dict[str, str],
+        choice_points: List[_EffectChoicePoint],
+        pddl_state: Dict[str, str],
+        dead_states: Set[Tuple[int, FrozenSet[Tuple[str, str]]]],
     ) -> Optional[int]:
         """Try the next untried alternative at the most recent choice point.
 
@@ -755,7 +824,15 @@ class TraceReplayer:
                 return cp.step_index
             # This choice point's every candidate has now been tried without
             # success -- discard it and look at the next one down the stack
-            # (an earlier choice further back in the walk).
+            # (an earlier choice further back in the walk). Memoize
+            # (step_index, state_before) as dead first: any other
+            # backtracking branch that later lands on this exact same
+            # (position, attribute state) pair -- e.g. a repeated ambiguous
+            # transition inside a process loop -- is guaranteed, by
+            # firing_steps being fixed and deterministic, to rediscover the
+            # identical exhaustive failure; recording it here lets _walk
+            # skip straight past it instead of redoing that work.
+            dead_states.add((cp.step_index, frozenset(cp.state_before.items())))
             choice_points.pop()
         # Stack exhausted: no earlier decision, anywhere in the walk, could
         # possibly change the outcome.
