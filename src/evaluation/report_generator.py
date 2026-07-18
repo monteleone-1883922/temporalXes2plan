@@ -208,7 +208,6 @@ def _build_summary(
     q2_search_time: List[float] = []
     q2_alignment: List[float] = []
     q3_solved: List[float] = []
-    q3_correct: List[float] = []
     q3_within: List[float] = []
     q3_plan_time: List[float] = []
     q3_real_duration: List[float] = []
@@ -240,7 +239,6 @@ def _build_summary(
         q1_wr = _ratio_metric(log_q1, "within_budget")
         q2_sr = _ratio(log_q2, "solved")
         q2_wr = _ratio_metric(log_q2, "within_budget")
-        q3_cr = _ratio_metric(log_q3, "correct")
 
         log_timeout_ratio = _solvability_ratio(lr.queries, "timeout")
         log_oom_ratio = _solvability_ratio(lr.queries, "out_of_memory")
@@ -258,7 +256,6 @@ def _build_summary(
             "q1_solved_ratio": q1_sr,
             "q2_solved_ratio": q2_sr,
             "q2_within_budget_ratio": q2_wr,
-            "q3_correct_ratio": q3_cr,
             "pct_timeout": log_timeout_ratio,
             "pct_out_of_memory": log_oom_ratio,
             "n_traces_replayable": replay_stats["n_traces_replayable"],
@@ -321,8 +318,6 @@ def _build_summary(
         q3_sr = _ratio(log_q3, "solved")
         if q3_sr is not None:
             q3_solved.append(q3_sr)
-        if q3_cr is not None:
-            q3_correct.append(q3_cr)
         q3_wr = _ratio_metric(log_q3, "within_budget")
         if q3_wr is not None:
             q3_within.append(q3_wr)
@@ -379,7 +374,6 @@ def _build_summary(
         },
         "q3": {
             "solved_ratio_mean": _mean(q3_solved),
-            "correct_ratio_mean": _mean(q3_correct),
             "within_budget_ratio_mean": _mean(q3_within),
             "plan_time_mean": _mean(q3_plan_time),
             "plan_time_std": _std(q3_plan_time),
