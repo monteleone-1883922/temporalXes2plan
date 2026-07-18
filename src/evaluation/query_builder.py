@@ -14,6 +14,7 @@ Q3 is also skipped when the final event contains no discretized attributes.
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -254,15 +255,22 @@ def is_q3_reachable(
 ) -> bool:
     """Check whether the goal is reachable from the current token marking.
 
-    Performs a real graph visit of serialized["graph"] (nodes/edges), starting
-    from init_places (the marking after replaying the trace prefix so far):
-    a transition fires once every one of its input places has been reached,
-    at which point its output places are added to the reachable set and every
-    (attribute, value) pair from its effect_groups' assignments is recorded as
-    a reachable effect. This repeats to a fixpoint (monotone — a reached place
-    or attribute value stays reached). Attribute values already fixed by the
-    replayed prefix (init_effects) are seeded into the same set up front —
-    they are already true in the PDDL initial state (see
+    Performs a real BFS graph visit of serialized["graph"] (nodes/edges),
+    starting from init_places (the marking after replaying the trace prefix
+    so far): a newly-reached place is pushed onto a frontier queue, and each
+    place popped from the frontier tries to fire every transition that has it
+    as one of its inputs (only once ALL of that transition's inputs are
+    reachable). A transition firing marks its output places reached — pushing
+    any NEW ones onto the frontier so they, in turn, retry every transition
+    they feed — and records every (attribute, value) pair from its
+    effect_groups' assignments as a reachable effect. Each transition is
+    tried exactly as many times as one of its own inputs newly becomes
+    reachable (bounded by its in-degree) and fires at most once, giving
+    O(places + edges) total work — unlike a plain "rescan every transition
+    until nothing changes" fixpoint, which needs a full extra pass over every
+    transition per newly-reached place in the worst case. Attribute values
+    already fixed by the replayed prefix (init_effects) are seeded into the
+    same set up front — they are already true in the PDDL initial state (see
     run_evaluation.py's build_problem(init_effects=...) call), so a clause
     condition they satisfy must not be treated as unreachable just because
     the transition that set them no longer fires forward from init_places
@@ -316,29 +324,54 @@ def is_q3_reachable(
 
     transition_ids = [n["id"] for n in nodes if n["type"] in TRANS_NODE_TYPES]
 
+    # Reverse index: place -> transitions that read it as an input, so a
+    # newly-reached place can directly retry only the transitions it feeds,
+    # instead of rescanning every transition in the net.
+    transitions_by_input_place: Dict[str, List[str]] = {}
+    for tid, inputs in in_places.items():
+        for p in inputs:
+            transitions_by_input_place.setdefault(p, []).append(tid)
+
     reachable_places: set[str] = set(init_places)
     fired: set[str] = set()
     matched_pairs: set[tuple[str, str]] = {
         (e["attribute"], e["value"]) for e in (init_effects or [])
     }
 
-    changed = True
-    while changed:
-        changed = False
-        for tid in transition_ids:
-            if tid in fired:
-                continue
-            inputs = in_places.get(tid, [])
-            if inputs and not all(p in reachable_places for p in inputs):
-                continue
-            fired.add(tid)
-            changed = True
-            reachable_places.update(out_places.get(tid, []))
-            t_info = transitions.get(node_by_id[tid].get("label"))
-            if t_info:
-                for group in t_info.get("effect_groups", []):
-                    for assignment in group.get("assignments", []):
-                        matched_pairs.add((assignment["attribute"], assignment["value"]))
+    frontier: deque[str] = deque(init_places)
+
+    def _try_fire(tid: str) -> None:
+        """Fire tid if not already fired and every input place is reachable
+        now; push any newly-reached output place onto frontier so it
+        propagates to whatever it feeds, in turn."""
+        if tid in fired:
+            return
+        inputs = in_places.get(tid, [])
+        if inputs and not all(p in reachable_places for p in inputs):
+            return
+        fired.add(tid)
+        for out_p in out_places.get(tid, []):
+            if out_p not in reachable_places:
+                reachable_places.add(out_p)
+                frontier.append(out_p)
+        t_info = transitions.get(node_by_id[tid].get("label"))
+        if t_info:
+            for group in t_info.get("effect_groups", []):
+                for assignment in group.get("assignments", []):
+                    matched_pairs.add((assignment["attribute"], assignment["value"]))
+
+    # Transitions with no input places at all (net sources) fire
+    # unconditionally -- try them once up front so their outputs enter the
+    # BFS too; everything else only fires once one of its own inputs shows
+    # up in the frontier below.
+    for tid in transition_ids:
+        if not in_places.get(tid):
+            _try_fire(tid)
+
+    while frontier:
+        place = frontier.popleft()
+        for tid in transitions_by_input_place.get(place, []):
+            _try_fire(tid)
 
     end_place = serialized.get("metadata", {}).get("end_place")
     end_reachable = end_place is None or end_place in reachable_places
