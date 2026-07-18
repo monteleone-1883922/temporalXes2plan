@@ -40,7 +40,7 @@ import dataclasses
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from encoding.prepared_graph_utils import _prepared_xor_branch_of
-from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup
+from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup, PreparedTransition
 from encoding.transition_action_builder import _combine_xor_branches
 from models import AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard, PetriNetModel, sop_holds
 
@@ -117,6 +117,19 @@ class EvaluationReplayOutcome:
     alternative (reached_end True, matches_expected_final_state False) has no
     single failing step, so error_step stays None while error_reason still
     describes the mismatch.
+
+    max_modeled_duration_seconds is a separate, independent quantity from
+    accumulated_duration_seconds/within_deadline above: it sums each fired
+    (non-tau) transition's *domain-declared* effective_max duration bound
+    (PreparedTransition.duration.effective_max) over the tail
+    (cut -> end), not the real observed inter-event gaps. It depends only
+    on WHICH transitions fired — fixed by Phase 1, independent of which
+    effect group Phase 2 ends up choosing for any of them — so it is
+    always computed directly from firing_steps, with no dependency on
+    _walk's backtracking outcome (see trace_sampler.PrefixSample's
+    reached_within_time, which compares this sum against the trace's real
+    remaining duration as a sufficient condition for "reachable within the
+    time the log actually took").
     """
     reached_end: bool
     matches_expected_final_state: bool
@@ -130,6 +143,7 @@ class EvaluationReplayOutcome:
     expected_final_attributes: Dict[str, str]
     accumulated_duration_seconds: Optional[float]
     within_deadline: Optional[bool]
+    max_modeled_duration_seconds: float
     warnings: List[str]
 
 
@@ -281,6 +295,35 @@ def _collapse_no_impact(
     return result
 
 
+def _sum_modeled_max_duration(
+    firing_steps: List[FiringStep],
+    transitions: Dict[str, PreparedTransition],
+) -> float:
+    """Sum of effective_max (domain-declared upper duration bound) over
+    every non-tau firing in firing_steps.
+
+    Tau firings contribute 0 -- no PDDL duration is ever modeled for them
+    (domain_builder's tau actions are plain, non-durative PDDLAction).
+    Transitions with no mined duration data (transition.duration is None)
+    also contribute 0 -- absence of information is treated as
+    non-constraining, same convention used elsewhere (e.g.
+    query_builder.is_q3_reachable).
+
+    Depends only on WHICH transitions fired (fixed by Phase 1) — not on
+    which effect group Phase 2 picks for any of them, since duration is a
+    property of the transition itself. Safe to call directly on a resolved
+    firing_steps list, with no dependency on _walk/backtracking.
+    """
+    total = 0.0
+    for step in firing_steps:
+        if step.is_tau:
+            continue
+        transition = transitions.get(step.activity_name)
+        if transition is not None and transition.duration is not None:
+            total += transition.duration.effective_max
+    return total
+
+
 class TraceReplayer:
     """Replays a trace (full, evaluation-split, or partial) against a
     PreparedDomainInput.
@@ -403,6 +446,13 @@ class TraceReplayer:
         split_attributes = raw_attributes_at[cut_idx]
         expected_final_attributes = raw_attributes_at[-1]
 
+        # Independent of _walk/backtracking (see _sum_modeled_max_duration's
+        # docstring) -- computed directly from the resolved tail, regardless
+        # of whether the walk below ends up reaching the end or blocking.
+        max_modeled_duration_seconds = _sum_modeled_max_duration(
+            firing_steps[cut_idx:], self.prepared.transitions,
+        )
+
         # Only the TAIL is walked -- everything before cut_idx is taken as
         # given (the split snapshot), never re-verified here. This is what
         # makes replay_evaluation_split answer "does the domain correctly
@@ -442,6 +492,7 @@ class TraceReplayer:
             expected_final_attributes=expected_final_attributes,
             accumulated_duration_seconds=result.accumulated_duration_seconds,
             within_deadline=within_deadline,
+            max_modeled_duration_seconds=max_modeled_duration_seconds,
             warnings=warnings,
         )
 

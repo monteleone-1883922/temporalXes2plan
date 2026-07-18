@@ -55,6 +55,7 @@ def _make_outcome(
     reached_end=True,
     matches_expected_final_state=True,
     warnings=None,
+    max_modeled_duration_seconds=0.0,
 ) -> EvaluationReplayOutcome:
     return EvaluationReplayOutcome(
         reached_end=reached_end,
@@ -69,6 +70,7 @@ def _make_outcome(
         expected_final_attributes=expected_final_attributes or {},
         accumulated_duration_seconds=None,
         within_deadline=None,
+        max_modeled_duration_seconds=max_modeled_duration_seconds,
         warnings=warnings or [],
     )
 
@@ -205,6 +207,79 @@ class TestIsReplayable:
         result = sample_prefix(trace, replayer, seed=0)
         assert result is not None
         assert result.warnings == ["some warning"]
+
+
+# ---------------------------------------------------------------------------
+# sample_prefix — reached_within_time: reached_end AND
+# max_modeled_duration_s fits within the trace's real remaining duration
+# (full_duration_s - prefix_duration_s).
+# ---------------------------------------------------------------------------
+
+class TestReachedWithinTime:
+    def _actual_budget(self, trace, seed) -> float:
+        """Discover the real budget sample_prefix computes for this
+        trace/seed (same trick as TestPrefixRatioBounds -- derive the
+        expectation from a real call instead of hand-deriving the seeded
+        RNG's prefix count)."""
+        replayer = _make_replayer(_make_outcome(max_modeled_duration_seconds=0.0))
+        result = sample_prefix(trace, replayer, seed=seed)
+        assert result is not None
+        assert result.full_duration_s is not None and result.prefix_duration_s is not None
+        return result.full_duration_s - result.prefix_duration_s
+
+    def test_true_when_duration_well_within_budget(self):
+        trace = _make_trace(10, with_timestamps=True)
+        replayer = _make_replayer(_make_outcome(
+            reached_end=True, max_modeled_duration_seconds=0.0,
+        ))
+        result = sample_prefix(trace, replayer, seed=0)
+        assert result is not None
+        assert result.reached_within_time is True
+
+    def test_true_at_exact_boundary(self):
+        trace = _make_trace(10, with_timestamps=True)
+        budget = self._actual_budget(trace, seed=0)
+        replayer = _make_replayer(_make_outcome(
+            reached_end=True, max_modeled_duration_seconds=budget,
+        ))
+        result = sample_prefix(trace, replayer, seed=0)
+        assert result is not None
+        assert result.reached_within_time is True
+
+    def test_false_when_duration_exceeds_budget(self):
+        trace = _make_trace(10, with_timestamps=True)
+        budget = self._actual_budget(trace, seed=0)
+        replayer = _make_replayer(_make_outcome(
+            reached_end=True, max_modeled_duration_seconds=budget + 1.0,
+        ))
+        result = sample_prefix(trace, replayer, seed=0)
+        assert result is not None
+        assert result.reached_within_time is False
+
+    def test_false_when_not_reached_end_even_if_duration_fits(self):
+        trace = _make_trace(10, with_timestamps=True)
+        replayer = _make_replayer(_make_outcome(
+            reached_end=False, max_modeled_duration_seconds=0.0,
+        ))
+        result = sample_prefix(trace, replayer, seed=0)
+        assert result is not None
+        assert result.reached_within_time is False
+
+    def test_false_when_no_timestamps(self):
+        trace = _make_trace(10, with_timestamps=False)
+        replayer = _make_replayer(_make_outcome(
+            reached_end=True, max_modeled_duration_seconds=0.0,
+        ))
+        result = sample_prefix(trace, replayer, seed=0)
+        assert result is not None
+        assert result.reached_within_time is False
+
+    def test_max_modeled_duration_s_passthrough_from_outcome(self):
+        trace = _make_trace(10, with_timestamps=True)
+        replayer = _make_replayer(_make_outcome(max_modeled_duration_seconds=42.5))
+        result = sample_prefix(trace, replayer, seed=0)
+        assert result is not None
+        assert result.max_modeled_duration_s == 42.5
 
 
 # ---------------------------------------------------------------------------

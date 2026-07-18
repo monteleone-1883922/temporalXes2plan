@@ -46,6 +46,18 @@ class PrefixSample:
         is_replayable: True when the tail (cut -> end) both completes without
             blocking and matches the real final attribute state exactly — see
             EvaluationReplayOutcome.reached_end/matches_expected_final_state.
+        max_modeled_duration_s: Sum of effective_max (domain-declared upper
+            duration bound) over every non-tau transition actually fired in
+            the tail — see
+            replay.trace_replayer.EvaluationReplayOutcome.max_modeled_duration_seconds.
+        reached_within_time: True when the tail reaches the end (reached_end)
+            AND max_modeled_duration_s fits within the trace's real
+            remaining duration (_remaining_budget) — a *sufficient* (not
+            merely necessary) condition: even using the domain's
+            worst-case duration bound for every fired transition, the
+            total still fits under the time the log actually took. False
+            (not None) when timestamps are unavailable, since Q2 is never
+            built in that case anyway (see query_builder.build_q2).
     """
 
     prefix_events: List[Any]
@@ -58,6 +70,8 @@ class PrefixSample:
     full_duration_s: Optional[float]
     warnings: List[str] = field(default_factory=list)
     is_replayable: bool = True
+    max_modeled_duration_s: float = 0.0
+    reached_within_time: bool = True
 
 
 def sample_prefix(
@@ -115,6 +129,13 @@ def sample_prefix(
         for attr, value in outcome.split_attributes.items()
     ]
 
+    budget_s = _budget_from_durations(full_duration_s, prefix_duration_s)
+    reached_within_time = (
+        outcome.reached_end
+        and budget_s is not None
+        and outcome.max_modeled_duration_seconds <= budget_s
+    )
+
     return PrefixSample(
         prefix_events=prefix_events,
         suffix_events=suffix_events,
@@ -126,11 +147,45 @@ def sample_prefix(
         full_duration_s=full_duration_s,
         warnings=outcome.warnings,
         is_replayable=outcome.reached_end and outcome.matches_expected_final_state,
+        max_modeled_duration_s=outcome.max_modeled_duration_seconds,
+        reached_within_time=reached_within_time,
     )
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
+
+
+def _budget_from_durations(
+    full_duration_s: Optional[float], prefix_duration_s: Optional[float],
+) -> Optional[float]:
+    """full_duration_s - prefix_duration_s, or None if either is None.
+
+    Single source of truth for this arithmetic — _remaining_budget below
+    (the PrefixSample-based public helper, used by query_builder.py and
+    metrics_collector.py) and sample_prefix's own reached_within_time
+    computation both call this, so the two can never drift apart.
+    """
+    if full_duration_s is None or prefix_duration_s is None:
+        return None
+    return full_duration_s - prefix_duration_s
+
+
+def _remaining_budget(prefix_sample: PrefixSample) -> Optional[float]:
+    """Compute the remaining time budget for the suffix.
+
+    Lives here (not in query_builder.py, which imports it from here) so
+    that sample_prefix can also use the same formula (via
+    _budget_from_durations) without a circular import: query_builder.py
+    already imports PrefixSample from this module.
+
+    Args:
+        prefix_sample: A PrefixSample with optional duration fields.
+
+    Returns:
+        full_duration_s - prefix_duration_s in seconds, or None if either is None.
+    """
+    return _budget_from_durations(prefix_sample.full_duration_s, prefix_sample.prefix_duration_s)
 
 
 def _duration_seconds(events: List[Any]) -> Optional[float]:

@@ -352,12 +352,17 @@ def evaluate_log(
                     _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
                 )
 
-                # Q2 — completion within remaining time budget. Same reasoning
-                # as Q1: ground truth is reached_end only.
+                # Q2 — completion within remaining time budget. Ground truth
+                # is reached_within_time: reached_end AND the sum of the
+                # domain's declared max duration bound over the actually
+                # fired transitions still fits within the trace's real
+                # remaining time — see
+                # trace_sampler.PrefixSample.reached_within_time /
+                # replay.trace_replayer.EvaluationReplayOutcome.max_modeled_duration_seconds.
                 q2_spec = build_q2(prefix, cfg.cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_within_time, duration_scale_factor=domain.duration_scale_factor)
                     )
 
                 # Q3 — completion within budget + attribute constraints

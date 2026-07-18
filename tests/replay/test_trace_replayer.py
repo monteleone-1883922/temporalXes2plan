@@ -9,8 +9,8 @@ tests/parsing/test_petri_net_log_builder.py.
 from tests.helpers import make_event, make_trace
 
 from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup, PreparedTransition
-from models import AnalysisConfig, AttributeCatalogEntry, Guard
-from replay.trace_replayer import TraceReplayer
+from models import ActionDurationStats, AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard
+from replay.trace_replayer import TraceReplayer, _sum_modeled_max_duration
 
 _FLAG_RISK_CATALOG = {
     "flag": AttributeCatalogEntry(attribute_type="categorical", possible_values={"x", "y"}, bin_boundaries=None),
@@ -446,3 +446,105 @@ class TestReplayEvaluationSplit:
 
         assert outcome.split_marking == outcome.final_marking
         assert any("exceeds" in w for w in outcome.warnings)
+
+
+def _duration(effective_min: float, effective_max: float) -> ActionDurationStats:
+    return ActionDurationStats(effective_min=effective_min, effective_max=effective_max, source="external")
+
+
+def _step(activity_name: str, is_tau: bool = False) -> FiringStep:
+    return FiringStep(
+        transition=None, activity_name=activity_name, is_tau=is_tau,
+        from_places=set(), attributes={},
+    )
+
+
+class TestSumModeledMaxDuration:
+    """Unit tests for the module-level helper _sum_modeled_max_duration --
+    called directly on synthetic FiringStep/PreparedTransition objects, no
+    real Petri net or Phase 1 alignment needed."""
+
+    def test_sums_effective_max_across_fired_transitions(self):
+        transitions = {
+            "A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=_duration(1.0, 10.0)),
+            "B": PreparedTransition(activity_name="B", input_places=[], preconditions=[], effect_groups=[], duration=_duration(2.0, 20.0)),
+        }
+        firing_steps = [_step("A"), _step("B")]
+        assert _sum_modeled_max_duration(firing_steps, transitions) == 30.0
+
+    def test_tau_firings_excluded(self):
+        transitions = {"A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=_duration(1.0, 10.0))}
+        firing_steps = [_step("tau_1", is_tau=True), _step("A")]
+        assert _sum_modeled_max_duration(firing_steps, transitions) == 10.0
+
+    def test_transition_without_duration_contributes_zero(self):
+        transitions = {"A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=None)}
+        firing_steps = [_step("A")]
+        assert _sum_modeled_max_duration(firing_steps, transitions) == 0.0
+
+    def test_transition_absent_from_map_contributes_zero(self):
+        firing_steps = [_step("unknown")]
+        assert _sum_modeled_max_duration(firing_steps, {}) == 0.0
+
+    def test_repeated_firing_counted_each_time(self):
+        transitions = {"A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=_duration(1.0, 5.0))}
+        firing_steps = [_step("A"), _step("A"), _step("A")]
+        assert _sum_modeled_max_duration(firing_steps, transitions) == 15.0
+
+    def test_empty_firing_steps_is_zero(self):
+        assert _sum_modeled_max_duration([], {}) == 0.0
+
+
+class TestMaxModeledDurationInEvaluationSplit:
+    """Integration-level: max_modeled_duration_seconds as wired through
+    replay_evaluation_split, on a real (tau_seq_net) Phase 1 resolution."""
+
+    def test_matches_sum_of_effective_max_for_tail_transitions(self, tau_seq_net):
+        trans_a = PreparedTransition(
+            activity_name="A", input_places=["p_in"], preconditions=[], effect_groups=[],
+            duration=_duration(1.0, 10.0),
+        )
+        trans_b = PreparedTransition(
+            activity_name="B", input_places=["p_mid2"], preconditions=[], effect_groups=[],
+            duration=_duration(2.0, 20.0),
+        )
+        replayer = _replayer(tau_seq_net, {"A": trans_a, "B": trans_b})
+        trace = make_trace(make_event("A"), make_event("B"))
+
+        outcome = replayer.replay_evaluation_split(trace, n_prefix=0)
+
+        # A (10.0) + tau_1 (silent, no PreparedTransition, contributes 0) + B (20.0)
+        assert outcome.max_modeled_duration_seconds == 30.0
+
+    def test_independent_of_which_effect_group_backtracking_chooses(self, tau_seq_net):
+        # Two ambiguous, unguarded candidates for A -- whichever one Phase 2
+        # ends up picking, the duration sum must be identical: duration is
+        # a property of the transition (fixed by Phase 1), not of which
+        # effect group is chosen.
+        group_x = PreparedEffectGroup(assignments=[("flag", "x")], guard=[], probability=0.5)
+        group_y = PreparedEffectGroup(assignments=[("flag", "y")], guard=[], probability=0.5)
+        trans_a = PreparedTransition(
+            activity_name="A", input_places=["p_in"], preconditions=[],
+            effect_groups=[group_x, group_y], duration=_duration(1.0, 10.0),
+        )
+        trans_b = PreparedTransition(
+            activity_name="B", input_places=["p_mid2"], preconditions=[], effect_groups=[],
+            duration=_duration(2.0, 20.0),
+        )
+        replayer = _replayer(tau_seq_net, {"A": trans_a, "B": trans_b})
+        trace = make_trace(make_event("A"), make_event("B"))
+
+        outcome = replayer.replay_evaluation_split(trace, n_prefix=0)
+
+        assert outcome.reached_end
+        assert outcome.max_modeled_duration_seconds == 30.0
+
+    def test_zero_when_no_transition_has_duration_data(self, tau_seq_net):
+        trans_a = PreparedTransition(activity_name="A", input_places=["p_in"], preconditions=[], effect_groups=[])
+        trans_b = PreparedTransition(activity_name="B", input_places=["p_mid2"], preconditions=[], effect_groups=[])
+        replayer = _replayer(tau_seq_net, {"A": trans_a, "B": trans_b})
+        trace = make_trace(make_event("A"), make_event("B"))
+
+        outcome = replayer.replay_evaluation_split(trace, n_prefix=0)
+
+        assert outcome.max_modeled_duration_seconds == 0.0

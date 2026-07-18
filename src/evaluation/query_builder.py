@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from encoding.prepared_input import PLACE_NODE_TYPES, TRANS_NODE_TYPES
-from evaluation.trace_sampler import PrefixSample
+from evaluation.trace_sampler import PrefixSample, _remaining_budget
 
 logger = logging.getLogger(__name__)
 
@@ -167,18 +167,13 @@ def build_q3(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _remaining_budget(prefix_sample: PrefixSample) -> Optional[float]:
-    """Compute the remaining time budget for the suffix.
-
-    Args:
-        prefix_sample: A PrefixSample with optional duration fields.
-
-    Returns:
-        full_duration_s - prefix_duration_s in seconds, or None if either is None.
-    """
-    if prefix_sample.full_duration_s is None or prefix_sample.prefix_duration_s is None:
-        return None
-    return prefix_sample.full_duration_s - prefix_sample.prefix_duration_s
+# _remaining_budget lives in trace_sampler.py (imported above) — it is also
+# needed there, inside sample_prefix, to compute PrefixSample.reached_within_time
+# from the same raw duration fields before the PrefixSample itself exists, and
+# trace_sampler.py cannot import from this module (query_builder.py already
+# imports PrefixSample from trace_sampler.py, so the reverse import would be
+# circular). Re-imported here (not redefined) so every existing caller of
+# evaluation.query_builder._remaining_budget keeps working unchanged.
 
 
 def _goal_from_final_event(
