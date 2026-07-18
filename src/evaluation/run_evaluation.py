@@ -343,17 +343,21 @@ def evaluate_log(
 
                 pddl_dir = log_out_dir / "pddl"
 
-                # Q1 — process completion, no deadline
+                # Q1 — process completion, no deadline. Goal has no attribute
+                # conditions, so ground truth is reached_end only (not the
+                # stricter is_replayable, which also requires the final
+                # attribute assignment to match — irrelevant to Q1's goal).
                 q1_spec = build_q1(prefix, cfg.cost_weight)
                 query_results.append(
-                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
+                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_end, duration_scale_factor=domain.duration_scale_factor)
                 )
 
-                # Q2 — completion within remaining time budget
+                # Q2 — completion within remaining time budget. Same reasoning
+                # as Q1: ground truth is reached_end only.
                 q2_spec = build_q2(prefix, cfg.cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_end, duration_scale_factor=domain.duration_scale_factor)
                     )
 
                 # Q3 — completion within budget + attribute constraints
@@ -420,6 +424,30 @@ def _run_query(
 ) -> QueryResult:
     query_id = f"{log_id}_{trace_id}_{spec.query_type}"
 
+    if spec.query_type == "Q3" and not is_q3_reachable(
+        spec.goal_sop, serialized, spec.init_places, spec.init_effects
+    ):
+        logger.warning(
+            "[%s] %s Q3 skipped — goal structurally unreachable from the current "
+            "marking (no reachable effect sets the required attribute value(s), "
+            "or the end place is unreachable). Recorded as "
+            "solvability='skipped_unreachable'.",
+            log_id, trace_id,
+        )
+        return QueryResult(
+            query_id=query_id,
+            query_type="Q3",
+            trace_id=trace_id,
+            prefix_ratio=prefix.prefix_ratio,
+            n_prefix_events=len(prefix.prefix_events),
+            attempts=0,
+            solvability="skipped_unreachable",
+            planner_duration_s=None,
+            metrics={},
+            validation=None,
+            is_replayable=is_replayable,
+        )
+
     # spec.deadline is always real-world seconds (QuerySpec's own semantics,
     # unchanged) — divide by duration_scale_factor here, at the point it
     # enters the PDDL, so it stays on the same time axis as the domain's
@@ -455,8 +483,9 @@ def _run_query(
     elif spec.query_type == "Q2":
         metrics = q2_metrics(result, prefix, cfg.cost_weight)
     else:
-        ground_truth_reachable = is_q3_reachable(spec.goal_sop, serialized)
-        metrics = q3_metrics(result, prefix, spec.goal_sop, ground_truth_reachable, cfg.cost_weight)
+        # Reachability was already confirmed True above (otherwise this
+        # function would have returned early) — no need to recompute it.
+        metrics = q3_metrics(result, prefix, spec.goal_sop, True, cfg.cost_weight)
 
     validation = None
     if result.success and result.plan_steps:
