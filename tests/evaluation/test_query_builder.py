@@ -11,6 +11,7 @@ from evaluation.query_builder import (
     build_q1,
     build_q2,
     build_q3,
+    compute_min_time_to_end,
     is_q3_reachable,
 )
 
@@ -61,7 +62,7 @@ _SERIALIZED_EMPTY: Dict[str, Any] = {
 }
 
 
-def _transition(input_places, assignments=None):
+def _transition(input_places, assignments=None, duration=None):
     return {
         "input_places": input_places,
         "preconditions": [],
@@ -70,8 +71,12 @@ def _transition(input_places, assignments=None):
             if assignments else []
         ),
         "cost": 0.0,
-        "duration": None,
+        "duration": duration,
     }
+
+
+def _duration(effective_min: float, effective_max: float) -> Dict[str, float]:
+    return {"effective_min": effective_min, "effective_max": effective_max}
 
 
 def _serialized_with_effect(attr: str, value: str) -> Dict[str, Any]:
@@ -523,3 +528,223 @@ class TestIsQ3Reachable:
         assert q1.metric == "minimize_weighted"
         assert q2.metric == "minimize_weighted"
         assert q3.metric == "minimize_weighted"
+
+
+# ---------------------------------------------------------------------------
+# compute_min_time_to_end
+# ---------------------------------------------------------------------------
+
+class TestComputeMinTimeToEnd:
+    def test_end_place_is_zero(self):
+        serialized = _serialized_with_effect("status", "discharged")
+        result = compute_min_time_to_end(serialized, ["p_end"])
+        assert result == 0.0
+
+    def test_single_hop_uses_effective_max(self):
+        # effective_min/max are not planner-chosen -- they are the observed
+        # range of real execution time for that activity, and a plan is
+        # only reliable if it meets the deadline even in the worst
+        # realistic case, so the WORST-CASE (effective_max) bound is used,
+        # not the best case.
+        serialized = {
+            "graph": {
+                "nodes": [
+                    {"id": "p_start", "type": "place", "label": "p_start"},
+                    {"id": "t_a", "type": "transition", "label": "act_a"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                ],
+                "edges": [
+                    {"source": "p_start", "target": "t_a"},
+                    {"source": "t_a", "target": "p_end"},
+                ],
+            },
+            "transitions": {"act_a": _transition(["p_start"], duration=_duration(5.0, 10.0))},
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 10.0  # effective_max, not effective_min
+        assert compute_min_time_to_end(serialized, ["p_end"]) == 0.0
+
+    def test_picks_the_faster_of_two_alternative_paths(self):
+        # p_start -> t1(10s worst-case) -> p_mid -> t2(6s worst-case) -> p_end  (total 16s)
+        # p_start -> t3(200s worst-case) -> p_end                               (total 200s, slower)
+        serialized = {
+            "graph": {
+                "nodes": [
+                    {"id": "p_start", "type": "place", "label": "p_start"},
+                    {"id": "p_mid", "type": "place", "label": "p_mid"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                    {"id": "t1", "type": "transition", "label": "act1"},
+                    {"id": "t2", "type": "transition", "label": "act2"},
+                    {"id": "t3", "type": "transition", "label": "act3"},
+                ],
+                "edges": [
+                    {"source": "p_start", "target": "t1"}, {"source": "t1", "target": "p_mid"},
+                    {"source": "p_mid", "target": "t2"}, {"source": "t2", "target": "p_end"},
+                    {"source": "p_start", "target": "t3"}, {"source": "t3", "target": "p_end"},
+                ],
+            },
+            "transitions": {
+                "act1": _transition(["p_start"], duration=_duration(5.0, 10.0)),
+                "act2": _transition(["p_mid"], duration=_duration(3.0, 6.0)),
+                "act3": _transition(["p_start"], duration=_duration(100.0, 200.0)),
+            },
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 16.0
+        assert compute_min_time_to_end(serialized, ["p_mid"]) == 6.0
+
+    def test_and_join_waits_for_the_slower_input_not_the_faster(self):
+        # t_join needs BOTH p_a (via t1, 10s worst-case) and p_b (via t2,
+        # 30s worst-case) -- it cannot fire until the SLOWER of the two
+        # arrives (max, not min), then adds its own 2s worst-case duration.
+        serialized = {
+            "graph": {
+                "nodes": [
+                    {"id": "p_start", "type": "place", "label": "p_start"},
+                    {"id": "p_a", "type": "place", "label": "p_a"},
+                    {"id": "p_b", "type": "place", "label": "p_b"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                    {"id": "t1", "type": "transition", "label": "act1"},
+                    {"id": "t2", "type": "transition", "label": "act2"},
+                    {"id": "t_join", "type": "transition", "label": "act_join"},
+                ],
+                "edges": [
+                    {"source": "p_start", "target": "t1"}, {"source": "t1", "target": "p_a"},
+                    {"source": "p_start", "target": "t2"}, {"source": "t2", "target": "p_b"},
+                    {"source": "p_a", "target": "t_join"}, {"source": "p_b", "target": "t_join"},
+                    {"source": "t_join", "target": "p_end"},
+                ],
+            },
+            "transitions": {
+                "act1": _transition(["p_start"], duration=_duration(5.0, 10.0)),
+                "act2": _transition(["p_start"], duration=_duration(20.0, 30.0)),
+                "act_join": _transition(["p_a", "p_b"], duration=_duration(1.0, 2.0)),
+            },
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+        # max(10, 30) + 2 = 32 -- NOT min(10, 30) + 2 = 12.
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 32.0
+
+    def test_and_join_satisfied_by_a_different_concurrent_branch_of_the_marking(self):
+        # Same net as above, but the marking already holds tokens in BOTH
+        # p_a and p_b directly (as if two concurrent branches already
+        # completed) -- t_join must fire using max(0, 0) + 2 = 2, not
+        # treat p_a/p_b as isolated unreachable starting points.
+        serialized = {
+            "graph": {
+                "nodes": [
+                    {"id": "p_a", "type": "place", "label": "p_a"},
+                    {"id": "p_b", "type": "place", "label": "p_b"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                    {"id": "t_join", "type": "transition", "label": "act_join"},
+                ],
+                "edges": [
+                    {"source": "p_a", "target": "t_join"}, {"source": "p_b", "target": "t_join"},
+                    {"source": "t_join", "target": "p_end"},
+                ],
+            },
+            "transitions": {
+                "act_join": _transition(["p_a", "p_b"], duration=_duration(1.0, 2.0)),
+            },
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_a", "end_place": "p_end"},
+        }
+        assert compute_min_time_to_end(serialized, ["p_a", "p_b"]) == 2.0
+
+    def test_missing_duration_data_contributes_zero(self):
+        serialized = {
+            "graph": {
+                "nodes": [
+                    {"id": "p_start", "type": "place", "label": "p_start"},
+                    {"id": "t_a", "type": "transition", "label": "act_a"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                ],
+                "edges": [
+                    {"source": "p_start", "target": "t_a"},
+                    {"source": "t_a", "target": "p_end"},
+                ],
+            },
+            "transitions": {"act_a": _transition(["p_start"])},  # duration=None
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 0.0
+
+    def test_unreachable_marking_returns_infinity(self):
+        serialized = _serialized_with_unreachable_effect("status", "discharged")
+        # p_isolated feeds act_a -> p_after_a, never connected to p_end (the
+        # declared end place) in this fixture -- structurally can never
+        # reach the end.
+        assert compute_min_time_to_end(serialized, ["p_isolated"]) == float("inf")
+
+    def test_infinity_when_no_end_place_declared(self):
+        serialized = _serialized_with_effect("status", "discharged")
+        serialized["metadata"] = {}
+        assert compute_min_time_to_end(serialized, ["p_start"]) == float("inf")
+
+
+class TestComputeMinTimeToEndCache:
+    """cache is keyed on the exact marking (frozenset(init_places)), not on
+    individual places -- see compute_min_time_to_end's own docstring on why
+    a per-place cache would silently break AND-join correctness."""
+
+    def _serialized(self):
+        return {
+            "graph": {
+                "nodes": [
+                    {"id": "p_start", "type": "place", "label": "p_start"},
+                    {"id": "t_a", "type": "transition", "label": "act_a"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                ],
+                "edges": [
+                    {"source": "p_start", "target": "t_a"},
+                    {"source": "t_a", "target": "p_end"},
+                ],
+            },
+            "transitions": {"act_a": _transition(["p_start"], duration=_duration(5.0, 10.0))},
+            "attribute_catalog": _CATALOG_MIXED,
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+
+    def test_cache_populated_after_first_call(self):
+        serialized = self._serialized()
+        cache: dict = {}
+        result = compute_min_time_to_end(serialized, ["p_start"], cache=cache)
+        assert result == 10.0
+        assert cache[frozenset(["p_start"])] == 10.0
+
+    def test_second_call_with_same_marking_reuses_cached_value(self):
+        serialized = self._serialized()
+        cache: dict = {}
+        first = compute_min_time_to_end(serialized, ["p_start"], cache=cache)
+        # Even if the underlying graph changed after the first call, a hit
+        # must return the CACHED value, proving it didn't recompute.
+        mutated = dict(serialized)
+        mutated["metadata"] = {}  # would make a fresh call return +inf
+        second = compute_min_time_to_end(mutated, ["p_start"], cache=cache)
+        assert second == first == 10.0
+
+    def test_marking_order_does_not_affect_cache_key(self):
+        serialized = self._serialized()
+        cache: dict = {}
+        compute_min_time_to_end(serialized, ["p_start"], cache=cache)
+        assert frozenset(["p_start"]) in cache
+        # A differently-ordered but identical marking must hit the same key.
+        assert len(cache) == 1
+
+    def test_different_markings_get_independent_cache_entries(self):
+        serialized = self._serialized()
+        cache: dict = {}
+        compute_min_time_to_end(serialized, ["p_start"], cache=cache)
+        compute_min_time_to_end(serialized, ["p_end"], cache=cache)
+        assert cache[frozenset(["p_start"])] == 10.0
+        assert cache[frozenset(["p_end"])] == 0.0
+        assert len(cache) == 2
+
+    def test_no_cache_means_no_memoization_and_no_error(self):
+        serialized = self._serialized()
+        # cache=None (default) -- must behave exactly like before caching existed.
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 10.0

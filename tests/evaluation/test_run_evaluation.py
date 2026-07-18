@@ -426,6 +426,15 @@ class TestRunQueryDurationScale:
         spec.deadline = deadline
         return spec
 
+    def _serialized_trivially_reachable(self):
+        # end_place == init place -> compute_min_time_to_end's Q2 precheck
+        # (now unconditional, no longer optionally injected) trivially
+        # returns 0.0 <= any deadline, so it never interferes with what
+        # this test class actually exercises (deadline/scale-factor math).
+        s = _make_serialized()
+        s["metadata"]["end_place"] = "p_start"
+        return s
+
     def _call(self, tmp_path, deadline, duration_scale_factor):
         api = _make_mock_api()
         cfg = _make_cfg(tmp_path)
@@ -436,7 +445,7 @@ class TestRunQueryDurationScale:
              patch("evaluation.run_evaluation.q2_metrics", return_value={}):
             _run_query(
                 "log_1", "case1", self._spec(deadline), "(define (domain test))",
-                api, cfg, _make_serialized(), tmp_path / "failures", prefix,
+                api, cfg, self._serialized_trivially_reachable(), tmp_path / "failures", prefix,
                 MagicMock(), {}, pddl_dir=tmp_path / "pddl",
                 duration_scale_factor=duration_scale_factor,
             )
@@ -498,6 +507,127 @@ class TestRunQueryQ3Unreachable:
         assert result.metrics == {}
         assert result.planner_duration_s is None
         assert result.validation is None
+
+
+# ---------------------------------------------------------------------------
+# _run_query — Q2 must skip the planner entirely (no build_problem, no
+# _run_with_retry) when even the fastest structurally possible completion
+# (compute_min_time_to_end, recomputed per query from spec.init_places --
+# see its own docstring on why AND-join correctness rules out a once-per-log
+# cache) exceeds the deadline, and record
+# solvability="skipped_unsatisfiable_by_construction" with metrics={}
+# (same shape as Q3's "skipped_unreachable" record).
+# ---------------------------------------------------------------------------
+
+class TestRunQueryQ2UnsatisfiableByConstruction:
+    def _spec(self, deadline=100.0):
+        spec = MagicMock()
+        spec.query_type = "Q2"
+        spec.init_places = ["p_start"]
+        spec.init_effects = []
+        spec.goal_sop = [[]]
+        spec.metric = "minimize_weighted"
+        spec.cost_weight = 0.001
+        spec.require_completion = True
+        spec.deadline = deadline
+        return spec
+
+    def _serialized_with_duration(self, effective_min: float) -> dict:
+        return {
+            "graph": {
+                "nodes": [
+                    {"id": "p_start", "type": "place", "label": "p_start"},
+                    {"id": "t_a", "type": "transition", "label": "act_a"},
+                    {"id": "p_end", "type": "place", "label": "p_end"},
+                ],
+                "edges": [
+                    {"source": "p_start", "target": "t_a"},
+                    {"source": "t_a", "target": "p_end"},
+                ],
+            },
+            "transitions": {
+                "act_a": {
+                    "input_places": ["p_start"], "preconditions": [], "effect_groups": [],
+                    "cost": 0.0,
+                    "duration": {"effective_min": effective_min, "effective_max": effective_min * 2},
+                },
+            },
+            "attribute_catalog": {},
+            "metadata": {"start_place": "p_start", "end_place": "p_end"},
+        }
+
+    def test_skips_planner_when_fastest_completion_exceeds_deadline(self, tmp_path):
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+        prefix = _make_prefix()
+
+        with patch("evaluation.run_evaluation._run_with_retry") as mock_run:
+            result = _run_query(
+                "log_1", "case1", self._spec(deadline=100.0), "(define (domain test))",
+                api, cfg, self._serialized_with_duration(500.0), tmp_path / "failures", prefix,
+                MagicMock(), {}, pddl_dir=tmp_path / "pddl",
+            )
+
+        mock_run.assert_not_called()
+        api.build_problem.assert_not_called()
+        assert result.solvability == "skipped_unsatisfiable_by_construction"
+        assert result.attempts == 0
+        assert result.metrics == {}
+        assert result.planner_duration_s is None
+        assert result.validation is None
+
+    def test_runs_planner_when_fastest_completion_fits_deadline(self, tmp_path):
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+        prefix = _make_prefix()
+
+        with patch("evaluation.run_evaluation._run_with_retry", return_value=(MagicMock(success=True, plan_steps=None), 1)) as mock_run, \
+             patch("evaluation.run_evaluation.q2_metrics", return_value={}):
+            result = _run_query(
+                "log_1", "case1", self._spec(deadline=100.0), "(define (domain test))",
+                api, cfg, self._serialized_with_duration(5.0), tmp_path / "failures", prefix,
+                MagicMock(), {}, pddl_dir=tmp_path / "pddl",
+            )
+
+        mock_run.assert_called_once()
+        assert result.solvability != "skipped_unsatisfiable_by_construction"
+
+    def test_skips_planner_when_end_place_structurally_unreachable(self, tmp_path):
+        # p_start disconnected from p_end entirely -- compute_min_time_to_end
+        # returns +inf, which must exceed any finite deadline (not silently
+        # default to 0 / always-reachable).
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+        prefix = _make_prefix()
+
+        with patch("evaluation.run_evaluation._run_with_retry") as mock_run:
+            result = _run_query(
+                "log_1", "case1", self._spec(deadline=100.0), "(define (domain test))",
+                api, cfg, _make_serialized(), tmp_path / "failures", prefix,  # empty graph
+                MagicMock(), {}, pddl_dir=tmp_path / "pddl",
+            )
+
+        mock_run.assert_not_called()
+        assert result.solvability == "skipped_unsatisfiable_by_construction"
+
+    def test_no_precheck_applied_when_deadline_is_none(self, tmp_path):
+        # Q1-shaped spec.deadline=None -- the precheck must be a no-op even
+        # on a graph that would otherwise fail it (planner still invoked
+        # normally), since "no deadline" means there is nothing to violate.
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+        prefix = _make_prefix()
+
+        with patch("evaluation.run_evaluation._run_with_retry", return_value=(MagicMock(success=True, plan_steps=None), 1)) as mock_run, \
+             patch("evaluation.run_evaluation.q2_metrics", return_value={}):
+            result = _run_query(
+                "log_1", "case1", self._spec(deadline=None), "(define (domain test))",
+                api, cfg, _make_serialized(), tmp_path / "failures", prefix,  # empty graph, would fail if checked
+                MagicMock(), {}, pddl_dir=tmp_path / "pddl",
+            )
+
+        mock_run.assert_called_once()
+        assert result.solvability != "skipped_unsatisfiable_by_construction"
 
 
 # ---------------------------------------------------------------------------

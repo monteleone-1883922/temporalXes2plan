@@ -17,7 +17,7 @@ import heapq
 import logging
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from encoding.prepared_input import PLACE_NODE_TYPES, TRANS_NODE_TYPES
 from evaluation.trace_sampler import PrefixSample, _remaining_budget
@@ -279,7 +279,11 @@ def _index_graph(
     return node_by_id, in_places, out_places
 
 
-def compute_min_time_to_end(serialized: Dict[str, Any], init_places: List[str]) -> float:
+def compute_min_time_to_end(
+    serialized: Dict[str, Any],
+    init_places: List[str],
+    cache: Optional[Dict[FrozenSet[str], float]] = None,
+) -> float:
     """Minimum modeled time to reach the end place from this specific marking.
 
     Purely structural and condition-free, same philosophy as is_q3_reachable
@@ -298,30 +302,49 @@ def compute_min_time_to_end(serialized: Dict[str, Any], init_places: List[str]) 
     place starts at distance 0 once reached; a transition is only relaxed
     (its output places' distances updated) once ALL of its input places
     have been settled, using the MAX of their settled distances as its own
-    ready time, plus its own effective_min duration (its domain-declared
-    *lower* bound — an optimistic/best-case estimate, the safe direction
-    for a "definitely impossible, skip the planner" precheck: it can only
-    ever under-estimate the true minimum completion time, so it never
-    wrongly flags a trace as unsatisfiable when it might in fact be
-    solvable). Transitions with no mined duration data contribute 0
-    (absence of information treated as non-constraining, same convention
-    as is_q3_reachable and _sum_modeled_max_duration). Transitions with no
+    ready time, plus its own effective_max duration. effective_min/max are
+    not planner-chosen values here -- they are the observed range of how
+    long that activity actually took across the historical log, i.e. real
+    execution-time uncertainty the planner does not control. A plan is
+    only genuinely reliable if it still meets the deadline in the worst
+    realistic case, so effective_max (not effective_min) is used: OPTIC's
+    own temporal-feasibility checking is understood to reason the same
+    way. Transitions with no mined duration data contribute 0 (absence of
+    information treated as non-constraining, same convention as
+    is_q3_reachable and _sum_modeled_max_duration). Transitions with no
     input places at all (net sources) are seeded as fireable at time 0.
 
     Args:
         serialized: current.json dict.
         init_places: Place names holding a token in the marking to check
             (e.g. QuerySpec.init_places / PrefixSample.init_places).
+        cache: Optional dict shared across calls (e.g. one built per log,
+            outside the per-trace loop), keyed by the exact marking
+            (frozenset(init_places)) -- NOT per-place, which is what makes
+            this safe: two Q2 queries whose traces happen to produce the
+            EXACT SAME marking get the identical answer by construction
+            (same serialized domain, same init_places -> same result), so
+            memoizing on the full marking loses no AND-join information
+            (unlike a per-place table, which would -- see this function's
+            git history / claude_plans/time_aware_evaluation_plan.md §5
+            for why a per-place cache was rejected). A cache miss still
+            costs one full Dijkstra pass; only identical markings are free.
 
     Returns:
         Minimum modeled time (seconds) to reach the end place from this
         marking, or float("inf") if structurally unreachable (or no
         metadata.end_place is declared).
     """
+    cache_key = frozenset(init_places) if cache is not None else None
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
     node_by_id, in_places_map, out_places = _index_graph(serialized)
     transitions: Dict[str, Any] = serialized.get("transitions", {})
     end_place = serialized.get("metadata", {}).get("end_place")
     if end_place is None:
+        if cache is not None:
+            cache[cache_key] = float("inf")
         return float("inf")
 
     transition_ids = [nid for nid, n in node_by_id.items() if n["type"] in TRANS_NODE_TYPES]
@@ -375,7 +398,10 @@ def compute_min_time_to_end(serialized: Dict[str, Any], init_places: List[str]) 
             if remaining_inputs[tid] == 0:
                 _fire(tid, ready_time_so_far[tid])
 
-    return dist.get(end_place, float("inf"))
+    result = dist.get(end_place, float("inf"))
+    if cache is not None:
+        cache[cache_key] = result
+    return result
 
 
 def is_q3_reachable(

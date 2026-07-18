@@ -328,6 +328,14 @@ def evaluate_log(
 
             # 6-7. Sample prefix and run Q1/Q2/Q3 for each test trace
             replayer = TraceReplayer(prepared, petri_net_model, config=analysis_cfg)
+            # Shared across every Q2 query for this log -- keyed by the exact
+            # marking (frozenset(init_places)), so two traces whose prefix
+            # replay happens to land on the same marking reuse the result
+            # instead of re-running compute_min_time_to_end's Dijkstra pass.
+            # Safe (unlike a per-place table): see compute_min_time_to_end's
+            # own docstring on why AND-join correctness rules out caching
+            # anything less than the full marking.
+            q2_min_time_cache: Dict[frozenset, float] = {}
             query_results: List[QueryResult] = []
             n_test_cases = len(tts.test_cases)
             for test_idx, trace in enumerate(tts.test_cases, start=1):
@@ -364,7 +372,7 @@ def evaluate_log(
                 q2_spec = build_q2(prefix, cfg.cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_within_time, duration_scale_factor=domain.duration_scale_factor)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_within_time, duration_scale_factor=domain.duration_scale_factor, min_time_to_end_cache=q2_min_time_cache)
                     )
 
                 # Q3 — completion within budget + attribute constraints
@@ -428,6 +436,7 @@ def _run_query(
     pddl_dir: Optional[Path] = None,
     is_replayable: bool = True,
     duration_scale_factor: float = 1.0,
+    min_time_to_end_cache: Optional[Dict[frozenset, float]] = None,
 ) -> QueryResult:
     query_id = f"{log_id}_{trace_id}_{spec.query_type}"
 
@@ -456,11 +465,15 @@ def _run_query(
         )
 
     if spec.query_type == "Q2" and spec.deadline is not None:
-        # Recomputed per query (not cached once per log): AND-join
-        # synchronization genuinely depends on this specific marking (see
-        # compute_min_time_to_end's docstring) — cheap relative to an
-        # actual planner invocation, which is what it's meant to avoid.
-        best_case = compute_min_time_to_end(serialized, spec.init_places)
+        # Memoized on the exact marking (min_time_to_end_cache, shared
+        # across every Q2 query for this log) -- NOT on individual places,
+        # which would silently break AND-join synchronization (see
+        # compute_min_time_to_end's own docstring). Two traces whose
+        # prefix replay happens to land on the same marking reuse the
+        # result instead of re-running the Dijkstra pass; a cache miss
+        # still costs one pass, cheap relative to an actual planner
+        # invocation, which is what this precheck exists to avoid.
+        best_case = compute_min_time_to_end(serialized, spec.init_places, cache=min_time_to_end_cache)
         if best_case > spec.deadline:
             logger.warning(
                 "[%s] %s Q2 skipped — even the fastest structurally possible "
