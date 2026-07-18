@@ -67,7 +67,7 @@ class PDDLCondition:
     def to_pddl(self) -> str:
         """Render to a PDDL predicate string."""
         attr = core_utils.sanitize_name(self.attribute)
-        value = core_utils.sanitize_value(self.attribute, self.value)
+        value = core_utils.sanitize_value(attr, self.value)
         if self.kind == "marked":
             return f"(marked {attr})"
         if self.kind == "attr_is":
@@ -185,7 +185,7 @@ class PDDLEffect:
     def to_pddl(self) -> str:
         """Render to a PDDL effect string."""
         attr = core_utils.sanitize_name(self.attribute)
-        value = core_utils.sanitize_value(self.attribute, self.value)
+        value = core_utils.sanitize_value(attr, self.value)
         if self.kind == "marked":
             inner = f"(marked {attr})"
         elif self.kind == "attr_is":
