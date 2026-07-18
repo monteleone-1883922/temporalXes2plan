@@ -25,6 +25,19 @@ document.getElementById("setup-form").addEventListener("submit", async (e) => {
     await startPipeline();
 });
 
+// Optimizer toggle: hide the form fields the optimizer tunes when enabled.
+const OPTIMIZER_TUNABLE_SELECTOR = '[data-optimizer-tunable="true"]';
+
+function applyOptimizerMode() {
+    const enabled = document.getElementById("p-use-optimizer").checked;
+    document.querySelectorAll(OPTIMIZER_TUNABLE_SELECTOR).forEach((el) => {
+        el.classList.toggle("js-hidden", enabled);
+    });
+}
+
+document.getElementById("p-use-optimizer").addEventListener("change", applyOptimizerMode);
+applyOptimizerMode();
+
 async function startPipeline() {
     const form = document.getElementById("setup-form");
     const btn = document.getElementById("run-btn");
@@ -95,43 +108,60 @@ function _resetRunBtn(btn) {
 
 
 function buildRequestBody(form) {
+    const useOptimizer = form["use_optimizer"].checked;
+
     const pipeline = {
         discovery_algorithm: form.algorithm.value,
         coverage_percentage: parseFloat(form.coverage_percentage.value),
         use_durative: form["use_durative"].checked,
         use_costs: form["use_costs"].checked,
         use_activity_classifier: form["use_activity_classifier"].checked,
+        search: useOptimizer,
     };
 
     const config = {};
     const numericFields = [
         "dt_min_samples", "dt_min_accuracy", "dt_max_depth",
-        "probability_min_samples",
-        "kmeans_max_k",
-        "min_gvf_threshold", "gvf_target", "min_gvf_improvement", "jenks_sample_size",
+        "probability_min_samples", "static_appearances_min_samples", "static_attr_probability",
+        "kmeans_max_k", "dominance_threshold", "min_residual_points",
+        "min_gvf_threshold", "gvf_target", "min_gvf_improvement",
+        "kde_grid_points", "kde_extrema_order",
         "dt_prune_min_leaf_samples", "dt_prune_min_purity",
-        "xor_prune_threshold",
+        "xor_prune_threshold", "dt_min_prob_to_use",
         "effect_never_threshold", "effect_always_threshold",
-        "effect_appearance_threshold",
         "effect_value_prune_threshold", "effect_value_certain_threshold",
         "related_effect_prob", "incompatible_effect_prob",
         "replay_min_fitness",
         "attr_precondition_min_frequency", "attr_precondition_min_firings",
+        "lower_bound_prob_actions",
     ];
     const selectFields = [
         "dt_prune_orphan_mode", "xor_statistical_mode",
         "effect_appearance_mode", "effect_value_mode",
+        "replay_engine", "replay_alignment_variant",
     ];
+
+    // Skip fields hidden by the optimizer toggle -- suggest_config() always
+    // overwrites them anyway when search=True, but this keeps the payload
+    // honest (only sends what's actually visible/editable on screen).
+    function isHiddenByOptimizer(el) {
+        if (!useOptimizer) return false;
+        const wrapper = el.closest(OPTIMIZER_TUNABLE_SELECTOR);
+        return wrapper !== null;
+    }
 
     for (const name of numericFields) {
         const el = form.elements[name];
-        if (el) config[name] = parseFloat(el.value);
+        if (el && !isHiddenByOptimizer(el)) config[name] = parseFloat(el.value);
     }
     for (const name of selectFields) {
         const el = form.elements[name];
-        if (el) config[name] = el.value;
+        if (el && !isHiddenByOptimizer(el)) config[name] = el.value;
     }
 
+    if (!isHiddenByOptimizer(form["xor_screen_prune_branches"])) {
+        config["xor_screen_prune_branches"] = form["xor_screen_prune_branches"].checked;
+    }
     config["log_removed_effects"] = form["log_removed_effects"].checked;
     config["snapshot_dir"] = form["snapshot_dir"].value;
 

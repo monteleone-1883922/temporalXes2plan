@@ -156,8 +156,29 @@
                 </div>
             </div>
 
+            <!-- Configuration mode -->
+            <div class="setup-section setup-section-open" id="optimizer-toggle-section">
+                <div class="setup-section-header">
+                    <i class="bi bi-magic"></i>
+                    <span>Configuration Mode</span>
+                </div>
+                <div class="setup-section-body">
+                    <div class="form-field form-field-check form-field-full">
+                        <label>
+                            <input type="checkbox" id="p-use-optimizer" name="use_optimizer">
+                            Use automatic optimizer to find the best configuration
+                        </label>
+                        <span class="field-hint">
+                            Runs an automated search (30 trials) over the parameters below marked as
+                            tunable and picks the best-performing combination. Fields not covered by
+                            the search stay editable below in either mode.
+                        </span>
+                    </div>
+                </div>
+            </div>
+
             <!-- Decision tree -->
-            <details class="setup-section" open>
+            <details class="setup-section" open data-optimizer-tunable="true">
                 <summary class="setup-section-header">
                     <i class="bi bi-diagram-2"></i>
                     <span>Decision Tree</span>
@@ -189,6 +210,18 @@
                                    value="10" min="1">
                             <span class="field-hint">Min samples to trust observed probabilities (level 2)</span>
                         </div>
+                        <div class="form-field">
+                            <label for="c-static_appearances_min_samples">static_appearances_min_samples</label>
+                            <input type="number" id="c-static_appearances_min_samples" name="static_appearances_min_samples"
+                                   value="40" min="1">
+                            <span class="field-hint">Min samples for an attribute to be judged "static"</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-static_attr_probability">static_attr_probability</label>
+                            <input type="number" id="c-static_attr_probability" name="static_attr_probability"
+                                   value="0.95" min="0" max="1" step="0.01">
+                            <span class="field-hint">Probability threshold for static-attribute classification</span>
+                        </div>
                     </div>
                 </div>
             </details>
@@ -197,42 +230,61 @@
             <details class="setup-section">
                 <summary class="setup-section-header">
                     <i class="bi bi-distribute-horizontal"></i>
-                    <span>Jenks Natural Breaks Discretization</span>
+                    <span>Ckmeans.1d.dp Discretization</span>
                     <i class="bi bi-chevron-down setup-chevron"></i>
                 </summary>
                 <div class="setup-section-body">
                     <div class="form-grid">
-                        <div class="form-field">
+                        <div class="form-field" data-optimizer-tunable="true">
                             <label for="c-kmeans_max_k">kmeans_max_k</label>
                             <input type="number" id="c-kmeans_max_k" name="kmeans_max_k"
                                    value="5" min="2" max="20">
                         </div>
-                        <div class="form-field">
+                        <div class="form-field" data-optimizer-tunable="true">
+                            <label for="c-dominance_threshold">dominance_threshold</label>
+                            <input type="number" id="c-dominance_threshold" name="dominance_threshold"
+                                   value="0.30" min="0" max="1" step="0.01">
+                            <span class="field-hint">Stage-1 dominance cutoff</span>
+                        </div>
+                        <div class="form-field" data-optimizer-tunable="true">
+                            <label for="c-min_residual_points">min_residual_points</label>
+                            <input type="number" id="c-min_residual_points" name="min_residual_points"
+                                   value="50" min="1">
+                            <span class="field-hint">Min residual points to keep discretizing</span>
+                        </div>
+                        <div class="form-field" data-optimizer-tunable="true">
                             <label for="c-min_gvf_threshold">min_gvf_threshold</label>
                             <input type="number" id="c-min_gvf_threshold" name="min_gvf_threshold"
                                    value="0.70" min="0" max="1" step="0.01">
                         </div>
-                        <div class="form-field">
+                        <div class="form-field" data-optimizer-tunable="true">
                             <label for="c-gvf_target">gvf_target</label>
                             <input type="number" id="c-gvf_target" name="gvf_target"
                                    value="0.90" min="0" max="1" step="0.01">
                         </div>
-                        <div class="form-field">
+                        <div class="form-field" data-optimizer-tunable="true">
                             <label for="c-min_gvf_improvement">min_gvf_improvement</label>
                             <input type="number" id="c-min_gvf_improvement" name="min_gvf_improvement"
                                    value="0.01" min="0" max="1" step="0.001">
                         </div>
                         <div class="form-field">
-                            <label for="c-jenks_sample_size">jenks_sample_size</label>
-                            <input type="number" id="c-jenks_sample_size" name="jenks_sample_size"
-                                   value="20000" min="1000" step="1000">
+                            <label for="c-kde_grid_points">kde_grid_points</label>
+                            <input type="number" id="c-kde_grid_points" name="kde_grid_points"
+                                   value="1000" min="100" step="100">
+                            <span class="field-hint">Grid resolution for KDE extrema search</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-kde_extrema_order">kde_extrema_order</label>
+                            <input type="number" id="c-kde_extrema_order" name="kde_extrema_order"
+                                   value="5" min="1">
+                            <span class="field-hint">Order parameter for KDE extrema detection</span>
                         </div>
                     </div>
                 </div>
             </details>
 
             <!-- DT Pruning -->
-            <details class="setup-section">
+            <details class="setup-section" data-optimizer-tunable="true">
                 <summary class="setup-section-header">
                     <i class="bi bi-scissors"></i>
                     <span>DT Leaf Pruning</span>
@@ -253,7 +305,8 @@
                         <div class="form-field">
                             <label for="c-dt_prune_orphan_mode">dt_prune_orphan_mode</label>
                             <select id="c-dt_prune_orphan_mode" name="dt_prune_orphan_mode">
-                                <option value="keep_best" selected>keep_best</option>
+                                <option value="fallback" selected>fallback</option>
+                                <option value="keep_best">keep_best</option>
                                 <option value="drop">drop</option>
                             </select>
                         </div>
@@ -270,7 +323,7 @@
                 </summary>
                 <div class="setup-section-body">
                     <div class="form-grid">
-                        <div class="form-field">
+                        <div class="form-field" data-optimizer-tunable="true">
                             <label for="c-xor_statistical_mode">xor_statistical_mode</label>
                             <select id="c-xor_statistical_mode" name="xor_statistical_mode">
                                 <option value="majority_only">majority_only</option>
@@ -278,17 +331,30 @@
                                 <option value="pruned_weighted" selected>pruned_weighted</option>
                             </select>
                         </div>
-                        <div class="form-field">
+                        <div class="form-field" data-optimizer-tunable="true">
                             <label for="c-xor_prune_threshold">xor_prune_threshold</label>
                             <input type="number" id="c-xor_prune_threshold" name="xor_prune_threshold"
                                    value="0.10" min="0" max="1" step="0.01">
+                        </div>
+                        <div class="form-field" data-optimizer-tunable="true">
+                            <label for="c-dt_min_prob_to_use">dt_min_prob_to_use</label>
+                            <input type="number" id="c-dt_min_prob_to_use" name="dt_min_prob_to_use"
+                                   value="0.05" min="0" max="1" step="0.01">
+                            <span class="field-hint">Min DT leaf probability to trust the DT guard</span>
+                        </div>
+                        <div class="form-field form-field-check">
+                            <label>
+                                <input type="checkbox" id="c-xor_screen_prune_branches" name="xor_screen_prune_branches" checked>
+                                xor_screen_prune_branches
+                            </label>
+                            <span class="field-hint">If unchecked, ignores xor_prune_threshold and keeps all branches active</span>
                         </div>
                     </div>
                 </div>
             </details>
 
             <!-- Effect screening -->
-            <details class="setup-section">
+            <details class="setup-section" data-optimizer-tunable="true">
                 <summary class="setup-section-header">
                     <i class="bi bi-funnel"></i>
                     <span>Effect Screening</span>
@@ -318,11 +384,6 @@
                             </select>
                         </div>
                         <div class="form-field">
-                            <label for="c-effect_appearance_threshold">effect_appearance_threshold</label>
-                            <input type="number" id="c-effect_appearance_threshold" name="effect_appearance_threshold"
-                                   value="0.20" min="0" max="1" step="0.01">
-                        </div>
-                        <div class="form-field">
                             <label for="c-effect_value_mode">effect_value_mode</label>
                             <select id="c-effect_value_mode" name="effect_value_mode">
                                 <option value="majority_only">majority_only</option>
@@ -345,7 +406,7 @@
             </details>
 
             <!-- Effect co-occurrence -->
-            <details class="setup-section">
+            <details class="setup-section" data-optimizer-tunable="true">
                 <summary class="setup-section-header">
                     <i class="bi bi-link-45deg"></i>
                     <span>Effect Co-occurrence</span>
@@ -378,11 +439,28 @@
                 </summary>
                 <div class="setup-section-body">
                     <div class="form-grid">
-                        <div class="form-field">
+                        <div class="form-field" data-optimizer-tunable="true">
                             <label for="c-replay_min_fitness">replay_min_fitness</label>
                             <input type="number" id="c-replay_min_fitness" name="replay_min_fitness"
                                    value="0.8" min="0" max="1" step="0.01">
                             <span class="field-hint">Min trace fitness to include in branch counting</span>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-replay_engine">replay_engine</label>
+                            <select id="c-replay_engine" name="replay_engine">
+                                <option value="token_based_replay" selected>token_based_replay</option>
+                                <option value="alignments">alignments</option>
+                            </select>
+                        </div>
+                        <div class="form-field">
+                            <label for="c-replay_alignment_variant">replay_alignment_variant</label>
+                            <select id="c-replay_alignment_variant" name="replay_alignment_variant">
+                                <option value="state_equation_a_star" selected>state_equation_a_star</option>
+                                <option value="dijkstra_no_heuristics">dijkstra_no_heuristics</option>
+                                <option value="dijkstra_less_memory">dijkstra_less_memory</option>
+                                <option value="discounted_a_star">discounted_a_star</option>
+                            </select>
+                            <span class="field-hint">Only used when replay_engine is "alignments"</span>
                         </div>
                     </div>
                 </div>
@@ -454,6 +532,12 @@ org:role</textarea>
                             <label for="c-snapshot_dir">snapshot_dir</label>
                             <input type="text" id="c-snapshot_dir" name="snapshot_dir"
                                    value="output/snapshots">
+                        </div>
+                        <div class="form-field">
+                            <label for="c-lower_bound_prob_actions">lower_bound_prob_actions</label>
+                            <input type="number" id="c-lower_bound_prob_actions" name="lower_bound_prob_actions"
+                                   value="0.001" min="0" max="1" step="0.0001">
+                            <span class="field-hint">Floor probability for action costs</span>
                         </div>
                     </div>
                 </div>

@@ -46,7 +46,7 @@ api = Blueprint("api", __name__, url_prefix="/api")
 
 def _config_dir(config_name: str) -> str:
     base = os.path.abspath(current_app.config["DATA_DIR"])
-    return os.path.join(base, os.path.basename(config_name))
+    return str(os.path.join(base, os.path.basename(config_name)))
 
 
 def _original_path(config_name: str) -> str:
@@ -148,7 +148,11 @@ def _write_json(data: Dict[str, Any], path: str) -> None:
 
 
 def _build_analysis_config(data: Dict[str, Any]) -> AnalysisConfig:
-
+    """When called for a search=True run, `data` typically only contains the
+    ~12 AnalysisConfig fields the optimizer doesn't tune (the GUI hides the
+    rest) — the resulting AnalysisConfig is used as Pipeline.run()'s *base*
+    config, not applied directly (see Pipeline.run's `config` docstring).
+    """
     if "ignored_attributes" in data and isinstance(data["ignored_attributes"], list):
         data["ignored_attributes"] = set(data["ignored_attributes"])
     valid = {f.name for f in dc_fields(AnalysisConfig)}
@@ -381,9 +385,14 @@ def _pipeline_thread(
         allowed_kwargs = {
             "domain_name", "discovery_algorithm",
             "coverage_percentage", "use_durative", "use_costs", "use_activity_classifier",
+            "search",
         }
         kwargs = {k: v for k, v in pipeline_params.items() if k in allowed_kwargs}
+        if "search" in kwargs:
+            kwargs["search"] = bool(kwargs["search"])
 
+        if kwargs.get("search"):
+            tracker.append_log(job_id, "Searching best configuration (30 trials)...")
         tracker.append_log(job_id, f"Parsing {Path(log_path).name}...")
         pddl_path = Pipeline().run(
             log_path=log_path,
