@@ -23,7 +23,9 @@ from evaluation.eval_api import EvalAPI
 from models import AnalysisConfig
 from evaluation.test_case_selector import split as _split_log
 from evaluation.trace_sampler import sample_prefix as _sample_prefix
-from evaluation.query_builder import build_q1, build_q2, build_q3, is_q3_reachable, QuerySpec
+from evaluation.query_builder import (
+    build_q1, build_q2, build_q3, compute_min_time_to_end, is_q3_reachable, QuerySpec,
+)
 from evaluation.metrics_collector import q1_metrics, q2_metrics, q3_metrics, sequence_alignment_score
 from evaluation.planner_runner_with_retry import RetryConfig, run_with_retry as _run_with_retry
 from evaluation.log_downloader import download_if_needed, get_log_selection
@@ -452,6 +454,33 @@ def _run_query(
             validation=None,
             is_replayable=is_replayable,
         )
+
+    if spec.query_type == "Q2" and spec.deadline is not None:
+        # Recomputed per query (not cached once per log): AND-join
+        # synchronization genuinely depends on this specific marking (see
+        # compute_min_time_to_end's docstring) — cheap relative to an
+        # actual planner invocation, which is what it's meant to avoid.
+        best_case = compute_min_time_to_end(serialized, spec.init_places)
+        if best_case > spec.deadline:
+            logger.warning(
+                "[%s] %s Q2 skipped — even the fastest structurally possible "
+                "completion (%.1fs) exceeds the deadline (%.1fs). Recorded as "
+                "solvability='skipped_unsatisfiable_by_construction'.",
+                log_id, trace_id, best_case, spec.deadline,
+            )
+            return QueryResult(
+                query_id=query_id,
+                query_type="Q2",
+                trace_id=trace_id,
+                prefix_ratio=prefix.prefix_ratio,
+                n_prefix_events=len(prefix.prefix_events),
+                attempts=0,
+                solvability="skipped_unsatisfiable_by_construction",
+                planner_duration_s=None,
+                metrics={},
+                validation=None,
+                is_replayable=is_replayable,
+            )
 
     # spec.deadline is always real-world seconds (QuerySpec's own semantics,
     # unchanged) — divide by duration_scale_factor here, at the point it

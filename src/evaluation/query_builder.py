@@ -13,10 +13,11 @@ Q3 is also skipped when the final event contains no discretized attributes.
 
 from __future__ import annotations
 
+import heapq
 import logging
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from encoding.prepared_input import PLACE_NODE_TYPES, TRANS_NODE_TYPES
 from evaluation.trace_sampler import PrefixSample, _remaining_budget
@@ -242,6 +243,141 @@ def _goal_from_final_event(
 
 
 
+def _index_graph(
+    serialized: Dict[str, Any],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, List[str]], Dict[str, List[str]]]:
+    """Index serialized["graph"] once: node lookup + transition in/out places.
+
+    Shared by is_q3_reachable and compute_min_time_to_end — both are
+    structural, condition-free graph walks over the exact same
+    place<->transition adjacency, one for plain reachability (BFS), the
+    other for minimum modeled time (Dijkstra).
+
+    Returns:
+        (node_by_id, in_places, out_places):
+        - node_by_id: node id -> its full node dict.
+        - in_places: transition id -> input place ids (place -> transition edges).
+        - out_places: transition id -> output place ids (transition -> place edges).
+    """
+    nodes: List[Dict[str, Any]] = serialized.get("graph", {}).get("nodes", [])
+    edges: List[Dict[str, Any]] = serialized.get("graph", {}).get("edges", [])
+
+    node_by_id: Dict[str, Dict[str, Any]] = {n["id"]: n for n in nodes}
+
+    in_places: Dict[str, List[str]] = {}
+    out_places: Dict[str, List[str]] = {}
+    for edge in edges:
+        src = node_by_id.get(edge["source"])
+        tgt = node_by_id.get(edge["target"])
+        if src is None or tgt is None:
+            continue
+        if src["type"] in PLACE_NODE_TYPES and tgt["type"] in TRANS_NODE_TYPES:
+            in_places.setdefault(tgt["id"], []).append(src["id"])
+        elif src["type"] in TRANS_NODE_TYPES and tgt["type"] in PLACE_NODE_TYPES:
+            out_places.setdefault(src["id"], []).append(tgt["id"])
+
+    return node_by_id, in_places, out_places
+
+
+def compute_min_time_to_end(serialized: Dict[str, Any], init_places: List[str]) -> float:
+    """Minimum modeled time to reach the end place from this specific marking.
+
+    Purely structural and condition-free, same philosophy as is_q3_reachable
+    (ignores guards, XOR probabilities), but respects AND-join
+    synchronization: a transition with k input places cannot fire until
+    ALL k of them have been reached, and it fires at the time of the
+    SLOWEST (max) of them, not the fastest — "non si può eseguire la
+    transizione finché tutti i places non sono marcati". This is why the
+    result depends on the full marking (init_places) and cannot be reduced
+    to independent per-place values computed once for the whole domain: a
+    transition may become fireable only because SOME OTHER, unrelated
+    branch of this specific marking also reaches its remaining input(s) —
+    information a single place, considered in isolation, cannot have.
+
+    Algorithm: a generalization of Dijkstra to AND-join "hyperedges". Every
+    place starts at distance 0 once reached; a transition is only relaxed
+    (its output places' distances updated) once ALL of its input places
+    have been settled, using the MAX of their settled distances as its own
+    ready time, plus its own effective_min duration (its domain-declared
+    *lower* bound — an optimistic/best-case estimate, the safe direction
+    for a "definitely impossible, skip the planner" precheck: it can only
+    ever under-estimate the true minimum completion time, so it never
+    wrongly flags a trace as unsatisfiable when it might in fact be
+    solvable). Transitions with no mined duration data contribute 0
+    (absence of information treated as non-constraining, same convention
+    as is_q3_reachable and _sum_modeled_max_duration). Transitions with no
+    input places at all (net sources) are seeded as fireable at time 0.
+
+    Args:
+        serialized: current.json dict.
+        init_places: Place names holding a token in the marking to check
+            (e.g. QuerySpec.init_places / PrefixSample.init_places).
+
+    Returns:
+        Minimum modeled time (seconds) to reach the end place from this
+        marking, or float("inf") if structurally unreachable (or no
+        metadata.end_place is declared).
+    """
+    node_by_id, in_places_map, out_places = _index_graph(serialized)
+    transitions: Dict[str, Any] = serialized.get("transitions", {})
+    end_place = serialized.get("metadata", {}).get("end_place")
+    if end_place is None:
+        return float("inf")
+
+    transition_ids = [nid for nid, n in node_by_id.items() if n["type"] in TRANS_NODE_TYPES]
+    transitions_by_input_place: Dict[str, List[str]] = {}
+    for tid in transition_ids:
+        for p in in_places_map.get(tid, []):
+            transitions_by_input_place.setdefault(p, []).append(tid)
+
+    # Per-transition AND-join bookkeeping: how many of its inputs are still
+    # unsettled, and the max distance seen so far among its settled inputs.
+    remaining_inputs: Dict[str, int] = {tid: len(in_places_map.get(tid, [])) for tid in transition_ids}
+    ready_time_so_far: Dict[str, float] = {tid: 0.0 for tid in transition_ids}
+
+    dist: Dict[str, float] = {}
+    settled: set = set()
+    heap: List[Tuple[float, str]] = []
+
+    def _fire(tid: str, ready_time: float) -> None:
+        """Relax tid's output places once all of its inputs are settled."""
+        t_info = transitions.get(node_by_id[tid].get("label"))
+        duration = t_info.get("duration") if t_info else None
+        dmax = duration["effective_max"] if duration else 0.0
+        fire_time = ready_time + dmax
+        for out_p in out_places.get(tid, []):
+            if fire_time < dist.get(out_p, float("inf")):
+                dist[out_p] = fire_time
+                heapq.heappush(heap, (fire_time, out_p))
+
+    for p in init_places:
+        if p not in dist:
+            dist[p] = 0.0
+            heapq.heappush(heap, (0.0, p))
+
+    # Net sources (no input places at all) fire unconditionally at time 0 —
+    # same convention as is_q3_reachable's own unconditional-source handling.
+    for tid in transition_ids:
+        if remaining_inputs[tid] == 0:
+            _fire(tid, 0.0)
+
+    while heap:
+        d, place = heapq.heappop(heap)
+        if place in settled:
+            continue
+        if d > dist.get(place, float("inf")):
+            continue  # stale heap entry, a shorter distance already settled it
+        settled.add(place)
+        for tid in transitions_by_input_place.get(place, []):
+            if ready_time_so_far[tid] < d:
+                ready_time_so_far[tid] = d  # MAX over this transition's inputs
+            remaining_inputs[tid] -= 1
+            if remaining_inputs[tid] == 0:
+                _fire(tid, ready_time_so_far[tid])
+
+    return dist.get(end_place, float("inf"))
+
+
 def is_q3_reachable(
     goal_sop: List[List[Dict[str, Any]]],
     serialized: Dict[str, Any],
@@ -299,25 +435,10 @@ def is_q3_reachable(
         fully covered by init_effects plus effects of transitions reachable
         from init_places.
     """
-    nodes: List[Dict[str, Any]] = serialized.get("graph", {}).get("nodes", [])
-    edges: List[Dict[str, Any]] = serialized.get("graph", {}).get("edges", [])
+    node_by_id, in_places, out_places = _index_graph(serialized)
     transitions: Dict[str, Any] = serialized.get("transitions", {})
 
-    node_by_id: Dict[str, Dict[str, Any]] = {n["id"]: n for n in nodes}
-
-    in_places: Dict[str, List[str]] = {}
-    out_places: Dict[str, List[str]] = {}
-    for edge in edges:
-        src = node_by_id.get(edge["source"])
-        tgt = node_by_id.get(edge["target"])
-        if src is None or tgt is None:
-            continue
-        if src["type"] in PLACE_NODE_TYPES and tgt["type"] in TRANS_NODE_TYPES:
-            in_places.setdefault(tgt["id"], []).append(src["id"])
-        elif src["type"] in TRANS_NODE_TYPES and tgt["type"] in PLACE_NODE_TYPES:
-            out_places.setdefault(src["id"], []).append(tgt["id"])
-
-    transition_ids = [n["id"] for n in nodes if n["type"] in TRANS_NODE_TYPES]
+    transition_ids = [nid for nid, n in node_by_id.items() if n["type"] in TRANS_NODE_TYPES]
 
     # Reverse index: place -> transitions that read it as an input, so a
     # newly-reached place can directly retry only the transitions it feeds,
