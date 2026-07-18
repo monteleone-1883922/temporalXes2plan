@@ -117,6 +117,8 @@ def convert_interval_to_lte_gte(interval_str: str) -> str:
         "(-inf-6.15]" -> "lte_6_15"
         "(12.5-inf)" -> "gte_12_5"
         "(10.5-20.0]" -> "gte_10_5_lte_20_0"
+        "(-5.0-10.0]" -> "gte_neg5_0_lte_10_0"
+        "(-10.0--5.0]" -> "gte_neg10_0_lte_neg5_0"
     """
     interval = interval_str.strip('()[]')
     if interval.startswith('-inf-'):
@@ -128,13 +130,18 @@ def convert_interval_to_lte_gte(interval_str: str) -> str:
         lower_fmt = lower_part.replace('.', '_').replace('-', 'neg')
         return f"gte_{lower_fmt}"
     else:
-        parts = interval.split('-')
-        if len(parts) == 2:
-            lower, upper = parts
+        # A naive split('-') breaks whenever either bound is itself negative
+        # (its own leading '-' gets treated as another separator, e.g.
+        # "-5.0-10.0".split('-') -> ['', '5.0', '10.0'], 3 parts instead of
+        # 2) -- match each bound explicitly instead, so a leading '-' is
+        # captured as part of the number, not as the separator.
+        match = re.match(r'^(-?[0-9.]+)-(-?[0-9.]+)$', interval)
+        if match:
+            lower, upper = match.group(1), match.group(2)
             lower_fmt = lower.replace('.', '_').replace('-', 'neg')
             upper_fmt = upper.replace('.', '_').replace('-', 'neg')
             return f"gte_{lower_fmt}_lte_{upper_fmt}"
-    
+
     return interval_str
 
 #TODO is there a test for this or at least a review to see if can be improved
