@@ -24,7 +24,8 @@ from models import AnalysisConfig
 from evaluation.test_case_selector import split as _split_log
 from evaluation.trace_sampler import sample_prefix as _sample_prefix
 from evaluation.query_builder import (
-    build_q1, build_q2, build_q3, compute_min_time_to_end, is_q3_reachable, QuerySpec,
+    build_q1, build_q2, build_q3, compute_cost_scale_factor, compute_min_time_to_end,
+    is_q3_reachable, QuerySpec,
 )
 from evaluation.metrics_collector import q1_metrics, q2_metrics, q3_metrics, sequence_alignment_score
 from evaluation.planner_runner_with_retry import RetryConfig, run_with_retry as _run_with_retry
@@ -307,6 +308,17 @@ def evaluate_log(
                 "[%s] Domain built (%d activities, durative=True).", log_id, n_activities
             )
 
+            # Per-log cost_weight: scale total-cost to this domain's own
+            # duration/cost magnitude (see compute_cost_scale_factor's
+            # docstring) instead of using the single global cfg.cost_weight
+            # across every log, whose duration scales can differ by orders
+            # of magnitude.
+            effective_cost_weight = compute_cost_scale_factor(domain, default=cfg.cost_weight)
+            logger.info(
+                "[%s] cost_weight = %.6g (cfg default %.6g)",
+                log_id, effective_cost_weight, cfg.cost_weight,
+            )
+
             # 5. Publish into the web UI's data directory — the single place
             # both the GUI import flow and the evaluation harness write the
             # domain to (web.app reads DATA_DIR/<config_name>/), so no
@@ -357,7 +369,7 @@ def evaluate_log(
                 # conditions, so ground truth is reached_end only (not the
                 # stricter is_replayable, which also requires the final
                 # attribute assignment to match — irrelevant to Q1's goal).
-                q1_spec = build_q1(prefix, cfg.cost_weight)
+                q1_spec = build_q1(prefix, effective_cost_weight)
                 query_results.append(
                     _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
                 )
@@ -369,10 +381,10 @@ def evaluate_log(
                 # remaining time — see
                 # trace_sampler.PrefixSample.reached_within_time /
                 # replay.trace_replayer.EvaluationReplayOutcome.max_modeled_duration_seconds.
-                q2_spec = build_q2(prefix, cfg.cost_weight)
+                q2_spec = build_q2(prefix, effective_cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_within_time, duration_scale_factor=domain.duration_scale_factor, min_time_to_end_cache=q2_min_time_cache)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_within_time and prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor, min_time_to_end_cache=q2_min_time_cache)
                     )
                 else:
                     query_id = f"{log_id}_{trace_id}_Q2"
@@ -392,7 +404,7 @@ def evaluate_log(
                     ))
 
                 # Q3 — completion within budget + attribute constraints
-                q3_spec = build_q3(prefix, serialized, cfg.cost_weight)
+                q3_spec = build_q3(prefix, serialized, effective_cost_weight)
                 if q3_spec is not None:
                     query_results.append(
                         _run_query(log_id, trace_id, q3_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
@@ -427,6 +439,7 @@ def evaluate_log(
                 queries=query_results,
                 used_optimizer=used_optimizer,
                 search_summary=search_summary,
+                cost_weight=effective_cost_weight,
             )
     finally:
         logging.getLogger().removeHandler(_log_handler)
@@ -541,14 +554,18 @@ def _run_query(
     )
     result, attempts = _run_with_retry(domain_text, problem_text, api, retry_cfg, failures_dir, query_id, pddl_dir)
 
+    # spec.cost_weight (not cfg.cost_weight) -- reports the weighted
+    # objective using whatever cost_weight this specific query was actually
+    # built/optimized with (the per-log compute_cost_scale_factor value set
+    # by evaluate_log, not the global config default).
     if spec.query_type == "Q1":
-        metrics = q1_metrics(result, prefix, cfg.cost_weight)
+        metrics = q1_metrics(result, prefix, spec.cost_weight)
     elif spec.query_type == "Q2":
-        metrics = q2_metrics(result, prefix, cfg.cost_weight)
+        metrics = q2_metrics(result, prefix, spec.cost_weight)
     else:
         # Reachability was already confirmed True above (otherwise this
         # function would have returned early) — no need to recompute it.
-        metrics = q3_metrics(result, prefix, spec.goal_sop, True, cfg.cost_weight)
+        metrics = q3_metrics(result, prefix, spec.goal_sop, True, spec.cost_weight)
 
     validation = None
     if result.success and result.plan_steps:
@@ -623,6 +640,7 @@ def _load_log_result(data: Dict[str, Any]) -> LogResult:
         queries=queries,
         used_optimizer=data.get("used_optimizer", False),
         search_summary=data.get("search_summary"),
+        cost_weight=data.get("cost_weight"),
     )
 
 
@@ -824,7 +842,15 @@ def main(args: argparse.Namespace) -> None:
             "OK" if log_result.pipeline_ok else f"FAILED: {log_result.pipeline_error}",
         )
 
-    summary_path = write_log_summary(log_result, output_dir, cfg.cost_weight)
+    # log_result.cost_weight is the per-log value evaluate_log() actually
+    # used to build/optimize the queries (see compute_cost_scale_factor);
+    # cfg.cost_weight is only a fallback for pre-existing results.json files
+    # written before that field existed, or a failed pipeline that never
+    # reached domain construction.
+    summary_cost_weight = (
+        log_result.cost_weight if log_result.cost_weight is not None else cfg.cost_weight
+    )
+    summary_path = write_log_summary(log_result, output_dir, summary_cost_weight)
     logger.info(
         "Done — log %s %s, summary at %s", log_id,
         "OK" if log_result.pipeline_ok else "FAILED", summary_path,

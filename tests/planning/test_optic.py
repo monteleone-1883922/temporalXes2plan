@@ -165,6 +165,62 @@ class TestOpticOutOfMemory:
         assert "memory" in result["message"].lower()
 
 
+class TestOpticAllTauPlan:
+    """A plan can legitimately consist entirely of tau/silent transitions
+    (e.g. a structural shortcut straight to the goal) -- plan_actions (the
+    non-tau names) ends up empty, but a solution was genuinely found.
+    Real example captured in results/55/failures/55_C18710_Q1.json."""
+
+    _REAL_ALL_TAU_STDOUT = (
+        "Number of literals: 15\n"
+        "Constructing lookup tables:\n"
+        "Post filtering unreachable actions: \n"
+        "(total-cost) has a finite lower bound: [0.000,inf]\n"
+        "Action 2 - (execute_tau_3) is uninteresting once we have fact (marked sink)\n"
+        "Initial heuristic = 1.000, admissible cost estimate 0.000\n"
+        "(G);;;; Solution Found\n"
+        "; States evaluated: 2\n"
+        "; Cost: 0.000\n"
+        "; Time 0.06\n"
+        "0.000: (execute_tau_3)  [0.001]\n"
+    )
+
+    def test_all_tau_plan_is_classified_as_solved(self, tmp_path):
+        (tmp_path / "domain.pddl").write_text("(define (domain d))", encoding="utf-8")
+        (tmp_path / "problem.pddl").write_text("(define (problem p) (:domain d))", encoding="utf-8")
+
+        proc = _make_popen_mock(returncode=0, stdout=self._REAL_ALL_TAU_STDOUT, stderr="")
+        with patch.object(optic_module, "is_available", return_value=True), \
+             patch("subprocess.Popen", return_value=proc):
+            result = optic_module.run(tmp_path)
+
+        assert result["solvability"] == "solved"
+        assert result["success"] is True
+
+    def test_all_tau_plan_text_is_saved(self, tmp_path):
+        (tmp_path / "domain.pddl").write_text("(define (domain d))", encoding="utf-8")
+        (tmp_path / "problem.pddl").write_text("(define (problem p) (:domain d))", encoding="utf-8")
+
+        proc = _make_popen_mock(returncode=0, stdout=self._REAL_ALL_TAU_STDOUT, stderr="")
+        with patch.object(optic_module, "is_available", return_value=True), \
+             patch("subprocess.Popen", return_value=proc):
+            result = optic_module.run(tmp_path)
+
+        assert result["plan_text"] is not None
+        assert (tmp_path / "plan.txt").exists()
+
+    def test_all_tau_plan_has_zero_visible_actions(self, tmp_path):
+        (tmp_path / "domain.pddl").write_text("(define (domain d))", encoding="utf-8")
+        (tmp_path / "problem.pddl").write_text("(define (problem p) (:domain d))", encoding="utf-8")
+
+        proc = _make_popen_mock(returncode=0, stdout=self._REAL_ALL_TAU_STDOUT, stderr="")
+        with patch.object(optic_module, "is_available", return_value=True), \
+             patch("subprocess.Popen", return_value=proc):
+            result = optic_module.run(tmp_path)
+
+        assert result["plan_actions"] == []
+
+
 class TestClassify:
     def test_solved_when_plan_exists(self):
         assert optic_module._classify(0, True, "", "") == "solved"

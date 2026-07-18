@@ -193,7 +193,16 @@ def run(
     plan_lines, plan_actions, makespan = _parse_optic_stdout(out)
     plan_text: Optional[str] = None
 
-    if plan_actions:
+    # Gate on plan_lines (every line OPTIC reported as part of the solution),
+    # not plan_actions (only the non-tau ones) -- a plan can legitimately
+    # consist entirely of tau/silent transitions (e.g. a structural shortcut
+    # straight to the goal), which is still a valid solution even though
+    # plan_actions ends up empty. Gating on plan_actions instead
+    # misclassified those as "no solution found" (see
+    # results/55/failures/55_C18710_Q1.json: OPTIC's own stdout says
+    # ";;;; Solution Found" with a one-line all-tau plan, yet the query was
+    # recorded as unsolvable_resource).
+    if plan_lines:
         plan_text = "\n".join(plan_lines)
         (pddl_dir / "plan.txt").write_text(plan_text, encoding="utf-8")
         _log(f"Plan saved — {len(plan_actions)} action(s)")

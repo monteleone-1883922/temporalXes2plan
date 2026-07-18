@@ -4,13 +4,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from encoding.pddl_model import PDDLAction, PDDLDomain, PDDLDurativeAction
 from evaluation.query_builder import (
+    DEFAULT_COST_WEIGHT,
     QuerySpec,
     _goal_from_final_event,
     _remaining_budget,
     build_q1,
     build_q2,
     build_q3,
+    compute_cost_scale_factor,
     compute_min_time_to_end,
     is_q3_reachable,
 )
@@ -129,6 +132,66 @@ def _serialized_with_unreachable_effect(attr: str, value: str) -> Dict[str, Any]
         "attribute_catalog": _CATALOG_MIXED,
         "metadata": {"start_place": "p_start", "end_place": "p_end"},
     }
+
+
+# ---------------------------------------------------------------------------
+# compute_cost_scale_factor
+# ---------------------------------------------------------------------------
+
+class TestComputeCostScaleFactor:
+    def test_ratio_of_mean_duration_to_mean_cost(self):
+        domain = PDDLDomain(
+            name="d",
+            actions=[
+                PDDLDurativeAction(name="a", duration_min=0.0, duration_max=100.0,
+                                    base_cost=1.0, additional_cost=0.0),
+                PDDLDurativeAction(name="b", duration_min=0.0, duration_max=300.0,
+                                    base_cost=1.0, additional_cost=1.0),
+            ],
+        )
+        # mean(duration) = (100+300)/2 = 200, mean(cost) = (1.0 + 2.0)/2 = 1.5
+        assert compute_cost_scale_factor(domain) == pytest.approx(200 / 1.5)
+
+    def test_tau_actions_contribute_cost_but_no_duration(self):
+        domain = PDDLDomain(
+            name="d",
+            actions=[
+                PDDLDurativeAction(name="a", duration_min=0.0, duration_max=100.0,
+                                    base_cost=1.0, additional_cost=0.0),
+                PDDLAction(name="tau_1", base_cost=1.0, additional_cost=0.0),
+            ],
+        )
+        # mean(duration) is over durative actions only (100.0); mean(cost)
+        # is over ALL actions, including the instantaneous tau ((1+1)/2=1).
+        assert compute_cost_scale_factor(domain) == pytest.approx(100.0 / 1.0)
+
+    def test_default_when_no_durative_actions(self):
+        domain = PDDLDomain(
+            name="d",
+            actions=[PDDLAction(name="tau_1", base_cost=1.0, additional_cost=0.0)],
+        )
+        assert compute_cost_scale_factor(domain) == DEFAULT_COST_WEIGHT
+
+    def test_default_when_no_actions(self):
+        domain = PDDLDomain(name="d", actions=[])
+        assert compute_cost_scale_factor(domain) == DEFAULT_COST_WEIGHT
+
+    def test_custom_default_is_honored(self):
+        domain = PDDLDomain(name="d", actions=[])
+        assert compute_cost_scale_factor(domain, default=0.42) == 0.42
+
+    def test_default_when_mean_duration_is_zero(self):
+        # base_cost=0.0 is falsy -- (base_cost or 1.0) still yields 1.0, same
+        # convention as PDDLBaseAction._total_cost() -- so the only realistic
+        # way to hit the non-positive guard is an all-zero duration_max.
+        domain = PDDLDomain(
+            name="d",
+            actions=[
+                PDDLDurativeAction(name="a", duration_min=0.0, duration_max=0.0,
+                                    base_cost=1.0, additional_cost=0.0),
+            ],
+        )
+        assert compute_cost_scale_factor(domain) == DEFAULT_COST_WEIGHT
 
 
 # ---------------------------------------------------------------------------

@@ -19,10 +19,13 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
+from encoding.pddl_model import PDDLDomain, PDDLDurativeAction
 from encoding.prepared_input import PLACE_NODE_TYPES, TRANS_NODE_TYPES
 from evaluation.trace_sampler import PrefixSample, _remaining_budget
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_COST_WEIGHT = 0.001
 
 
 @dataclass
@@ -50,6 +53,51 @@ class QuerySpec:
     cost_weight: float
     require_completion: bool
     deadline: Optional[float]
+
+
+# ---------------------------------------------------------------------------
+# Cost/time scale factor
+# ---------------------------------------------------------------------------
+
+def compute_cost_scale_factor(domain: PDDLDomain, default: float = DEFAULT_COST_WEIGHT) -> float:
+    """Derive a per-domain cost_weight so total-cost is commensurate with total-time
+    in the "minimize_weighted" metric: (total-time) + cost_weight * (total-cost).
+
+    With a fixed, small cost_weight (e.g. the 0.001-0.05 range used as a
+    default), total-cost -- which mainly carries the -log(p) XOR-branch
+    probability penalty (see transition_action_builder.py) -- is drowned out
+    by total-time whenever durations are on the order of seconds-to-days
+    (routinely true for real logs), making the probabilistic signal
+    essentially inert as a search tiebreaker. Scaling cost_weight to
+    mean(duration) / mean(cost) puts the two terms on the same order of
+    magnitude for THIS domain's own duration scale, instead of using one
+    global constant across logs whose durations can differ by orders of
+    magnitude (see the "Job" transition analysis in log 2: durations from
+    seconds to ~270 days within a single domain).
+
+    Args:
+        domain: The built PDDLDomain (before problem-specific queries).
+        default: Fallback cost_weight when the domain has no durative
+            actions (nothing to compute a duration scale from) or when
+            every action's cost is exactly zero.
+
+    Returns:
+        mean(duration_max over durative actions) / mean(total cost over all
+        actions), or `default` if that ratio cannot be computed.
+    """
+    durations = [a.duration_max for a in domain.actions if isinstance(a, PDDLDurativeAction)]
+
+
+    if not durations:
+        return default
+
+    mean_duration = sum(durations) / len(durations)
+
+
+    if mean_duration <= 0:
+        return default
+
+    return mean_duration
 
 
 # ---------------------------------------------------------------------------

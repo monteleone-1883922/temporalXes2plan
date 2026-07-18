@@ -77,6 +77,12 @@ class LogResult:
             AnalysisConfig for this log instead of the fixed CLI config.
         search_summary: {"n_trials", "best_score", "best_trial_number"} when
             used_optimizer is True, else None.
+        cost_weight: The cost_weight (α) actually used to build this log's
+            Q1/Q2/Q3 queries -- since query_builder.compute_cost_scale_factor
+            derives it per-log from the domain's own duration/cost scale,
+            this can differ from EvalConfig.cost_weight (the fallback used
+            when a per-log factor can't be computed). None when the pipeline
+            failed before a domain was built.
     """
 
     log_id: str
@@ -90,6 +96,7 @@ class LogResult:
     queries: List[QueryResult] = field(default_factory=list)
     used_optimizer: bool = False
     search_summary: Optional[Dict[str, Any]] = None
+    cost_weight: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +171,7 @@ def _log_result_to_dict(lr: LogResult) -> Dict[str, Any]:
         "queries": [_query_result_to_dict(q) for q in lr.queries],
         "used_optimizer": lr.used_optimizer,
         "search_summary": lr.search_summary,
+        "cost_weight": lr.cost_weight,
     }
 
 
