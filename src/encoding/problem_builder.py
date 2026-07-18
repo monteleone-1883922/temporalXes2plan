@@ -139,12 +139,12 @@ class ProblemBuilder:
         # attribute not already initialised by init_effects.  This makes the
         # initial PDDL state well-formed: every attribute starts as "unwritten"
         # rather than simply absent, which matches the log_preprocessor semantics.
-        for attr, entry in catalog.items():
-            attr_type = entry.get("type") if isinstance(entry, dict) else getattr(entry, "attribute_type", None)
-            if attr_type not in ("categorical", "numerical"):
-                continue
-            if attr in already_set:
-                continue
+        #for attr, entry in catalog.items():
+            #attr_type = entry.get("type") if isinstance(entry, dict) else getattr(entry, "attribute_type", None)
+            #if attr_type not in ("categorical", "numerical"):
+            #    continue
+            #if attr in already_set:
+            #    continue
             #none_val = utils.sanitize_value(attr, "none")
             #atoms.append(PDDLEffect.set_attr_is(attr, none_val).to_pddl())
 
