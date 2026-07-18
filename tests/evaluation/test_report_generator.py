@@ -260,6 +260,90 @@ class TestTimeoutAndOutOfMemoryStats:
 
 
 # ---------------------------------------------------------------------------
+# "Unsatisfiable by construction" — Q2 (compute_min_time_to_end precheck,
+# solvability="skipped_unsatisfiable_by_construction") and Q3
+# (is_q3_reachable precheck, solvability="skipped_unreachable", pre-existing
+# and NOT renamed — see claude_plans/time_aware_evaluation_plan.md §7.1).
+# Same metric name in the report for both, but each with its OWN
+# query-type-specific denominator (unlike pct_timeout/pct_out_of_memory,
+# which are deliberately cross-query-type).
+# ---------------------------------------------------------------------------
+
+class TestUnsatisfiableByConstructionStats:
+    def _log_with_queries(self, *type_solvability_pairs, log_id="log_1"):
+        queries = [
+            _make_query_result(query_id=f"q{i}", query_type=qtype, solvability=s)
+            for i, (qtype, s) in enumerate(type_solvability_pairs)
+        ]
+        return _make_log_result(log_id=log_id, queries=queries)
+
+    def test_top_level_keys_present(self, tmp_path):
+        result = self._log_with_queries(("Q2", "solved"), ("Q3", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert "pct_unsatisfiable_by_construction_mean" in data["q2"]
+        assert "pct_unsatisfiable_by_construction_mean" in data["q3"]
+
+    def test_q2_ratio_computed_from_its_own_solvability_string(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q2", "solved"),
+            ("Q2", "skipped_unsatisfiable_by_construction"),
+            ("Q2", "skipped_unsatisfiable_by_construction"),
+            ("Q2", "unsolvable_structural"),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["pct_unsatisfiable_by_construction_mean"] == pytest.approx(0.5)
+        assert data["per_log"][0]["q2_pct_unsatisfiable_by_construction"] == pytest.approx(0.5)
+
+    def test_q3_ratio_computed_from_its_own_solvability_string(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q3", "skipped_unreachable"),
+            ("Q3", "solved"),
+            ("Q3", "solved"),
+            ("Q3", "solved"),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["pct_unsatisfiable_by_construction_mean"] == pytest.approx(0.25)
+        assert data["per_log"][0]["q3_pct_unsatisfiable_by_construction"] == pytest.approx(0.25)
+
+    def test_q2_and_q3_ratios_are_independent(self, tmp_path):
+        # Q2's own skip string appearing in Q2 queries must not leak into
+        # Q3's ratio (and vice versa) -- each is computed only from its own
+        # query_type's subset, verified here with different ratios for each.
+        result = self._log_with_queries(
+            ("Q2", "skipped_unsatisfiable_by_construction"),
+            ("Q2", "solved"),
+            ("Q3", "skipped_unreachable"),
+            ("Q3", "skipped_unreachable"),
+            ("Q3", "solved"),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["pct_unsatisfiable_by_construction_mean"] == pytest.approx(0.5)
+        assert data["q3"]["pct_unsatisfiable_by_construction_mean"] == pytest.approx(2 / 3)
+
+    def test_zero_when_no_skips_present(self, tmp_path):
+        result = self._log_with_queries(("Q2", "solved"), ("Q3", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["pct_unsatisfiable_by_construction_mean"] == 0.0
+        assert data["q3"]["pct_unsatisfiable_by_construction_mean"] == 0.0
+
+    def test_none_when_query_type_absent(self, tmp_path):
+        # Log has only Q1 queries -- Q2/Q3 ratios must be None, not 0.0 or
+        # an error (mirrors _solvability_ratio's own empty-list contract).
+        result = self._log_with_queries(("Q1", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["pct_unsatisfiable_by_construction_mean"] is None
+        assert data["q3"]["pct_unsatisfiable_by_construction_mean"] is None
+        assert data["per_log"][0]["q2_pct_unsatisfiable_by_construction"] is None
+        assert data["per_log"][0]["q3_pct_unsatisfiable_by_construction"] is None
+
+
+# ---------------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------------
 

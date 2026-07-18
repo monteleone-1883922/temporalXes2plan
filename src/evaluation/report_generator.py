@@ -228,6 +228,19 @@ def _build_summary(
     solved_given_not_replayable: Dict[str, List[float]] = {"Q1": [], "Q2": [], "Q3": []}
     not_solved_given_replayable: Dict[str, List[float]] = {"Q1": [], "Q2": [], "Q3": []}
 
+    # "Unsatisfiable by construction" — Q2 and Q3 each have their own
+    # structural precheck before ever invoking the planner (Q2: minimum
+    # modeled time vs. deadline, query_builder.compute_min_time_to_end;
+    # Q3: goal reachability, query_builder.is_q3_reachable, pre-existing).
+    # Two distinct solvability strings (never unified/renamed — see
+    # claude_plans/time_aware_evaluation_plan.md §7.1), same metric name in
+    # the report, each with its own denominator (that query type's own
+    # queries for the log, same convention as solved_ratio_mean — unlike
+    # pct_timeout/pct_out_of_memory below, which are deliberately
+    # cross-query-type for a different reason, see the comment there).
+    q2_unsat_by_construction_ratios: List[float] = []
+    q3_unsat_by_construction_ratios: List[float] = []
+
     per_log_rows: List[Dict[str, Any]] = []
 
     for lr in all_results:
@@ -247,6 +260,13 @@ def _build_summary(
         if log_oom_ratio is not None:
             out_of_memory_ratios.append(log_oom_ratio)
 
+        log_q2_unsat_ratio = _solvability_ratio(log_q2, "skipped_unsatisfiable_by_construction")
+        log_q3_unsat_ratio = _solvability_ratio(log_q3, "skipped_unreachable")
+        if log_q2_unsat_ratio is not None:
+            q2_unsat_by_construction_ratios.append(log_q2_unsat_ratio)
+        if log_q3_unsat_ratio is not None:
+            q3_unsat_by_construction_ratios.append(log_q3_unsat_ratio)
+
         replay_stats = _replayability_stats(lr.queries)
         per_log_rows.append({
             "log_id": lr.log_id,
@@ -258,6 +278,8 @@ def _build_summary(
             "q2_within_budget_ratio": q2_wr,
             "pct_timeout": log_timeout_ratio,
             "pct_out_of_memory": log_oom_ratio,
+            "q2_pct_unsatisfiable_by_construction": log_q2_unsat_ratio,
+            "q3_pct_unsatisfiable_by_construction": log_q3_unsat_ratio,
             "n_traces_replayable": replay_stats["n_traces_replayable"],
             "n_traces_not_replayable": replay_stats["n_traces_not_replayable"],
             "pct_traces_replayable": replay_stats["pct_traces_replayable"],
@@ -371,6 +393,7 @@ def _build_summary(
             "alignment_std": _std(q2_alignment),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q2"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q2"]),
+            "pct_unsatisfiable_by_construction_mean": _mean(q2_unsat_by_construction_ratios),
         },
         "q3": {
             "solved_ratio_mean": _mean(q3_solved),
@@ -384,6 +407,7 @@ def _build_summary(
             "alignment_std": _std(q3_alignment),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q3"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q3"]),
+            "pct_unsatisfiable_by_construction_mean": _mean(q3_unsat_by_construction_ratios),
         },
         "per_log": per_log_rows,
     }
