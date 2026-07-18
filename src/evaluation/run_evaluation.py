@@ -349,7 +349,7 @@ def evaluate_log(
                 # attribute assignment to match — irrelevant to Q1's goal).
                 q1_spec = build_q1(prefix, cfg.cost_weight)
                 query_results.append(
-                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_end, duration_scale_factor=domain.duration_scale_factor)
+                    _run_query(log_id, trace_id, q1_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
                 )
 
                 # Q2 — completion within remaining time budget. Same reasoning
@@ -357,7 +357,7 @@ def evaluate_log(
                 q2_spec = build_q2(prefix, cfg.cost_weight)
                 if q2_spec is not None:
                     query_results.append(
-                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_end, duration_scale_factor=domain.duration_scale_factor)
+                        _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.is_replayable, duration_scale_factor=domain.duration_scale_factor)
                     )
 
                 # Q3 — completion within budget + attribute constraints
