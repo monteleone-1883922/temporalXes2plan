@@ -34,7 +34,7 @@ BEHAVIOR_DIFFICULTY = {
 
 
 
-def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None = None, max_variants: int | None = None) -> pd.DataFrame:
+def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None = None, max_variants: int | None = None, has_lifecycle_start: bool = False) -> pd.DataFrame:
     output_dir = Path(__file__).parent / "data"
     output_dir.mkdir(parents=True, exist_ok=True)  # crea la cartella se non esiste, non da errore se esiste già
 
@@ -61,6 +61,7 @@ def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None 
         candidates = candidates.loc[candidates["Number of Variants"] < max_variants]
 
     candidates = candidates.loc[candidates["Dataset Format"] == ".xes"]
+
     candidates["has_lifecycle_start"] = None
 
     for idx, row in candidates.iterrows():
@@ -74,7 +75,8 @@ def filter_logs(filter_difficulty: int | None = None, log_ids: list[int] | None 
             # If download or parsing fails, mark as None and log the error
             print(f"[WARN] Could not process row {row["Event Log ID"]}: {e}")
             candidates.at[idx, "has_lifecycle_start"] = None
-    candidates = candidates.loc[candidates["has_lifecycle_start"] == True]
+    if has_lifecycle_start:
+        candidates = candidates.loc[candidates["has_lifecycle_start"] == True]
 
     manageable = candidates.sort_values(["behavior_rank", "Number of Activities"])
     manageable = manageable.drop_duplicates(subset="Event Log Name")
@@ -120,6 +122,8 @@ if __name__ == "__main__":
                     help="Event Log IDs to include, e.g. --log-ids LOG_001 LOG_005")
     parser.add_argument("--max-variants", dest="max_variants", type=int, default=None,
                     help="Keep only logs with Number of Variants < max_variants")
+    parser.add_argument("--has-lifecycle-start", dest="has_lifecycle_start", type=bool, default=False,
+                    help="Keep only logs with has_lifecycle_start")
     args = parser.parse_args(sys.argv[1:])
-    result = filter_logs(filter_difficulty=args.difficulty, log_ids=args.log_ids, max_variants=args.max_variants)
+    result = filter_logs(filter_difficulty=args.difficulty, log_ids=args.log_ids, max_variants=args.max_variants, has_lifecycle_start=args.has_lifecycle_start)
     result.to_csv(Path(__file__).parent / "data" / "filtered_logs_shortlist.csv", index=False)
