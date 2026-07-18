@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from encoding.prepared_input import PLACE_NODE_TYPES, TRANS_NODE_TYPES
 from evaluation.trace_sampler import PrefixSample
 
 logger = logging.getLogger(__name__)
@@ -248,40 +249,106 @@ def _goal_from_final_event(
 def is_q3_reachable(
     goal_sop: List[List[Dict[str, Any]]],
     serialized: Dict[str, Any],
+    init_places: List[str],
+    init_effects: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
-    """Check whether at least one goal clause is structurally reachable.
+    """Check whether the goal is reachable from the current token marking.
 
-    For each AND-clause, every attribute condition (attr = value) is checked
-    against the transitions in serialized["transitions"]: at least one
-    transition must have an effect that can produce (attr = value). The clause
-    is reachable only if all its conditions are covered. Returns True if at
-    least one clause is fully covered.
+    Performs a real graph visit of serialized["graph"] (nodes/edges), starting
+    from init_places (the marking after replaying the trace prefix so far):
+    a transition fires once every one of its input places has been reached,
+    at which point its output places are added to the reachable set and every
+    (attribute, value) pair from its effect_groups' assignments is recorded as
+    a reachable effect. This repeats to a fixpoint (monotone — a reached place
+    or attribute value stays reached). Attribute values already fixed by the
+    replayed prefix (init_effects) are seeded into the same set up front —
+    they are already true in the PDDL initial state (see
+    run_evaluation.py's build_problem(init_effects=...) call), so a clause
+    condition they satisfy must not be treated as unreachable just because
+    the transition that set them no longer fires forward from init_places
+    (e.g. it consumed a place, like the process's start place, that isn't
+    part of the current marking anymore).
 
-    This is a structural pre-check only — it does not verify token-flow
-    reachability. It is used to populate ground_truth_reachable in result
-    records; planning always runs regardless.
+    The goal is reachable if, once no more transitions can fire: (1) the
+    model's end place was reached, and (2) at least one AND-clause of
+    goal_sop has every (attribute, value) condition covered either by
+    init_effects or by an effect from a transition that actually fired
+    during the visit (not merely present somewhere in the net).
+
+    This is still a structural over-approximation, not full token-flow model
+    checking: it ignores exact token counts, firing order, and AND-join
+    simultaneity, and just asks "can this place/effect ever be reached at
+    all". It is used to populate ground_truth_reachable in result records,
+    and (in run_evaluation.py) to skip invoking the planner on Q3 queries
+    whose goal is structurally impossible from the current marking.
 
     Args:
         goal_sop: Goal in SOP form (list of AND-clauses).
         serialized: current.json dict.
+        init_places: Place names holding a token in the current marking.
+        init_effects: Attribute values already fixed by the replayed prefix
+            (QuerySpec.init_effects / PrefixSample.init_effects) — each a
+            {"attribute": str, "value": str} dict. Treated as already
+            satisfied, same as the PDDL problem's initial state.
 
     Returns:
-        True if at least one AND-clause is fully covered by transition effects.
+        True if the end place is reachable and at least one AND-clause is
+        fully covered by init_effects plus effects of transitions reachable
+        from init_places.
     """
+    nodes: List[Dict[str, Any]] = serialized.get("graph", {}).get("nodes", [])
+    edges: List[Dict[str, Any]] = serialized.get("graph", {}).get("edges", [])
     transitions: Dict[str, Any] = serialized.get("transitions", {})
 
-    # Build a set of (attr, value) pairs producible by any transition effect.
-    reachable_pairs: set[tuple[str, str]] = set()
-    for t_info in transitions.values():
-        effects: Dict[str, Any] = t_info.get("effects", {})
-        for attr, value_map in effects.items():
-            for value_str in value_map:
-                reachable_pairs.add((attr, value_str))
+    node_by_id: Dict[str, Dict[str, Any]] = {n["id"]: n for n in nodes}
+
+    in_places: Dict[str, List[str]] = {}
+    out_places: Dict[str, List[str]] = {}
+    for edge in edges:
+        src = node_by_id.get(edge["source"])
+        tgt = node_by_id.get(edge["target"])
+        if src is None or tgt is None:
+            continue
+        if src["type"] in PLACE_NODE_TYPES and tgt["type"] in TRANS_NODE_TYPES:
+            in_places.setdefault(tgt["id"], []).append(src["id"])
+        elif src["type"] in TRANS_NODE_TYPES and tgt["type"] in PLACE_NODE_TYPES:
+            out_places.setdefault(src["id"], []).append(tgt["id"])
+
+    transition_ids = [n["id"] for n in nodes if n["type"] in TRANS_NODE_TYPES]
+
+    reachable_places: set[str] = set(init_places)
+    fired: set[str] = set()
+    matched_pairs: set[tuple[str, str]] = {
+        (e["attribute"], e["value"]) for e in (init_effects or [])
+    }
+
+    changed = True
+    while changed:
+        changed = False
+        for tid in transition_ids:
+            if tid in fired:
+                continue
+            inputs = in_places.get(tid, [])
+            if inputs and not all(p in reachable_places for p in inputs):
+                continue
+            fired.add(tid)
+            changed = True
+            reachable_places.update(out_places.get(tid, []))
+            t_info = transitions.get(node_by_id[tid].get("label"))
+            if t_info:
+                for group in t_info.get("effect_groups", []):
+                    for assignment in group.get("assignments", []):
+                        matched_pairs.add((assignment["attribute"], assignment["value"]))
+
+    end_place = serialized.get("metadata", {}).get("end_place")
+    end_reachable = end_place is None or end_place in reachable_places
+    if not end_reachable:
+        return False
 
     for clause in goal_sop:
         if not clause:
             continue
-        if all((c["attribute"], c["value"]) in reachable_pairs for c in clause):
+        if all((c["attribute"], c["value"]) in matched_pairs for c in clause):
             return True
 
     return False
