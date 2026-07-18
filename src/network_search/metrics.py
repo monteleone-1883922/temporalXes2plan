@@ -88,9 +88,11 @@ def compute_xor_score(
                     value = _bounded_penalty(weights.w_fb_xor)
                 else:
                     # action == "dt" (or, defensively, any other action while
-                    # status is "active"): neutral — see module docstring's
-                    # first caveat for the DT-guard-missing edge case this
-                    # simplification does not distinguish.
+                    # status is "active"): fully rewarded (1.0, the best
+                    # possible score) — the routing decision is explained by
+                    # a mined guard, not merely "not eliminated" — see module
+                    # docstring's first caveat for the DT-guard-missing edge
+                    # case this simplification does not distinguish.
                     value = 1
             elif branch.status == "fallback":
                 value = _bounded_penalty(weights.w_fb_xor)

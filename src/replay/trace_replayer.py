@@ -573,9 +573,21 @@ class TraceReplayer:
             # Reset every outer-loop attempt: blocked_step/blocked_reason are
             # only ever set by a genuine guard failure inside the inner loop
             # below (not by a target mismatch, which is handled separately
-            # right after the inner loop exits normally).
+            # right after the inner loop exits normally). memo_hit_reason is
+            # its own third category (see the dead_states branch below) --
+            # deliberately kept OUT of blocked_step so a memoized skip can
+            # never itself flip the final classification from "matches_target
+            # False" to a fabricated "reached_end False": dead_states makes
+            # no distinction between a subtree that was doomed by a genuine
+            # guard failure deeper down versus one doomed only by an eventual
+            # attribute mismatch, so treating every memo hit as at most a
+            # mismatch keeps reached_end's meaning ("blocked_step really was
+            # set on this exact attempt") intact and never claims a
+            # structural block that this particular attempt didn't itself
+            # observe.
             blocked_step: Optional[int] = None
             blocked_reason: Optional[str] = None
+            memo_hit_reason: Optional[str] = None
 
             while step_idx < len(firing_steps):
                 step = firing_steps[step_idx]
@@ -616,7 +628,6 @@ class TraceReplayer:
                 # we just need to move to the NEXT untried one.
                 top = choice_points[-1] if choice_points else None
                 resuming = top is not None and top.step_index == step_idx
-                memo_block_reason: Optional[str] = None
 
                 if resuming:
                     xor_ok = True  # state_before is unchanged from first visit — already checked
@@ -630,18 +641,17 @@ class TraceReplayer:
                     # continuation from here matches the target. Since
                     # firing_steps is fixed, this branch would derive the
                     # identical candidate list and rediscover the identical
-                    # failure; skip straight to a block instead of redoing
-                    # that work (this is what stops an ambiguous transition
-                    # firing N times in a process loop from costing
-                    # work proportional to (branching factor)^N).
-                    xor_ok = False
-                    candidates = []
-                    chosen = None
-                    is_blocked = True
-                    memo_block_reason = (
+                    # failure; skip straight to backtracking instead of
+                    # redoing that work (this is what stops an ambiguous
+                    # transition firing N times in a process loop from
+                    # costing work proportional to (branching factor)^N).
+                    # Deliberately NOT routed through is_blocked/blocked_step
+                    # -- see this loop's memo_hit_reason comment above.
+                    memo_hit_reason = (
                         f"'{step.activity_name}' at this attribute state was already proven "
                         f"unreachable-to-target by an earlier backtrack attempt (memoized)."
                     )
+                    break
                 else:
                     # First time reaching this step (this attempt): evaluate
                     # the XOR guard (axis B) against the current attribute
@@ -680,7 +690,7 @@ class TraceReplayer:
                     # step_idx or appending to steps) and let the outer loop
                     # decide whether a backtrack can rescue this attempt.
                     blocked_step = step_idx
-                    blocked_reason = memo_block_reason or self._block_reason(step.activity_name, xor_ok, effect_groups)
+                    blocked_reason = self._block_reason(step.activity_name, xor_ok, effect_groups)
                     break
 
                 # chosen is None exactly when effect_groups was empty (no
@@ -697,18 +707,28 @@ class TraceReplayer:
                     duration_total += step.duration_seconds or 0.0
                 step_idx += 1
 
-            # The inner loop above stopped for exactly one of two reasons:
+            # The inner loop above stopped for exactly one of three reasons:
             #  (1) blocked_step is not None -- a genuine guard failure.
-            #  (2) blocked_step is None -- step_idx reached len(firing_steps),
-            #      i.e. the walk is structurally complete. That is a real
-            #      SUCCESS only if there is no target to match, or the final
-            #      attributes happen to equal it exactly; otherwise it is
-            #      treated below exactly like case (1) -- something to try
-            #      backtracking away from (mismatch_reason is only ever used
-            #      if we end up returning without finding a further
-            #      alternative, see the "restored_idx is None" branch below).
+            #  (2) memo_hit_reason is not None -- landed on a (step_idx,
+            #      state) pair already proven dead; treated the same as (3)
+            #      below (something to backtrack away from) but never as (1),
+            #      since dead_states does not track whether the original
+            #      exhaustion was itself a genuine block or "just" a
+            #      mismatch further down -- see this loop's memo_hit_reason
+            #      comment above.
+            #  (3) blocked_step is None and memo_hit_reason is None --
+            #      step_idx reached len(firing_steps), i.e. the walk is
+            #      structurally complete. That is a real SUCCESS only if
+            #      there is no target to match, or the final attributes
+            #      happen to equal it exactly; otherwise it is treated below
+            #      like (1)/(2) -- something to try backtracking away from
+            #      (mismatch_reason is only ever used if we end up returning
+            #      without finding a further alternative, see the
+            #      "restored_idx is None" branch below).
             mismatch_reason: Optional[str] = None
-            if blocked_step is None:
+            if memo_hit_reason is not None:
+                mismatch_reason = memo_hit_reason
+            elif blocked_step is None:
                 if target_final_attributes is None or all(
                         pddl_state.get(attr) == val for attr, val in target_final_attributes.items()
                 ):
