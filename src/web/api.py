@@ -385,14 +385,19 @@ def _pipeline_thread(
         allowed_kwargs = {
             "domain_name", "discovery_algorithm",
             "coverage_percentage", "use_durative", "use_costs", "use_activity_classifier",
-            "search",
+            "search", "search_n_trials",
         }
         kwargs = {k: v for k, v in pipeline_params.items() if k in allowed_kwargs}
         if "search" in kwargs:
             kwargs["search"] = bool(kwargs["search"])
+        if "search_n_trials" in kwargs:
+            kwargs["search_n_trials"] = int(kwargs["search_n_trials"])
 
         if kwargs.get("search"):
-            tracker.append_log(job_id, "Searching best configuration (30 trials)...")
+            tracker.append_log(
+                job_id,
+                f"Searching best configuration ({kwargs.get('search_n_trials', 30)} trials)...",
+            )
         tracker.append_log(job_id, f"Parsing {Path(log_path).name}...")
         pddl_path = Pipeline().run(
             log_path=log_path,

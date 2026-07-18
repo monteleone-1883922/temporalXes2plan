@@ -25,13 +25,18 @@ document.getElementById("setup-form").addEventListener("submit", async (e) => {
     await startPipeline();
 });
 
-// Optimizer toggle: hide the form fields the optimizer tunes when enabled.
+// Optimizer toggle: hide the form fields the optimizer tunes when enabled,
+// and show optimizer-only fields (e.g. search_n_trials) only when enabled.
 const OPTIMIZER_TUNABLE_SELECTOR = '[data-optimizer-tunable="true"]';
+const OPTIMIZER_ONLY_SELECTOR = '[data-optimizer-only="true"]';
 
 function applyOptimizerMode() {
     const enabled = document.getElementById("p-use-optimizer").checked;
     document.querySelectorAll(OPTIMIZER_TUNABLE_SELECTOR).forEach((el) => {
         el.classList.toggle("js-hidden", enabled);
+    });
+    document.querySelectorAll(OPTIMIZER_ONLY_SELECTOR).forEach((el) => {
+        el.classList.toggle("js-hidden", !enabled);
     });
 }
 
@@ -118,6 +123,9 @@ function buildRequestBody(form) {
         use_activity_classifier: form["use_activity_classifier"].checked,
         search: useOptimizer,
     };
+    if (useOptimizer) {
+        pipeline.search_n_trials = parseInt(form["search_n_trials"].value, 10);
+    }
 
     const config = {};
     const numericFields = [

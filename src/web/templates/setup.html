@@ -169,10 +169,16 @@
                             Use automatic optimizer to find the best configuration
                         </label>
                         <span class="field-hint">
-                            Runs an automated search (30 trials) over the parameters below marked as
+                            Runs an automated search over the parameters below marked as
                             tunable and picks the best-performing combination. Fields not covered by
                             the search stay editable below in either mode.
                         </span>
+                    </div>
+                    <div class="form-field js-hidden" id="p-search-n-trials-wrapper" data-optimizer-only="true">
+                        <label for="p-search-n-trials">search_n_trials</label>
+                        <input type="number" id="p-search-n-trials" name="search_n_trials"
+                               value="30" min="1" step="1">
+                        <span class="field-hint">Number of candidate configurations the optimizer evaluates</span>
                     </div>
                 </div>
             </div>
