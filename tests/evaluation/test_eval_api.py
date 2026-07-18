@@ -196,7 +196,7 @@ class TestRunPlanner:
     def test_maps_successful_result(self):
         raw = MagicMock()
         raw.success = True
-        raw.plan_actions = ["execute_a", "mark_places_from_a"]
+        raw.plan_actions = ["execute_a", "execute_b"]
         raw.metrics = {"cost": 3.0, "duration": 1.5}
         raw.solvability = "solved"
         raw.message = None
@@ -209,7 +209,7 @@ class TestRunPlanner:
 
         assert isinstance(result, PlanResult)
         assert result.success is True
-        assert result.plan_steps == ["execute_a", "mark_places_from_a"]
+        assert result.plan_steps == ["execute_a", "execute_b"]
         assert result.cost == pytest.approx(3.0)
         assert result.duration_s == pytest.approx(1.5)
         assert result.solvability == "solved"

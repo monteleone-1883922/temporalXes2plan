@@ -268,7 +268,7 @@ def _parse_optic_stdout(stdout: str):
         if m:
             plan_lines.append(line.strip())
             name = _normalise(m.group(2).split()[0])
-            if name and not name.startswith("tau_") and not name.startswith("mark_places_from_"):
+            if name and not name.startswith("tau_"):
                 actions.append(name)
             end_time = float(m.group(1)) + float(m.group(3))
             makespan = end_time if makespan is None else max(makespan, end_time)

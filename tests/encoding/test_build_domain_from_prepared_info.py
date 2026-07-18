@@ -119,22 +119,87 @@ class TestSimpleTransition:
         action = next(a for a in domain.actions if a.name == "execute_activity_a")
         assert PDDLCondition.marked("p_start") in action.preconditions
 
-    def test_effects_unmark_input_and_mark_self(self):
+    def test_effects_unmark_input_and_mark_output(self):
+        # Standard Petri net semantics: only places are ever marked, never
+        # the transition itself -- one action does the whole firing (see
+        # claude_plans/standard_petri_net_marking_plan.md).
         domain = build_domain_from_prepared_info(_simple_prepared())
         action = next(a for a in domain.actions if a.name == "execute_activity_a")
         assert PDDLEffect.unmarking("p_start") in action.effects
-        assert PDDLEffect.marking("activity_a") in action.effects
+        assert PDDLEffect.marking("p_end") in action.effects
+        assert PDDLEffect.marking("activity_a") not in action.effects
 
-    def test_place_marking_action_generated(self):
+    def test_no_separate_place_marking_action(self):
+        # mark_places_from_* no longer exists -- execute_activity_a is the
+        # only action for this transition, and it marks p_end directly.
         domain = build_domain_from_prepared_info(_simple_prepared())
-        marking = next(a for a in domain.actions if a.name == "mark_places_from_activity_a")
-        assert PDDLCondition.marked("activity_a") in marking.preconditions
-        assert PDDLEffect.marking("p_end") in marking.effects
+        names = {a.name for a in domain.actions}
+        assert names == {"execute_activity_a"}
 
     def test_no_durative_actions_by_default(self):
         domain = build_domain_from_prepared_info(_simple_prepared())
         assert not any(isinstance(a, PDDLDurativeAction) for a in domain.actions)
         assert ":durative-actions" not in domain.requirements
+
+
+def _and_split_prepared(**transition_kwargs) -> PreparedDomainInput:
+    """p_start -> activity_a -> {p_out1, p_out2} (AND-split: one durative
+    transition with two structural output places)."""
+    nodes = [
+        GraphNode(id="p_start", type="place", label="p_start"),
+        GraphNode(id="t_a", type="transition", label="activity_a"),
+        GraphNode(id="p_out1", type="place", label="p_out1"),
+        GraphNode(id="p_out2", type="place", label="p_out2"),
+    ]
+    edges = [
+        GraphEdge(source="p_start", target="t_a"),
+        GraphEdge(source="t_a", target="p_out1"),
+        GraphEdge(source="t_a", target="p_out2"),
+    ]
+    defaults = dict(
+        activity_name="activity_a",
+        input_places=["p_start"],
+        preconditions=[],
+        effect_groups=[],
+        cost=0.0,
+        duration=ActionDurationStats(effective_min=5.0, effective_max=10.0, source="external"),
+    )
+    defaults.update(transition_kwargs)
+    transition = PreparedTransition(**defaults)
+    return PreparedDomainInput(
+        nodes=nodes,
+        edges=edges,
+        transitions={"activity_a": transition},
+        xor_branches={},
+        attribute_catalog={},
+    )
+
+
+class TestAndSplitTransition:
+    """One real Petri net transition firing with multiple structural output
+    places must remain a SINGLE action -- unmarking the input at start and
+    marking every output place at end (standard Petri net semantics, see
+    claude_plans/standard_petri_net_marking_plan.md)."""
+
+    def test_single_action_marks_every_output_place(self):
+        domain = build_domain_from_prepared_info(_and_split_prepared(), use_durative=True)
+        names = {a.name for a in domain.actions}
+        assert names == {"execute_activity_a"}
+
+        action = next(a for a in domain.actions if a.name == "execute_activity_a")
+        assert isinstance(action, PDDLDurativeAction)
+        assert PDDLEffect.unmarking("p_start") in action.effects_at_start
+        assert PDDLEffect.marking("p_out1") in action.effects_at_end
+        assert PDDLEffect.marking("p_out2") in action.effects_at_end
+        assert PDDLEffect.marking("p_start") not in action.effects_at_start
+        assert PDDLEffect.marking("p_start") not in action.effects_at_end
+
+    def test_no_transition_marking_and_no_mark_places_action(self):
+        domain = build_domain_from_prepared_info(_and_split_prepared(), use_durative=True)
+        action = next(a for a in domain.actions if a.name == "execute_activity_a")
+        assert PDDLEffect.marking("activity_a") not in action.effects_at_start
+        assert PDDLEffect.marking("activity_a") not in action.effects_at_end
+        assert not any(a.name.startswith("mark_places_from_") for a in domain.actions)
 
 
 class TestPreconditions:
@@ -427,7 +492,8 @@ class TestTauAction:
         domain = build_domain_from_prepared_info(prepared)
         tau_action = next(a for a in domain.actions if a.name == "execute_tau_0")
         assert PDDLCondition.marked("p_start") in tau_action.preconditions
-        assert PDDLEffect.marking("tau_0") in tau_action.effects
+        assert PDDLEffect.marking("p_end") in tau_action.effects
+        assert PDDLEffect.marking("tau_0") not in tau_action.effects
 
     def test_tau_covered_by_prepared_transition_is_not_duplicated(self):
         """A silent GraphNode whose label is also a PreparedTransition key (XOR-branch
@@ -493,12 +559,14 @@ class TestNegatedAttributes:
 
 class TestTypes:
     def test_always_has_petri_element_hierarchy(self):
+        # Transitions are never PDDL objects (standard Petri net semantics
+        # only ever marks places) -- "transition" is not a declared type.
         domain = build_domain_from_prepared_info(_sequence_prepared())
         type_map = {t.name: t.parent for t in domain.types}
 
         assert "petri_element" in type_map
         assert type_map["place"] == "petri_element"
-        assert type_map["transition"] == "petri_element"
+        assert "transition" not in type_map
 
     def test_categorical_attribute_generates_value_type(self):
         catalog = {
@@ -529,7 +597,7 @@ class TestTypes:
     def test_empty_catalog_only_petri_types(self):
         domain = build_domain_from_prepared_info(_tau_prepared())
         type_names = {t.name for t in domain.types}
-        assert type_names == {"petri_element", "place", "transition"}
+        assert type_names == {"petri_element", "place"}
 
 
 class TestConstants:
@@ -538,16 +606,21 @@ class TestConstants:
         place_consts = {c.name for c in domain.constants if c.type_name == "place"}
         assert place_consts == {"p_start", "p_mid", "p_end"}
 
-    def test_transitions_as_constants(self):
+    def test_transitions_are_not_constants(self):
+        # Standard Petri net semantics: transitions are never markable PDDL
+        # objects, only places are -- see
+        # claude_plans/standard_petri_net_marking_plan.md.
         domain = build_domain_from_prepared_info(_sequence_prepared())
-        trans_consts = {c.name for c in domain.constants if c.type_name == "transition"}
-        assert trans_consts == {"activity_a", "activity_b"}
+        all_names = {c.name for c in domain.constants}
+        assert "activity_a" not in all_names
+        assert "activity_b" not in all_names
+        assert not any(c.type_name == "transition" for c in domain.constants)
 
-    def test_tau_transitions_as_constants(self):
+    def test_tau_transitions_are_not_constants(self):
         domain = build_domain_from_prepared_info(_tau_prepared())
-        trans_consts = {c.name for c in domain.constants if c.type_name == "transition"}
-        assert "tau_0" in trans_consts
-        assert "activity_a" in trans_consts
+        all_names = {c.name for c in domain.constants}
+        assert "tau_0" not in all_names
+        assert "activity_a" not in all_names
 
     def test_categorical_value_objects(self):
         catalog = {
@@ -699,10 +772,12 @@ class TestBuildDomain:
         assert len(domain.actions) > 0
 
     def test_action_count_sequence_net(self):
+        # One action per transition (no more separate mark_places_from_*
+        # actions) -- see claude_plans/standard_petri_net_marking_plan.md.
         domain = build_domain_from_prepared_info(_sequence_prepared())
         mark_actions = [a for a in domain.actions if a.name.startswith("mark_")]
         exec_actions = [a for a in domain.actions if a.name.startswith("execute_")]
-        assert len(mark_actions) == 2
+        assert len(mark_actions) == 0
         assert len(exec_actions) == 2
 
 

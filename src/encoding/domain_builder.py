@@ -221,7 +221,8 @@ def build_domain_with_variant_map(
     for act_name, transition in prepared.transitions.items():
         trans_actions, trans_variant_map = _build_prepared_transition_actions(
             act_name, transition, prepared.attribute_catalog,
-            negated_attributes, use_durative, xor_branch_of.get(act_name), config.lower_bound_prob_actions
+            negated_attributes, use_durative, xor_branch_of.get(act_name), config.lower_bound_prob_actions,
+            out_places_by_label.get(act_name, []),
         )
         actions.extend(trans_actions)
         variant_map.update(trans_variant_map)
@@ -232,11 +233,9 @@ def build_domain_with_variant_map(
     covered = set(prepared.transitions.keys())
     for node in prepared.nodes:
         if node.type == "silent" and node.label and node.label not in covered:
-            tau = _build_prepared_tau_action(node, in_places_by_label)
+            tau = _build_prepared_tau_action(node, in_places_by_label, out_places_by_label)
             if tau:
                 actions.append(tau)
-
-    actions.extend(_build_prepared_place_marking_actions(out_places_by_label))
 
     requirements = [":strips", ":typing"]
     if any(isinstance(a, PDDLDurativeAction) for a in actions):
@@ -267,48 +266,35 @@ def build_domain_with_variant_map(
 
 
 # ------------------------------------------------------------------
-# Phase 5 — Place-marking actions (one per transition)
+# Phase 5 — Silent (tau) transition actions
 # ------------------------------------------------------------------
-
-def _build_prepared_place_marking_actions(
-    out_places_by_label: Dict[str, List[str]]
-) -> List[PDDLAction]:
-    """One action per transition: consumes transition marker, marks ALL output places."""
-    actions: List[PDDLAction] = []
-    for trans_label, out_places in sorted(out_places_by_label.items()):
-        if not out_places:
-            continue
-        effects = [PDDLEffect.unmarking(trans_label)]
-        for p in sorted(out_places):
-            effects.append(PDDLEffect.marking(p))
-        actions.append(PDDLAction(
-            name=f"mark_places_from_{trans_label}",
-            preconditions={PDDLCondition.marked(trans_label)},
-            effects=effects,
-        ))
-    return actions
-
-
-# ------------------------------------------------------------------
-# Phase 6 — Silent (tau) transition actions
-# ------------------------------------------------------------------
+#
+# There used to be a separate "Phase 5" here building one
+# mark_places_from_{transition} action per transition (consuming a
+# transition-as-place marker, produced by execute_*, to propagate tokens
+# onward) -- removed: standard Petri net semantics never marks a
+# transition, only places, so execute_*/the tau action below now unmark
+# their input places and mark their real output places directly, in one
+# single action (see claude_plans/standard_petri_net_marking_plan.md).
 
 def _build_prepared_tau_action(
     node: GraphNode,
     in_places_by_label: Dict[str, List[str]],
+    out_places_by_label: Dict[str, List[str]],
 ) -> Optional[PDDLAction]:
     """Direct place-transfer action for a silent transition: unmark its
-    input places, mark the transition itself (Phase 5 then propagates that
-    marker to its output places)."""
+    input places, mark its real output places -- a single action modeling
+    the whole firing, same as _build_prepared_transition_actions."""
     label = node.label
     if not label:
         return None
 
     in_places = in_places_by_label.get(label, [])
+    out_places = out_places_by_label.get(label, [])
 
     preconds: set = {PDDLCondition.marked(p) for p in in_places}
     effects: List[PDDLEffect] = [PDDLEffect.unmarking(p) for p in in_places]
-    effects.append(PDDLEffect.marking(label))
+    effects.extend(PDDLEffect.marking(p) for p in sorted(out_places))
 
     return PDDLAction(
         name=f"execute_{label}",

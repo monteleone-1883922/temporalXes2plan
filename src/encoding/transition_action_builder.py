@@ -143,13 +143,24 @@ def _build_prepared_transition_actions(
     negated_attributes: Set[str],
     use_durative: bool,
     xor_branches: Optional[List[PreparedXorBranch]] = None,
-    lower_bound_prob_actions: float = 1e-3
+    lower_bound_prob_actions: float = 1e-3,
+    out_places: Optional[List[str]] = None,
 ) -> Tuple[List[PDDLBaseAction], Dict[str, VariantInfo]]:
     """Build every PDDLBaseAction variant for one transition.
 
     Enumerates the Cartesian product of axis A (preconditions) x axis B (XOR
     routing) x axis C (effect-group guards), skipping any combination that is
     internally contradictory, then deduplicates and names the survivors.
+
+    Each surviving variant is a SINGLE PDDL action modeling the whole real
+    Petri net transition firing: unmark input places, mark output places
+    (out_places, the transition's real structural outputs — never a
+    transition-as-place marker; standard Petri net semantics only ever
+    marks places, see claude_plans/standard_petri_net_marking_plan.md) and
+    apply the chosen effect group's attribute assignments, all together.
+    For durative actions the unmark happens at_start and the mark+attribute
+    effects at_end; for instantaneous PDDLAction both halves are one flat
+    effects list.
 
     Returns:
         (variants, variant_map) where variant_map maps each survivor's final
@@ -161,6 +172,7 @@ def _build_prepared_transition_actions(
         docs/trace_replayer_analysis.md §6.3).
     """
     in_places = transition.input_places
+    out_places = out_places or []
 
     # Axis A — OR in preconditions, deduplicated
     prec_clauses: List[List[Guard]] = _dedupe_sop(transition.preconditions) or [[]]
@@ -241,12 +253,12 @@ def _build_prepared_transition_actions(
                     if 0.0 < eff_prob != 1.0:
                         cost += -math.log(max(eff_prob, lower_bound_prob_actions))
 
-                effects: List[PDDLEffect] = [PDDLEffect.unmarking(p) for p in in_places]
-                effects.append(PDDLEffect.marking(act_name))
+                start_effects: List[PDDLEffect] = [PDDLEffect.unmarking(p) for p in in_places]
+                end_effects: List[PDDLEffect] = [PDDLEffect.marking(p) for p in sorted(out_places)]
                 if eff_group is not None:
                     for attr, value in eff_group.assignments:
                         catalog_entry = attribute_catalog[attr]
-                        effects.extend(value_to_pddl_effects(
+                        end_effects.extend(value_to_pddl_effects(
                             attr, value, catalog_entry, negated_attributes,
                         ))
 
@@ -260,14 +272,15 @@ def _build_prepared_transition_actions(
                         duration_min=duration.effective_min,
                         duration_max=duration.effective_max,
                         conditions_at_start=preconds,
-                        effects_at_end=effects,
+                        effects_at_start=start_effects,
+                        effects_at_end=end_effects,
                         base_cost=cost if cost != 0.0 else None,
                     )
                 else:
                     action = PDDLAction(
                         name=f"execute_{act_name}",
                         preconditions=preconds,
-                        effects=effects,
+                        effects=start_effects + end_effects,
                         base_cost=cost if cost != 0.0 else None,
                     )
                 info = VariantInfo(

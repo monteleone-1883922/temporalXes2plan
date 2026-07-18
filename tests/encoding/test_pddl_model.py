@@ -243,11 +243,15 @@ class TestEndToEnd:
         assert "(:action" in text
 
     def test_full_pipeline_with_tau(self):
+        # _tau_prepared(): p_start -> tau_0 -> p_mid -> activity_a -> p_end.
+        # Standard Petri net semantics: execute_tau_0 marks its real output
+        # place (p_mid), never "tau_0" itself.
         domain = build_domain_from_prepared_info(_tau_prepared())
         text = str(domain)
 
         assert "execute_tau_0" in text
-        assert "(marked tau_0)" in text
+        assert "(marked p_mid)" in text
+        assert "(marked tau_0)" not in text
 
     def test_pddl_parentheses_balanced(self):
         domain = build_domain_from_prepared_info(_sequence_prepared())

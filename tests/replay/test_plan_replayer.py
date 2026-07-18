@@ -4,6 +4,11 @@ docs/trace_replayer_analysis.md §2 — supersedes evaluation/plan_validator.py)
 Builds a real PDDLDomain via build_domain_with_variant_map so variant_map is
 exactly what a planner-facing domain would carry, then feeds hand-picked
 variant names as a "plan" (no planner/PDDL solver involved).
+
+One real Petri net transition firing is a SINGLE plan step (standard
+semantics: only places are ever marked, never the transition itself — see
+claude_plans/standard_petri_net_marking_plan.md) — there is no separate
+"mark_places_from_*" step to include in plan_steps.
 """
 from models import AttributeCatalogEntry, Guard
 from encoding.domain_builder import build_domain_with_variant_map
@@ -63,7 +68,7 @@ class TestReplayPlan:
         prepared, variant_map = _prepared_and_variant_map()
         a_variant = _variant_named_for(variant_map, "A", [("flag", "y")])
         b_variant = _variant_named_for(variant_map, "B", [("risk", "high")])
-        plan_steps = [a_variant, "mark_places_from_A", b_variant, "mark_places_from_B"]
+        plan_steps = [a_variant, b_variant]
 
         outcome = replay_plan(
             plan_steps, init_marking={"p_in"}, init_attributes={},
@@ -80,24 +85,7 @@ class TestReplayPlan:
         prepared, variant_map = _prepared_and_variant_map()
         wrong_a = _variant_named_for(variant_map, "A", [("flag", "x")])
         b_variant = _variant_named_for(variant_map, "B", [("risk", "high")])
-        plan_steps = [wrong_a, "mark_places_from_A", b_variant, "mark_places_from_B"]
-
-        outcome = replay_plan(
-            plan_steps, init_marking={"p_in"}, init_attributes={},
-            prepared=prepared, variant_map=variant_map,
-        )
-
-        assert not outcome.is_replayable
-        assert outcome.error_step == 2
-        assert "B" in outcome.error_reason
-        assert outcome.final_attributes == {"flag": "x"}
-
-    def test_missing_token_fails_token_flow_layer(self):
-        prepared, variant_map = _prepared_and_variant_map()
-        a_variant = _variant_named_for(variant_map, "A", [("flag", "y")])
-        b_variant = _variant_named_for(variant_map, "B", [("risk", "high")])
-        # Skip "mark_places_from_A" -> B's input place p_mid never gets marked.
-        plan_steps = [a_variant, b_variant]
+        plan_steps = [wrong_a, b_variant]
 
         outcome = replay_plan(
             plan_steps, init_marking={"p_in"}, init_attributes={},
@@ -106,16 +94,37 @@ class TestReplayPlan:
 
         assert not outcome.is_replayable
         assert outcome.error_step == 1
-        assert "p_mid" in outcome.error_reason
+        assert "B" in outcome.error_reason
+        assert outcome.final_attributes == {"flag": "x"}
 
-    def test_mark_places_from_step_requires_its_own_place_token(self):
+    def test_missing_input_token_fails_token_flow_layer(self):
         prepared, variant_map = _prepared_and_variant_map()
-        a_variant = _variant_named_for(variant_map, "A", [("flag", "y")])
+        b_variant = _variant_named_for(variant_map, "B", [("risk", "high")])
+        # Skip "A" entirely -- B's input place p_mid is never marked.
+        plan_steps = [b_variant]
 
         outcome = replay_plan(
-            ["mark_places_from_A", a_variant], init_marking={"p_in"}, init_attributes={},
+            plan_steps, init_marking={"p_in"}, init_attributes={},
             prepared=prepared, variant_map=variant_map,
         )
 
         assert not outcome.is_replayable
         assert outcome.error_step == 0
+        assert "p_mid" in outcome.error_reason
+
+    def test_firing_the_same_activity_twice_in_a_row_fails_the_second_time(self):
+        # A's own action already unmarks p_in and marks p_mid within a
+        # SINGLE step -- firing A again immediately (without anything
+        # re-marking p_in first) must fail on the second attempt, since
+        # p_in is no longer marked.
+        prepared, variant_map = _prepared_and_variant_map()
+        a_variant = _variant_named_for(variant_map, "A", [("flag", "y")])
+
+        outcome = replay_plan(
+            [a_variant, a_variant], init_marking={"p_in"}, init_attributes={},
+            prepared=prepared, variant_map=variant_map,
+        )
+
+        assert not outcome.is_replayable
+        assert outcome.error_step == 1
+        assert "p_in" in outcome.error_reason

@@ -10,17 +10,22 @@ import core_utils
 from encoding.pddl_model import (
     PDDLConstants, PDDLObject, PDDLPredicate, PDDLPredicates, PDDLType, PDDLTypes,
 )
-from encoding.prepared_input import PreparedDomainInput, TRANS_NODE_TYPES, PLACE_NODE_TYPES
+from encoding.prepared_input import PreparedDomainInput, PLACE_NODE_TYPES
 from models import AttributeCatalogEntry
 
 
 def _prepared_types(attribute_catalog: Dict[str, AttributeCatalogEntry]) -> PDDLTypes:
-    """Build the PDDL type hierarchy: petri_element -> place/transition, plus
-    one value-type per categorical/numerical attribute (e.g. "risk_val")."""
+    """Build the PDDL type hierarchy: petri_element -> place, plus one
+    value-type per categorical/numerical attribute (e.g. "risk_val").
+
+    Transitions are never PDDL objects: standard Petri net semantics only
+    ever marks places (see claude_plans/standard_petri_net_marking_plan.md)
+    -- "petri_element" exists purely so "marked" can stay a single generic
+    predicate rather than one per place-producing context.
+    """
     types = PDDLTypes(items=[
         PDDLType("petri_element"),
         PDDLType("place", parent="petri_element"),
-        PDDLType("transition", parent="petri_element"),
     ])
     for attr_name, entry in sorted(attribute_catalog.items()):
         if entry.attribute_type in ("categorical", "numerical"):
@@ -29,19 +34,15 @@ def _prepared_types(attribute_catalog: Dict[str, AttributeCatalogEntry]) -> PDDL
 
 
 def _prepared_constants(prepared: PreparedDomainInput) -> PDDLConstants:
-    """Build the PDDL constants: one object per place, per transition, and
-    per possible value of each categorical/numerical attribute."""
+    """Build the PDDL constants: one object per place (never per
+    transition -- see _prepared_types), and per possible value of each
+    categorical/numerical attribute."""
     constants = PDDLConstants()
 
     for label in sorted(
         n.label for n in prepared.nodes if n.type in PLACE_NODE_TYPES
     ):
         constants.add(PDDLObject(label, "place"))
-
-    for label in sorted(
-        n.label for n in prepared.nodes if n.type in TRANS_NODE_TYPES and n.label
-    ):
-        constants.add(PDDLObject(label, "transition"))
 
     for attr_name, entry in sorted(prepared.attribute_catalog.items()):
         if entry.attribute_type in ("categorical", "numerical"):
