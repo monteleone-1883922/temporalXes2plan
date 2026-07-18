@@ -91,7 +91,7 @@ def compute_xor_score(
                     # status is "active"): neutral — see module docstring's
                     # first caveat for the DT-guard-missing edge case this
                     # simplification does not distinguish.
-                    value = 0.5
+                    value = 1
             elif branch.status == "fallback":
                 value = _bounded_penalty(weights.w_fb_xor)
             else:
