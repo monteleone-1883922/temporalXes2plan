@@ -374,6 +374,22 @@ def evaluate_log(
                     query_results.append(
                         _run_query(log_id, trace_id, q2_spec, domain_text, api, cfg, serialized, failures_dir, prefix, prepared, variant_map, pddl_dir, is_replayable=prefix.reached_within_time, duration_scale_factor=domain.duration_scale_factor, min_time_to_end_cache=q2_min_time_cache)
                     )
+                else:
+                    query_id = f"{log_id}_{trace_id}_Q2"
+                    logger.warning("[%s] %s Q2 skipped — no timestamp data available for budget computation.", log_id, trace_id)
+                    query_results.append(QueryResult(
+                        query_id=query_id,
+                        query_type="Q2",
+                        trace_id=trace_id,
+                        prefix_ratio=prefix.prefix_ratio,
+                        n_prefix_events=len(prefix.prefix_events),
+                        attempts=0,
+                        solvability="skipped_no_budget",
+                        planner_duration_s=None,
+                        metrics={},
+                        validation=None,
+                        is_replayable=prefix.reached_within_time,
+                    ))
 
                 # Q3 — completion within budget + attribute constraints
                 q3_spec = build_q3(prefix, serialized, cfg.cost_weight)

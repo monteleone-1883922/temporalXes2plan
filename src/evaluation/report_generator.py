@@ -241,6 +241,21 @@ def _build_summary(
     q2_unsat_by_construction_ratios: List[float] = []
     q3_unsat_by_construction_ratios: List[float] = []
 
+    # Q3-only: fraction of queries skipped because the trace's final event
+    # carries no discretized attributes (query_builder.build_q3 returns None
+    # -> solvability="skipped_no_attributes").
+    q3_skipped_no_attributes_ratios: List[float] = []
+
+    # Q2-only: fraction of queries skipped because no timestamp data was
+    # available to compute a time budget (query_builder.build_q2 returns
+    # None -> solvability="skipped_no_budget").
+    q2_skipped_no_budget_ratios: List[float] = []
+
+    # Total (summed across all logs) count of non-replayable traces per
+    # query type -- a raw count, not a per-log ratio, so it's summed rather
+    # than averaged like the *_mean stats above.
+    n_traces_not_replayable_total: Dict[str, int] = {"Q1": 0, "Q2": 0, "Q3": 0}
+
     per_log_rows: List[Dict[str, Any]] = []
 
     for lr in all_results:
@@ -248,9 +263,19 @@ def _build_summary(
         log_q2 = [q for q in lr.queries if q.query_type == "Q2"]
         log_q3 = [q for q in lr.queries if q.query_type == "Q3"]
 
-        q1_sr = _ratio(log_q1, "solved")
+        # solved_ratio_mean is always computed over every test-case trace for
+        # that query type (denominator = len(log_qN)), regardless of whether
+        # the query was ever sent to the planner -- a trace with no query
+        # built at all (e.g. Q2 with no timestamp data, Q3 with no
+        # discretized final-state attributes) or a trace skipped by a
+        # structural precheck (e.g. Q2/Q3 unsatisfiable-by-construction)
+        # both count as a non-"solved" outcome here, exactly like Q1 (which
+        # has no skip path and is always sent to the planner). The specific
+        # reason behind a lower ratio is then explained by the query type's
+        # own pct_*_mean stats below, not hidden by excluding it.
+        q1_sr = _solved_ratio(log_q1)
         q1_wr = _ratio_metric(log_q1, "within_budget")
-        q2_sr = _ratio(log_q2, "solved")
+        q2_sr = _solved_ratio(log_q2)
         q2_wr = _ratio_metric(log_q2, "within_budget")
 
         log_timeout_ratio = _solvability_ratio(lr.queries, "timeout")
@@ -267,6 +292,14 @@ def _build_summary(
         if log_q3_unsat_ratio is not None:
             q3_unsat_by_construction_ratios.append(log_q3_unsat_ratio)
 
+        log_q3_no_attrs_ratio = _solvability_ratio(log_q3, "skipped_no_attributes")
+        if log_q3_no_attrs_ratio is not None:
+            q3_skipped_no_attributes_ratios.append(log_q3_no_attrs_ratio)
+
+        log_q2_no_budget_ratio = _solvability_ratio(log_q2, "skipped_no_budget")
+        if log_q2_no_budget_ratio is not None:
+            q2_skipped_no_budget_ratios.append(log_q2_no_budget_ratio)
+
         replay_stats = _replayability_stats(lr.queries)
         per_log_rows.append({
             "log_id": lr.log_id,
@@ -280,6 +313,8 @@ def _build_summary(
             "pct_out_of_memory": log_oom_ratio,
             "q2_pct_unsatisfiable_by_construction": log_q2_unsat_ratio,
             "q3_pct_unsatisfiable_by_construction": log_q3_unsat_ratio,
+            "q3_pct_skipped_no_attributes": log_q3_no_attrs_ratio,
+            "q2_pct_skipped_no_budget": log_q2_no_budget_ratio,
             "n_traces_replayable": replay_stats["n_traces_replayable"],
             "n_traces_not_replayable": replay_stats["n_traces_not_replayable"],
             "pct_traces_replayable": replay_stats["pct_traces_replayable"],
@@ -289,6 +324,9 @@ def _build_summary(
             "q2_solved_not_replayable": replay_stats["q2_solved_not_replayable"],
             "q3_solved_replayable": replay_stats["q3_solved_replayable"],
             "q3_solved_not_replayable": replay_stats["q3_solved_not_replayable"],
+            "q1_n_traces_not_replayable": replay_stats["q1_n_traces_not_replayable"],
+            "q2_n_traces_not_replayable": replay_stats["q2_n_traces_not_replayable"],
+            "q3_n_traces_not_replayable": replay_stats["q3_n_traces_not_replayable"],
         })
 
         for qtype in ("Q1", "Q2", "Q3"):
@@ -299,6 +337,7 @@ def _build_summary(
             sr = replay_stats[f"{key}_solved_replayable"]
             if sr is not None:
                 not_solved_given_replayable[qtype].append(1 - sr)
+            n_traces_not_replayable_total[qtype] += replay_stats[f"{key}_n_traces_not_replayable"]
 
         # Accumulate for global means.
         if q1_sr is not None:
@@ -337,7 +376,7 @@ def _build_summary(
             if align is not None:
                 q2_alignment.append(align)
 
-        q3_sr = _ratio(log_q3, "solved")
+        q3_sr = _solved_ratio(log_q3)
         if q3_sr is not None:
             q3_solved.append(q3_sr)
         q3_wr = _ratio_metric(log_q3, "within_budget")
@@ -380,6 +419,7 @@ def _build_summary(
             "alignment_std": _std(q1_alignment),
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q1"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q1"]),
+            "n_traces_not_replayable_total": n_traces_not_replayable_total["Q1"],
         },
         "q2": {
             "solved_ratio_mean": _mean(q2_solved),
@@ -394,6 +434,8 @@ def _build_summary(
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q2"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q2"]),
             "pct_unsatisfiable_by_construction_mean": _mean(q2_unsat_by_construction_ratios),
+            "pct_skipped_no_budget_mean": _mean(q2_skipped_no_budget_ratios),
+            "n_traces_not_replayable_total": n_traces_not_replayable_total["Q2"],
         },
         "q3": {
             "solved_ratio_mean": _mean(q3_solved),
@@ -408,6 +450,8 @@ def _build_summary(
             "solved_given_not_replayable_mean": _mean(solved_given_not_replayable["Q3"]),
             "not_solved_given_replayable_mean": _mean(not_solved_given_replayable["Q3"]),
             "pct_unsatisfiable_by_construction_mean": _mean(q3_unsat_by_construction_ratios),
+            "pct_skipped_no_attributes_mean": _mean(q3_skipped_no_attributes_ratios),
+            "n_traces_not_replayable_total": n_traces_not_replayable_total["Q3"],
         },
         "per_log": per_log_rows,
     }
@@ -464,6 +508,18 @@ def _replayability_stats(queries: List[QueryResult]) -> Dict[str, Any]:
         stats[f"{key}_solved_replayable"] = _solved_ratio(rep_q)
         stats[f"{key}_solved_not_replayable"] = _solved_ratio(not_q)
 
+        # Trace counts specific to this query type -- is_replayable is
+        # query-type-aware (Q1/Q2/Q3 each have their own replayability
+        # semantics), so this must be recomputed per type rather than reused
+        # from the combined trace_replayable map above.
+        type_trace_replayable: Dict[str, bool] = {}
+        for q in qtype_queries:
+            if q.trace_id not in type_trace_replayable:
+                type_trace_replayable[q.trace_id] = q.is_replayable
+        stats[f"{key}_n_traces_not_replayable"] = sum(
+            1 for v in type_trace_replayable.values() if not v
+        )
+
     return stats
 
 
@@ -489,14 +545,6 @@ def _solvability_ratio(queries: List[QueryResult], value: str) -> Optional[float
     if not queries:
         return None
     return sum(1 for q in queries if q.solvability == value) / len(queries)
-
-
-def _ratio(queries: List[QueryResult], bool_key: str) -> Optional[float]:
-    """Compute the fraction of queries where metrics[bool_key] is True."""
-    vals = [q.metrics.get(bool_key) for q in queries if q.metrics.get(bool_key) is not None]
-    if not vals:
-        return None
-    return sum(1 for v in vals if v) / len(vals)
 
 
 def _ratio_metric(queries: List[QueryResult], metric_key: str) -> Optional[float]:

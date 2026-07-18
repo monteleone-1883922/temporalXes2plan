@@ -9,6 +9,7 @@ from evaluation.report_generator import (
     LogResult,
     QueryResult,
     _atomic_write_json,
+    _build_summary,
     write_log_result,
     write_log_summary,
 )
@@ -29,6 +30,7 @@ def _make_query_result(
     planner_duration_s=2.5,
     metrics=None,
     validation=None,
+    is_replayable=True,
 ) -> QueryResult:
     return QueryResult(
         query_id=query_id,
@@ -41,6 +43,7 @@ def _make_query_result(
         planner_duration_s=planner_duration_s,
         metrics=metrics or {"solved": True, "plan_time_s": 10.0, "weighted_objective": 10.01},
         validation=validation,
+        is_replayable=is_replayable,
     )
 
 
@@ -341,6 +344,274 @@ class TestUnsatisfiableByConstructionStats:
         assert data["q3"]["pct_unsatisfiable_by_construction_mean"] is None
         assert data["per_log"][0]["q2_pct_unsatisfiable_by_construction"] is None
         assert data["per_log"][0]["q3_pct_unsatisfiable_by_construction"] is None
+
+
+class TestConstructionSkipsCountAsFailures:
+    """solved_ratio_mean must always be computed over every test-case trace
+    for a query type (denominator = all queries of that type for the log),
+    no matter why a given trace didn't reach the planner -- a structural
+    precheck skip (Q2: "skipped_unsatisfiable_by_construction", Q3:
+    "skipped_unreachable") or a trace for which the query was never even
+    built (Q2: "skipped_no_budget", Q3: "skipped_no_attributes") must all
+    count as a non-"solved" outcome, exactly like Q1 (which has no skip path
+    at all). The reason for the resulting lower solved ratio is then
+    explained by the query type's own pct_*_mean stats, not hidden by
+    excluding it from the denominator."""
+
+    def _log_with_queries(self, *type_solvability_solved, log_id="log_1"):
+        # Builds QueryResult directly (not via _make_query_result) so a truly
+        # empty metrics dict for skipped queries survives -- `metrics or
+        # {...default...}` in _make_query_result would otherwise treat an
+        # empty dict as falsy and silently substitute its non-empty default.
+        queries = [
+            QueryResult(
+                query_id=f"q{i}", query_type=qtype, trace_id=f"case_{i}",
+                prefix_ratio=0.5, n_prefix_events=5, attempts=(0 if solved is None else 1),
+                solvability=solvability, planner_duration_s=None,
+                metrics=({} if solved is None else {"solved": solved}),
+                validation=None,
+            )
+            for i, (qtype, solvability, solved) in enumerate(type_solvability_solved)
+        ]
+        return _make_log_result(log_id=log_id, queries=queries)
+
+    def test_q3_construction_skips_lower_the_solved_ratio(self, tmp_path):
+        # Mirrors log 55's shape: 4 solved, 1 skipped_unreachable -- must be
+        # 4/5 = 0.8, not 4/4 = 1.0 (which is what excluding the skip gives).
+        result = self._log_with_queries(
+            ("Q3", "solved", True),
+            ("Q3", "solved", True),
+            ("Q3", "solved", True),
+            ("Q3", "solved", True),
+            ("Q3", "skipped_unreachable", None),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["solved_ratio_mean"] == pytest.approx(0.8)
+
+    def test_q2_construction_skips_lower_the_solved_ratio(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q2", "solved", True),
+            ("Q2", "skipped_unsatisfiable_by_construction", None),
+            ("Q2", "skipped_unsatisfiable_by_construction", None),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["solved_ratio_mean"] == pytest.approx(1 / 3)
+        assert data["per_log"][0]["q2_solved_ratio"] == pytest.approx(1 / 3)
+
+    def test_data_availability_skips_also_count_as_failures(self, tmp_path):
+        # skipped_no_attributes (Q3) and skipped_no_budget (Q2) are a
+        # data-availability gap rather than a proven-unsolvable-by-
+        # construction trace, but the denominator must still cover every
+        # trace -- so these also count as a non-"solved" outcome.
+        result = self._log_with_queries(
+            ("Q3", "solved", True),
+            ("Q3", "skipped_no_attributes", None),
+            ("Q2", "solved", True),
+            ("Q2", "skipped_no_budget", None),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["solved_ratio_mean"] == pytest.approx(0.5)
+        assert data["q2"]["solved_ratio_mean"] == pytest.approx(0.5)
+
+    def test_q1_unaffected_no_construction_skip_category(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q1", "solved", True),
+            ("Q1", "unsolvable_resource", False),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q1"]["solved_ratio_mean"] == pytest.approx(0.5)
+
+    def test_all_construction_skipped_gives_zero_not_none(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q3", "skipped_unreachable", None),
+            ("Q3", "skipped_unreachable", None),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["solved_ratio_mean"] == 0.0
+
+
+class TestQ2SkippedNoBudgetStats:
+    """Q2-only skip reason (no timestamp data to compute a time budget) --
+    like skipped_no_attributes for Q3, tracked separately so the effect on
+    Q2's solved_ratio_mean is explained rather than hidden."""
+
+    def _log_with_queries(self, *type_solvability_pairs, log_id="log_1"):
+        queries = [
+            _make_query_result(query_id=f"q{i}", query_type=qtype, solvability=s)
+            for i, (qtype, s) in enumerate(type_solvability_pairs)
+        ]
+        return _make_log_result(log_id=log_id, queries=queries)
+
+    def test_top_level_key_present(self, tmp_path):
+        result = self._log_with_queries(("Q2", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert "pct_skipped_no_budget_mean" in data["q2"]
+
+    def test_ratio_computed_from_its_own_solvability_string(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q2", "solved"),
+            ("Q2", "skipped_no_budget"),
+            ("Q2", "skipped_no_budget"),
+            ("Q2", "unsolvable_structural"),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["pct_skipped_no_budget_mean"] == pytest.approx(0.5)
+        assert data["per_log"][0]["q2_pct_skipped_no_budget"] == pytest.approx(0.5)
+
+    def test_independent_from_unsatisfiable_by_construction(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q2", "skipped_no_budget"),
+            ("Q2", "skipped_unsatisfiable_by_construction"),
+            ("Q2", "solved"),
+            ("Q2", "solved"),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["pct_skipped_no_budget_mean"] == pytest.approx(0.25)
+        assert data["q2"]["pct_unsatisfiable_by_construction_mean"] == pytest.approx(0.25)
+
+    def test_none_when_no_q2_queries(self, tmp_path):
+        result = self._log_with_queries(("Q1", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q2"]["pct_skipped_no_budget_mean"] is None
+        assert data["per_log"][0]["q2_pct_skipped_no_budget"] is None
+
+
+class TestQ3SkippedNoAttributesStats:
+    """Q3-only skip reason (final event has no discretized attributes) --
+    like skipped_unreachable, this must be visible separately from
+    solved_ratio_mean so the denominator effect on Q3's apparent solved
+    ratio (vs. Q1, which never skips) isn't hidden."""
+
+    def _log_with_queries(self, *type_solvability_pairs, log_id="log_1"):
+        queries = [
+            _make_query_result(query_id=f"q{i}", query_type=qtype, solvability=s)
+            for i, (qtype, s) in enumerate(type_solvability_pairs)
+        ]
+        return _make_log_result(log_id=log_id, queries=queries)
+
+    def test_top_level_key_present(self, tmp_path):
+        result = self._log_with_queries(("Q3", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert "pct_skipped_no_attributes_mean" in data["q3"]
+
+    def test_ratio_computed_from_its_own_solvability_string(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q3", "solved"),
+            ("Q3", "skipped_no_attributes"),
+            ("Q3", "skipped_no_attributes"),
+            ("Q3", "unsolvable_structural"),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["pct_skipped_no_attributes_mean"] == pytest.approx(0.5)
+        assert data["per_log"][0]["q3_pct_skipped_no_attributes"] == pytest.approx(0.5)
+
+    def test_independent_from_skipped_unreachable(self, tmp_path):
+        # Both skip reasons can coexist in the same log -- their ratios must
+        # not be conflated.
+        result = self._log_with_queries(
+            ("Q3", "skipped_no_attributes"),
+            ("Q3", "skipped_unreachable"),
+            ("Q3", "solved"),
+            ("Q3", "solved"),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["pct_skipped_no_attributes_mean"] == pytest.approx(0.25)
+        assert data["q3"]["pct_unsatisfiable_by_construction_mean"] == pytest.approx(0.25)
+
+    def test_zero_when_no_skips_present(self, tmp_path):
+        result = self._log_with_queries(("Q3", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["pct_skipped_no_attributes_mean"] == 0.0
+
+    def test_none_when_no_q3_queries(self, tmp_path):
+        result = self._log_with_queries(("Q1", "solved"))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q3"]["pct_skipped_no_attributes_mean"] is None
+        assert data["per_log"][0]["q3_pct_skipped_no_attributes"] is None
+
+
+class TestNotReplayableTraceCounts:
+    """Per-query-type count of non-replayable traces -- is_replayable is
+    query-type-aware (each of Q1/Q2/Q3 has its own replayability semantics),
+    so the count must be computed per type, not shared across types."""
+
+    def _log_with_queries(self, *type_trace_replayable, log_id="log_1"):
+        queries = [
+            _make_query_result(
+                query_id=f"q{i}", query_type=qtype, trace_id=trace_id, is_replayable=rep,
+            )
+            for i, (qtype, trace_id, rep) in enumerate(type_trace_replayable)
+        ]
+        return _make_log_result(log_id=log_id, queries=queries)
+
+    def test_per_log_count_for_each_query_type(self, tmp_path):
+        result = self._log_with_queries(
+            ("Q1", "case_1", True),
+            ("Q1", "case_2", False),
+            ("Q2", "case_1", False),
+            ("Q2", "case_2", False),
+            ("Q3", "case_1", True),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        row = data["per_log"][0]
+        assert row["q1_n_traces_not_replayable"] == 1
+        assert row["q2_n_traces_not_replayable"] == 2
+        assert row["q3_n_traces_not_replayable"] == 0
+
+    def test_counts_unique_traces_not_queries(self, tmp_path):
+        # Two Q1 queries (different prefix ratios) for the same trace must
+        # count as ONE not-replayable trace, not two.
+        result = self._log_with_queries(
+            ("Q1", "case_1", False),
+            ("Q1", "case_1", False),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["per_log"][0]["q1_n_traces_not_replayable"] == 1
+
+    def test_query_types_are_independent(self, tmp_path):
+        # Same trace_id, replayable for Q1 but not for Q2 -- reflects that
+        # is_replayable is query-type-specific, not a trace-level property.
+        result = self._log_with_queries(
+            ("Q1", "case_1", True),
+            ("Q2", "case_1", False),
+        )
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["per_log"][0]["q1_n_traces_not_replayable"] == 0
+        assert data["per_log"][0]["q2_n_traces_not_replayable"] == 1
+
+    def test_aggregate_total_sums_across_logs(self):
+        log_1 = self._log_with_queries(
+            ("Q1", "case_1", False), ("Q1", "case_2", False), log_id="log_1",
+        )
+        log_2 = self._log_with_queries(
+            ("Q1", "case_1", False), log_id="log_2",
+        )
+        summary = _build_summary([log_1, log_2], cost_weight=0.001)
+        assert summary["q1"]["n_traces_not_replayable_total"] == 3
+
+    def test_zero_when_all_replayable(self, tmp_path):
+        result = self._log_with_queries(("Q1", "case_1", True), ("Q2", "case_1", True))
+        dest = write_log_summary(result, tmp_path)
+        data = json.loads(dest.read_text())
+        assert data["q1"]["n_traces_not_replayable_total"] == 0
+        assert data["q2"]["n_traces_not_replayable_total"] == 0
 
 
 # ---------------------------------------------------------------------------

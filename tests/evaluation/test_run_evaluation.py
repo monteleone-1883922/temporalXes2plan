@@ -406,6 +406,21 @@ class TestEvaluateLogSuccess:
         assert len(q3_records) == 1
         assert q3_records[0].solvability == "skipped_no_attributes"
 
+    def test_q2_skipped_produces_skipped_record(self, tmp_path):
+        # build_q2 returns None (no timestamp data) via _patched_evaluate_log's
+        # default mock -- must still produce a QueryResult (like Q3's
+        # skipped_no_attributes) so solved_ratio_mean's denominator always
+        # covers every test-case trace, not just the ones a query was built for.
+        api = _make_mock_api()
+        cfg = _make_cfg(tmp_path)
+
+        with _patched_evaluate_log(api=api, cfg=cfg, tmp_path=tmp_path, n_test=1):
+            lr = evaluate_log("log_1", "Test", tmp_path / "log.xes", "xes", tmp_path, api, cfg)
+
+        q2_records = [q for q in lr.queries if q.query_type == "Q2"]
+        assert len(q2_records) == 1
+        assert q2_records[0].solvability == "skipped_no_budget"
+
 
 # ---------------------------------------------------------------------------
 # _run_query — deadline must be divided by duration_scale_factor before
