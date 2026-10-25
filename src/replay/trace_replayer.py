@@ -118,18 +118,20 @@ class EvaluationReplayOutcome:
     single failing step, so error_step stays None while error_reason still
     describes the mismatch.
 
-    max_modeled_duration_seconds is a separate, independent quantity from
-    accumulated_duration_seconds/within_deadline above: it sums each fired
-    (non-tau) transition's *domain-declared* effective_max duration bound
-    (PreparedTransition.duration.effective_max) over the tail
-    (cut -> end), not the real observed inter-event gaps. It depends only
+    min_modeled_duration_seconds / max_modeled_duration_seconds are
+    separate, independent quantities from
+    accumulated_duration_seconds/within_deadline above: they sum each fired
+    (non-tau) transition's *domain-declared* effective_min / effective_max
+    duration bound (PreparedTransition.duration) over the tail
+    (cut -> end), not the real observed inter-event gaps. They depend only
     on WHICH transitions fired — fixed by Phase 1, independent of which
-    effect group Phase 2 ends up choosing for any of them — so it is
+    effect group Phase 2 ends up choosing for any of them — so they are
     always computed directly from firing_steps, with no dependency on
-    _walk's backtracking outcome (see trace_sampler.PrefixSample's
-    reached_within_time, which compares this sum against the trace's real
-    remaining duration as a sufficient condition for "reachable within the
-    time the log actually took").
+    _walk's backtracking outcome. The min sum is the one that decides
+    temporal feasibility (OPTIC picks each ?duration within
+    [effective_min, effective_max], see _sum_modeled_min_duration and
+    trace_sampler.PrefixSample.reached_within_time); the max sum is the
+    worst case, kept for reporting.
     """
     reached_end: bool
     matches_expected_final_state: bool
@@ -143,6 +145,7 @@ class EvaluationReplayOutcome:
     expected_final_attributes: Dict[str, str]
     accumulated_duration_seconds: Optional[float]
     within_deadline: Optional[bool]
+    min_modeled_duration_seconds: float
     max_modeled_duration_seconds: float
     warnings: List[str]
 
@@ -295,12 +298,14 @@ def _collapse_no_impact(
     return result
 
 
-def _sum_modeled_max_duration(
+def _sum_modeled_duration(
     firing_steps: List[FiringStep],
     transitions: Dict[str, PreparedTransition],
+    bound: str,
 ) -> float:
-    """Sum of effective_max (domain-declared upper duration bound) over
-    every non-tau firing in firing_steps.
+    """Sum of one domain-declared duration bound (bound="min" ->
+    effective_min, bound="max" -> effective_max) over every non-tau firing
+    in firing_steps.
 
     Tau firings contribute 0 -- no PDDL duration is ever modeled for them
     (domain_builder's tau actions are plain, non-durative PDDLAction).
@@ -314,14 +319,45 @@ def _sum_modeled_max_duration(
     property of the transition itself. Safe to call directly on a resolved
     firing_steps list, with no dependency on _walk/backtracking.
     """
+    if bound not in ("min", "max"):
+        raise ValueError(f"bound must be 'min' or 'max', got {bound!r}")
     total = 0.0
     for step in firing_steps:
         if step.is_tau:
             continue
         transition = transitions.get(step.activity_name)
         if transition is not None and transition.duration is not None:
-            total += transition.duration.effective_max
+            if bound == "min":
+                total += transition.duration.effective_min
+            else:
+                total += transition.duration.effective_max
     return total
+
+
+def _sum_modeled_min_duration(
+    firing_steps: List[FiringStep],
+    transitions: Dict[str, PreparedTransition],
+) -> float:
+    """Sum of effective_min over every non-tau firing (see
+    _sum_modeled_duration). This is the quantity that decides temporal
+    feasibility: each PDDL durative action declares
+    (>= ?duration effective_min) (<= ?duration effective_max), and OPTIC
+    treats ?duration as a variable of its Simple Temporal Network, so a
+    sequence of firings fits a deadline iff SOME admissible assignment of
+    durations does -- i.e. iff the sum of the minimums fits.
+    """
+    return _sum_modeled_duration(firing_steps, transitions, "min")
+
+
+def _sum_modeled_max_duration(
+    firing_steps: List[FiringStep],
+    transitions: Dict[str, PreparedTransition],
+) -> float:
+    """Sum of effective_max over every non-tau firing (see
+    _sum_modeled_duration) -- the worst-case total, reported alongside
+    _sum_modeled_min_duration but not used to decide feasibility.
+    """
+    return _sum_modeled_duration(firing_steps, transitions, "max")
 
 
 class TraceReplayer:
@@ -446,9 +482,12 @@ class TraceReplayer:
         split_attributes = raw_attributes_at[cut_idx]
         expected_final_attributes = raw_attributes_at[-1]
 
-        # Independent of _walk/backtracking (see _sum_modeled_max_duration's
+        # Independent of _walk/backtracking (see _sum_modeled_duration's
         # docstring) -- computed directly from the resolved tail, regardless
         # of whether the walk below ends up reaching the end or blocking.
+        min_modeled_duration_seconds = _sum_modeled_min_duration(
+            firing_steps[cut_idx:], self.prepared.transitions,
+        )
         max_modeled_duration_seconds = _sum_modeled_max_duration(
             firing_steps[cut_idx:], self.prepared.transitions,
         )
@@ -492,6 +531,7 @@ class TraceReplayer:
             expected_final_attributes=expected_final_attributes,
             accumulated_duration_seconds=result.accumulated_duration_seconds,
             within_deadline=within_deadline,
+            min_modeled_duration_seconds=min_modeled_duration_seconds,
             max_modeled_duration_seconds=max_modeled_duration_seconds,
             warnings=warnings,
         )

@@ -55,6 +55,7 @@ def _make_outcome(
     reached_end=True,
     matches_expected_final_state=True,
     warnings=None,
+    min_modeled_duration_seconds=0.0,
     max_modeled_duration_seconds=0.0,
 ) -> EvaluationReplayOutcome:
     return EvaluationReplayOutcome(
@@ -70,6 +71,7 @@ def _make_outcome(
         expected_final_attributes=expected_final_attributes or {},
         accumulated_duration_seconds=None,
         within_deadline=None,
+        min_modeled_duration_seconds=min_modeled_duration_seconds,
         max_modeled_duration_seconds=max_modeled_duration_seconds,
         warnings=warnings or [],
     )
@@ -216,12 +218,18 @@ class TestIsReplayable:
 # ---------------------------------------------------------------------------
 
 class TestReachedWithinTime:
+    """reached_within_time follows OPTIC's semantics: each durative action's
+    ?duration is free in [effective_min, effective_max], so the real
+    continuation fits the budget iff the sum of the MINIMUMS fits.
+    reached_within_time_worst_case is the same check on the maximums,
+    reported but never used as Q2's ground truth."""
+
     def _actual_budget(self, trace, seed) -> float:
         """Discover the real budget sample_prefix computes for this
         trace/seed (same trick as TestPrefixRatioBounds -- derive the
         expectation from a real call instead of hand-deriving the seeded
         RNG's prefix count)."""
-        replayer = _make_replayer(_make_outcome(max_modeled_duration_seconds=0.0))
+        replayer = _make_replayer(_make_outcome())
         result = sample_prefix(trace, replayer, seed=seed)
         assert result is not None
         assert result.full_duration_s is not None and result.prefix_duration_s is not None
@@ -230,55 +238,76 @@ class TestReachedWithinTime:
     def test_true_when_duration_well_within_budget(self):
         trace = _make_trace(10, with_timestamps=True)
         replayer = _make_replayer(_make_outcome(
-            reached_end=True, max_modeled_duration_seconds=0.0,
+            reached_end=True, min_modeled_duration_seconds=0.0, max_modeled_duration_seconds=0.0,
         ))
         result = sample_prefix(trace, replayer, seed=0)
         assert result is not None
         assert result.reached_within_time is True
+        assert result.reached_within_time_worst_case is True
 
     def test_true_at_exact_boundary(self):
         trace = _make_trace(10, with_timestamps=True)
         budget = self._actual_budget(trace, seed=0)
         replayer = _make_replayer(_make_outcome(
-            reached_end=True, max_modeled_duration_seconds=budget,
+            reached_end=True, min_modeled_duration_seconds=budget, max_modeled_duration_seconds=budget,
         ))
         result = sample_prefix(trace, replayer, seed=0)
         assert result is not None
         assert result.reached_within_time is True
 
-    def test_false_when_duration_exceeds_budget(self):
+    def test_true_when_min_fits_even_if_max_exceeds_budget(self):
+        # The bug this guards against: min <= budget < max must be
+        # feasible -- OPTIC finds a plan by choosing durations near the
+        # minimum (verified on a toy domain: [1,5] + [2,4] with deadline 6).
         trace = _make_trace(10, with_timestamps=True)
         budget = self._actual_budget(trace, seed=0)
         replayer = _make_replayer(_make_outcome(
-            reached_end=True, max_modeled_duration_seconds=budget + 1.0,
+            reached_end=True,
+            min_modeled_duration_seconds=budget / 2,
+            max_modeled_duration_seconds=budget * 2,
+        ))
+        result = sample_prefix(trace, replayer, seed=0)
+        assert result is not None
+        assert result.reached_within_time is True
+        assert result.reached_within_time_worst_case is False
+
+    def test_false_when_min_exceeds_budget(self):
+        trace = _make_trace(10, with_timestamps=True)
+        budget = self._actual_budget(trace, seed=0)
+        replayer = _make_replayer(_make_outcome(
+            reached_end=True,
+            min_modeled_duration_seconds=budget + 1.0,
+            max_modeled_duration_seconds=budget + 2.0,
         ))
         result = sample_prefix(trace, replayer, seed=0)
         assert result is not None
         assert result.reached_within_time is False
+        assert result.reached_within_time_worst_case is False
 
     def test_false_when_not_reached_end_even_if_duration_fits(self):
         trace = _make_trace(10, with_timestamps=True)
-        replayer = _make_replayer(_make_outcome(
-            reached_end=False, max_modeled_duration_seconds=0.0,
-        ))
+        replayer = _make_replayer(_make_outcome(reached_end=False))
         result = sample_prefix(trace, replayer, seed=0)
         assert result is not None
         assert result.reached_within_time is False
+        assert result.reached_within_time_worst_case is False
 
     def test_false_when_no_timestamps(self):
         trace = _make_trace(10, with_timestamps=False)
-        replayer = _make_replayer(_make_outcome(
-            reached_end=True, max_modeled_duration_seconds=0.0,
-        ))
+        replayer = _make_replayer(_make_outcome(reached_end=True))
         result = sample_prefix(trace, replayer, seed=0)
         assert result is not None
         assert result.reached_within_time is False
+        assert result.reached_within_time_worst_case is False
 
-    def test_max_modeled_duration_s_passthrough_from_outcome(self):
+    def test_modeled_durations_passthrough_from_outcome(self):
         trace = _make_trace(10, with_timestamps=True)
-        replayer = _make_replayer(_make_outcome(max_modeled_duration_seconds=42.5))
+        replayer = _make_replayer(_make_outcome(
+            min_modeled_duration_seconds=12.5, max_modeled_duration_seconds=42.5,
+        ))
         result = sample_prefix(trace, replayer, seed=0)
         assert result is not None
+        assert result.min_modeled_duration_s == 12.5
         assert result.max_modeled_duration_s == 42.5
 
 

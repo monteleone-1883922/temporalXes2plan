@@ -44,6 +44,12 @@ class QueryResult:
         planner_duration_s: Wall-clock time of the last planner call, in seconds.
         metrics: Dict produced by q*_metrics().
         validation: Dict produced by ValidationReport (or None if plan not found).
+        min_modeled_duration_s / max_modeled_duration_s: Sum of the
+            domain's effective_min / effective_max over the transitions fired
+            by the trace's real continuation (PrefixSample of this query).
+        reached_within_time_worst_case: The continuation fits the remaining
+            time even with every duration at its max — reporting only; Q2's
+            ground truth uses the min (see PrefixSample.reached_within_time).
     """
 
     query_id: str
@@ -57,6 +63,9 @@ class QueryResult:
     metrics: Dict[str, Any]
     validation: Optional[Dict[str, Any]]
     is_replayable: bool = True
+    min_modeled_duration_s: Optional[float] = None
+    max_modeled_duration_s: Optional[float] = None
+    reached_within_time_worst_case: Optional[bool] = None
 
 
 @dataclass
@@ -188,6 +197,9 @@ def _query_result_to_dict(qr: QueryResult) -> Dict[str, Any]:
         "metrics": qr.metrics,
         "validation": qr.validation,
         "is_replayable": qr.is_replayable,
+        "min_modeled_duration_s": qr.min_modeled_duration_s,
+        "max_modeled_duration_s": qr.max_modeled_duration_s,
+        "reached_within_time_worst_case": qr.reached_within_time_worst_case,
     }
 
 

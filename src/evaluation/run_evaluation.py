@@ -365,6 +365,7 @@ def evaluate_log(
                     continue
 
                 pddl_dir = log_out_dir / "pddl"
+                first_query_of_prefix = len(query_results)
 
                 # Q1 — process completion, no deadline. Goal has no attribute
                 # conditions, so ground truth is reached_end only (not the
@@ -377,11 +378,12 @@ def evaluate_log(
 
                 # Q2 — completion within remaining time budget. Ground truth
                 # is reached_within_time: reached_end AND the sum of the
-                # domain's declared max duration bound over the actually
-                # fired transitions still fits within the trace's real
-                # remaining time — see
+                # domain's declared MIN duration bound over the actually
+                # fired transitions fits within the trace's real remaining
+                # time (OPTIC picks each ?duration in [min, max], so the
+                # deadline is feasible iff the minimums fit) — see
                 # trace_sampler.PrefixSample.reached_within_time /
-                # replay.trace_replayer.EvaluationReplayOutcome.max_modeled_duration_seconds.
+                # replay.trace_replayer.EvaluationReplayOutcome.min_modeled_duration_seconds.
                 q2_spec = build_q2(prefix, effective_cost_weight)
                 if q2_spec is not None:
                     query_results.append(
@@ -426,6 +428,11 @@ def evaluate_log(
                         validation=None,
                         is_replayable=prefix.is_replayable,
                     ))
+
+                for qr in query_results[first_query_of_prefix:]:
+                    qr.min_modeled_duration_s = prefix.min_modeled_duration_s
+                    qr.max_modeled_duration_s = prefix.max_modeled_duration_s
+                    qr.reached_within_time_worst_case = prefix.reached_within_time_worst_case
 
             logger.info("[%s] Done — %d queries.", log_id, len(query_results))
             return LogResult(
@@ -626,6 +633,9 @@ def _load_log_result(data: Dict[str, Any]) -> LogResult:
             metrics=q["metrics"],
             validation=q["validation"],
             is_replayable=q.get("is_replayable", True),
+            min_modeled_duration_s=q.get("min_modeled_duration_s"),
+            max_modeled_duration_s=q.get("max_modeled_duration_s"),
+            reached_within_time_worst_case=q.get("reached_within_time_worst_case"),
         )
         for q in data.get("queries", [])
     ]

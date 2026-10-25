@@ -6,11 +6,18 @@ Phase 1 (replay._log_alignment) runs actual pm4py conformance checking, so
 these are closer to integration tests than the mocked-pm4py style used in
 tests/parsing/test_petri_net_log_builder.py.
 """
+import pytest
+
 from tests.helpers import make_event, make_trace
 
 from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup, PreparedTransition
 from models import ActionDurationStats, AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard
-from replay.trace_replayer import TraceReplayer, _sum_modeled_max_duration
+from replay.trace_replayer import (
+    TraceReplayer,
+    _sum_modeled_duration,
+    _sum_modeled_max_duration,
+    _sum_modeled_min_duration,
+)
 
 _FLAG_RISK_CATALOG = {
     "flag": AttributeCatalogEntry(attribute_type="categorical", possible_values={"x", "y"}, bin_boundaries=None),
@@ -495,6 +502,37 @@ class TestSumModeledMaxDuration:
         assert _sum_modeled_max_duration([], {}) == 0.0
 
 
+class TestSumModeledMinDuration:
+    """Mirror of TestSumModeledMaxDuration for the lower bound -- the sum
+    that decides Q2 feasibility (OPTIC picks each ?duration in [min, max])."""
+
+    def test_sums_effective_min_across_fired_transitions(self):
+        transitions = {
+            "A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=_duration(1.0, 10.0)),
+            "B": PreparedTransition(activity_name="B", input_places=[], preconditions=[], effect_groups=[], duration=_duration(2.0, 20.0)),
+        }
+        firing_steps = [_step("A"), _step("B")]
+        assert _sum_modeled_min_duration(firing_steps, transitions) == 3.0
+
+    def test_tau_firings_excluded(self):
+        transitions = {"A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=_duration(1.0, 10.0))}
+        firing_steps = [_step("tau_1", is_tau=True), _step("A")]
+        assert _sum_modeled_min_duration(firing_steps, transitions) == 1.0
+
+    def test_transition_without_duration_contributes_zero(self):
+        transitions = {"A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=None)}
+        assert _sum_modeled_min_duration([_step("A")], transitions) == 0.0
+
+    def test_repeated_firing_counted_each_time(self):
+        transitions = {"A": PreparedTransition(activity_name="A", input_places=[], preconditions=[], effect_groups=[], duration=_duration(1.0, 5.0))}
+        firing_steps = [_step("A"), _step("A"), _step("A")]
+        assert _sum_modeled_min_duration(firing_steps, transitions) == 3.0
+
+    def test_invalid_bound_rejected(self):
+        with pytest.raises(ValueError):
+            _sum_modeled_duration([], {}, "mean")
+
+
 class TestMaxModeledDurationInEvaluationSplit:
     """Integration-level: max_modeled_duration_seconds as wired through
     replay_evaluation_split, on a real (tau_seq_net) Phase 1 resolution."""
@@ -515,6 +553,8 @@ class TestMaxModeledDurationInEvaluationSplit:
 
         # A (10.0) + tau_1 (silent, no PreparedTransition, contributes 0) + B (20.0)
         assert outcome.max_modeled_duration_seconds == 30.0
+        # Same firings, lower bounds: A (1.0) + B (2.0)
+        assert outcome.min_modeled_duration_seconds == 3.0
 
     def test_independent_of_which_effect_group_backtracking_chooses(self, tau_seq_net):
         # Two ambiguous, unguarded candidates for A -- whichever one Phase 2
@@ -538,6 +578,7 @@ class TestMaxModeledDurationInEvaluationSplit:
 
         assert outcome.reached_end
         assert outcome.max_modeled_duration_seconds == 30.0
+        assert outcome.min_modeled_duration_seconds == 3.0
 
     def test_zero_when_no_transition_has_duration_data(self, tau_seq_net):
         trans_a = PreparedTransition(activity_name="A", input_places=["p_in"], preconditions=[], effect_groups=[])
@@ -548,3 +589,4 @@ class TestMaxModeledDurationInEvaluationSplit:
         outcome = replayer.replay_evaluation_split(trace, n_prefix=0)
 
         assert outcome.max_modeled_duration_seconds == 0.0
+        assert outcome.min_modeled_duration_seconds == 0.0

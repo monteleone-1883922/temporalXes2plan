@@ -46,18 +46,26 @@ class PrefixSample:
         is_replayable: True when the tail (cut -> end) both completes without
             blocking and matches the real final attribute state exactly — see
             EvaluationReplayOutcome.reached_end/matches_expected_final_state.
-        max_modeled_duration_s: Sum of effective_max (domain-declared upper
+        min_modeled_duration_s: Sum of effective_min (domain-declared lower
             duration bound) over every non-tau transition actually fired in
             the tail — see
-            replay.trace_replayer.EvaluationReplayOutcome.max_modeled_duration_seconds.
+            replay.trace_replayer.EvaluationReplayOutcome.min_modeled_duration_seconds.
+        max_modeled_duration_s: Same sum over effective_max (upper bound).
         reached_within_time: True when the tail reaches the end (reached_end)
-            AND max_modeled_duration_s fits within the trace's real
-            remaining duration (_remaining_budget) — a *sufficient* (not
-            merely necessary) condition: even using the domain's
-            worst-case duration bound for every fired transition, the
-            total still fits under the time the log actually took. False
-            (not None) when timestamps are unavailable, since Q2 is never
-            built in that case anyway (see query_builder.build_q2).
+            AND min_modeled_duration_s fits within the trace's real
+            remaining duration (_remaining_budget). This mirrors OPTIC's
+            semantics: every durative action declares
+            (>= ?duration effective_min) (<= ?duration effective_max) and
+            the planner chooses each ?duration inside that interval, so the
+            real continuation fits the deadline iff SOME admissible
+            assignment of durations does — i.e. iff the sum of the
+            minimums fits. False (not None) when timestamps are
+            unavailable, since Q2 is never built in that case anyway (see
+            query_builder.build_q2).
+        reached_within_time_worst_case: Same check with max_modeled_duration_s
+            instead — the continuation fits the deadline even if every
+            fired transition takes its longest modeled duration.
+            Reporting only: it never decides Q2's ground truth.
     """
 
     prefix_events: List[Any]
@@ -70,8 +78,10 @@ class PrefixSample:
     full_duration_s: Optional[float]
     warnings: List[str] = field(default_factory=list)
     is_replayable: bool = True
+    min_modeled_duration_s: float = 0.0
     max_modeled_duration_s: float = 0.0
     reached_within_time: bool = True
+    reached_within_time_worst_case: bool = True
 
 
 def sample_prefix(
@@ -133,6 +143,11 @@ def sample_prefix(
     reached_within_time = (
         outcome.reached_end
         and budget_s is not None
+        and outcome.min_modeled_duration_seconds <= budget_s
+    )
+    reached_within_time_worst_case = (
+        outcome.reached_end
+        and budget_s is not None
         and outcome.max_modeled_duration_seconds <= budget_s
     )
 
@@ -147,8 +162,10 @@ def sample_prefix(
         full_duration_s=full_duration_s,
         warnings=outcome.warnings,
         is_replayable=outcome.reached_end and outcome.matches_expected_final_state,
+        min_modeled_duration_s=outcome.min_modeled_duration_seconds,
         max_modeled_duration_s=outcome.max_modeled_duration_seconds,
         reached_within_time=reached_within_time,
+        reached_within_time_worst_case=reached_within_time_worst_case,
     )
 
 

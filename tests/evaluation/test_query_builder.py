@@ -608,12 +608,11 @@ class TestComputeMinTimeToEnd:
         result = compute_min_time_to_end(serialized, ["p_end"])
         assert result == 0.0
 
-    def test_single_hop_uses_effective_max(self):
-        # effective_min/max are not planner-chosen -- they are the observed
-        # range of real execution time for that activity, and a plan is
-        # only reliable if it meets the deadline even in the worst
-        # realistic case, so the WORST-CASE (effective_max) bound is used,
-        # not the best case.
+    def test_single_hop_uses_effective_min(self):
+        # The PDDL domain declares (>= ?duration min) (<= ?duration max) and
+        # OPTIC chooses ?duration inside that interval, so the fastest
+        # completion it can schedule uses effective_min -- the result is a
+        # lower bound on OPTIC's makespan, not a worst case.
         serialized = {
             "graph": {
                 "nodes": [
@@ -630,12 +629,12 @@ class TestComputeMinTimeToEnd:
             "attribute_catalog": _CATALOG_MIXED,
             "metadata": {"start_place": "p_start", "end_place": "p_end"},
         }
-        assert compute_min_time_to_end(serialized, ["p_start"]) == 10.0  # effective_max, not effective_min
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 5.0  # effective_min, not effective_max
         assert compute_min_time_to_end(serialized, ["p_end"]) == 0.0
 
     def test_picks_the_faster_of_two_alternative_paths(self):
-        # p_start -> t1(10s worst-case) -> p_mid -> t2(6s worst-case) -> p_end  (total 16s)
-        # p_start -> t3(200s worst-case) -> p_end                               (total 200s, slower)
+        # p_start -> t1(5s min) -> p_mid -> t2(3s min) -> p_end  (total 8s)
+        # p_start -> t3(100s min) -> p_end                      (total 100s, slower)
         serialized = {
             "graph": {
                 "nodes": [
@@ -660,13 +659,13 @@ class TestComputeMinTimeToEnd:
             "attribute_catalog": _CATALOG_MIXED,
             "metadata": {"start_place": "p_start", "end_place": "p_end"},
         }
-        assert compute_min_time_to_end(serialized, ["p_start"]) == 16.0
-        assert compute_min_time_to_end(serialized, ["p_mid"]) == 6.0
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 8.0
+        assert compute_min_time_to_end(serialized, ["p_mid"]) == 3.0
 
     def test_and_join_waits_for_the_slower_input_not_the_faster(self):
-        # t_join needs BOTH p_a (via t1, 10s worst-case) and p_b (via t2,
-        # 30s worst-case) -- it cannot fire until the SLOWER of the two
-        # arrives (max, not min), then adds its own 2s worst-case duration.
+        # t_join needs BOTH p_a (via t1, 5s min) and p_b (via t2, 20s min)
+        # -- it cannot fire until the SLOWER of the two arrives (max over
+        # its inputs, not min), then adds its own 1s min duration.
         serialized = {
             "graph": {
                 "nodes": [
@@ -693,13 +692,13 @@ class TestComputeMinTimeToEnd:
             "attribute_catalog": _CATALOG_MIXED,
             "metadata": {"start_place": "p_start", "end_place": "p_end"},
         }
-        # max(10, 30) + 2 = 32 -- NOT min(10, 30) + 2 = 12.
-        assert compute_min_time_to_end(serialized, ["p_start"]) == 32.0
+        # max(5, 20) + 1 = 21 -- NOT min(5, 20) + 1 = 6.
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 21.0
 
     def test_and_join_satisfied_by_a_different_concurrent_branch_of_the_marking(self):
         # Same net as above, but the marking already holds tokens in BOTH
         # p_a and p_b directly (as if two concurrent branches already
-        # completed) -- t_join must fire using max(0, 0) + 2 = 2, not
+        # completed) -- t_join must fire using max(0, 0) + 1 = 1, not
         # treat p_a/p_b as isolated unreachable starting points.
         serialized = {
             "graph": {
@@ -720,7 +719,7 @@ class TestComputeMinTimeToEnd:
             "attribute_catalog": _CATALOG_MIXED,
             "metadata": {"start_place": "p_a", "end_place": "p_end"},
         }
-        assert compute_min_time_to_end(serialized, ["p_a", "p_b"]) == 2.0
+        assert compute_min_time_to_end(serialized, ["p_a", "p_b"]) == 1.0
 
     def test_missing_duration_data_contributes_zero(self):
         serialized = {
@@ -781,8 +780,8 @@ class TestComputeMinTimeToEndCache:
         serialized = self._serialized()
         cache: dict = {}
         result = compute_min_time_to_end(serialized, ["p_start"], cache=cache)
-        assert result == 10.0
-        assert cache[frozenset(["p_start"])] == 10.0
+        assert result == 5.0
+        assert cache[frozenset(["p_start"])] == 5.0
 
     def test_second_call_with_same_marking_reuses_cached_value(self):
         serialized = self._serialized()
@@ -793,7 +792,7 @@ class TestComputeMinTimeToEndCache:
         mutated = dict(serialized)
         mutated["metadata"] = {}  # would make a fresh call return +inf
         second = compute_min_time_to_end(mutated, ["p_start"], cache=cache)
-        assert second == first == 10.0
+        assert second == first == 5.0
 
     def test_marking_order_does_not_affect_cache_key(self):
         serialized = self._serialized()
@@ -808,11 +807,11 @@ class TestComputeMinTimeToEndCache:
         cache: dict = {}
         compute_min_time_to_end(serialized, ["p_start"], cache=cache)
         compute_min_time_to_end(serialized, ["p_end"], cache=cache)
-        assert cache[frozenset(["p_start"])] == 10.0
+        assert cache[frozenset(["p_start"])] == 5.0
         assert cache[frozenset(["p_end"])] == 0.0
         assert len(cache) == 2
 
     def test_no_cache_means_no_memoization_and_no_error(self):
         serialized = self._serialized()
         # cache=None (default) -- must behave exactly like before caching existed.
-        assert compute_min_time_to_end(serialized, ["p_start"]) == 10.0
+        assert compute_min_time_to_end(serialized, ["p_start"]) == 5.0

@@ -31,6 +31,7 @@ def _outcome(reached_end: bool, matches_expected_final_state: bool) -> Evaluatio
         expected_final_attributes={},
         accumulated_duration_seconds=None,
         within_deadline=None,
+        min_modeled_duration_seconds=0.0,
         max_modeled_duration_seconds=0.0,
         warnings=[],
     )

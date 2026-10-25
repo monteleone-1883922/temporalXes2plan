@@ -351,16 +351,18 @@ def compute_min_time_to_end(
     place starts at distance 0 once reached; a transition is only relaxed
     (its output places' distances updated) once ALL of its input places
     have been settled, using the MAX of their settled distances as its own
-    ready time, plus its own effective_max duration. effective_min/max are
-    not planner-chosen values here -- they are the observed range of how
-    long that activity actually took across the historical log, i.e. real
-    execution-time uncertainty the planner does not control. A plan is
-    only genuinely reliable if it still meets the deadline in the worst
-    realistic case, so effective_max (not effective_min) is used: OPTIC's
-    own temporal-feasibility checking is understood to reason the same
-    way. Transitions with no mined duration data contribute 0 (absence of
+    ready time, plus its own effective_min duration. effective_min is used
+    (not effective_max) because the PDDL domain declares every durative
+    action as (>= ?duration effective_min) (<= ?duration effective_max) and
+    OPTIC treats ?duration as a variable of its Simple Temporal Network,
+    free to take any value in that interval: the fastest completion OPTIC
+    can schedule uses the minimum durations. The result is therefore a
+    lower bound on OPTIC's makespan, and a query whose deadline is below
+    it is genuinely unsatisfiable -- which is what makes it safe for
+    run_evaluation._run_query to skip the planner in that case.
+    Transitions with no mined duration data contribute 0 (absence of
     information treated as non-constraining, same convention as
-    is_q3_reachable and _sum_modeled_max_duration). Transitions with no
+    is_q3_reachable and trace_replayer._sum_modeled_duration). Transitions with no
     input places at all (net sources) are seeded as fireable at time 0.
 
     Args:
@@ -415,8 +417,8 @@ def compute_min_time_to_end(
         """Relax tid's output places once all of its inputs are settled."""
         t_info = transitions.get(node_by_id[tid].get("label"))
         duration = t_info.get("duration") if t_info else None
-        dmax = duration["effective_max"] if duration else 0.0
-        fire_time = ready_time + dmax
+        dmin = duration["effective_min"] if duration else 0.0
+        fire_time = ready_time + dmin
         for out_p in out_places.get(tid, []):
             if fire_time < dist.get(out_p, float("inf")):
                 dist[out_p] = fire_time
