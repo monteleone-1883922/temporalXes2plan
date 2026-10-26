@@ -122,15 +122,29 @@ def sample_prefix(
         )
         return None
 
-    prefix_events = events[:n_prefix]
-    suffix_events = events[n_prefix:]
-    prefix_ratio = n_prefix / n
-
     try:
         outcome = replayer.replay_evaluation_split(trace, n_prefix)
     except Exception as exc:
         logger.warning("Replay failed: %s", exc)
         return None
+
+    # Everything derived from the outcome lives in prefix_sample_from_outcome,
+    # so paper_eval can build the same sample for every cut of a trace.
+    return prefix_sample_from_outcome(events, n_prefix, outcome)
+
+
+def prefix_sample_from_outcome(events: List[Any], n_prefix: int, outcome: Any) -> PrefixSample:
+    """Build the PrefixSample for the first n_prefix of events from an
+    already computed EvaluationReplayOutcome (TraceReplayer.
+    replay_evaluation_split / replay_all_splits for that cut point).
+
+    Shared by sample_prefix (one random cut per trace) and paper_eval's
+    prefix generation (every cut of the trace).
+    """
+    n = len(events)
+    prefix_events = events[:n_prefix]
+    suffix_events = events[n_prefix:]
+    prefix_ratio = n_prefix / n
 
     prefix_duration_s = _duration_seconds(prefix_events)
     full_duration_s = _duration_seconds(events)

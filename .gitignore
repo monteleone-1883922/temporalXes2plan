@@ -199,3 +199,4 @@ graphify*
 optic/release/
 .idea/
 src/evaluation/results/
+results/

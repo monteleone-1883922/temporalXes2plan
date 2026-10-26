@@ -6,7 +6,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple, Set, Union
+from typing import List, Dict, Optional, Any, Sequence, Tuple, Set, Union
 
 import pm4py
 
@@ -325,6 +325,45 @@ def split(
     return _build_train_test_split(log, traces, test_indices)
 
 
+def split_by_case_ids(
+    log_path: str,
+    test_case_ids: Sequence[str],
+    log_fmt: str = "xes",
+    mapping: Optional[dict] = None,
+) -> TrainTestSplit:
+    """Split a log on an explicit set of test case ids (trace concept:name)
+    instead of sampling — e.g. a temporal validation set chosen by the
+    caller. Traces whose id is not in test_case_ids go to the training file.
+
+    Raises:
+        ValueError: if some requested id is not in the log (a silent miss
+            would shrink the held-out set without anyone noticing).
+    """
+    log = _load_log(log_path, log_fmt, mapping)
+    traces = list(log)
+    wanted = set(test_case_ids)
+    # Indices of the traces whose id is requested; the rest of the shared
+    # helper (_build_train_test_split) writes everything else to the train file.
+    test_indices = [
+        i for i, t in enumerate(traces) if str(t.attributes.get("concept:name")) in wanted
+    ]
+    found = {str(traces[i].attributes.get("concept:name")) for i in test_indices}
+    missing = wanted - found
+    if missing:
+        raise ValueError(
+            f"{len(missing)} test case id(s) not found in {log_path}, e.g. {sorted(missing)[:3]}"
+        )
+    return _build_train_test_split(log, traces, test_indices)
+
+
+def write_traces_xes(log: Any, traces: List[Any], path: Path) -> Path:
+    """Write traces to an XES file at path, keeping log.attributes (the
+    log-level metadata the classic importer read)."""
+    sub_log = pm4py.objects.log.obj.EventLog(traces, attributes=log.attributes)
+    pm4py.write_xes(sub_log, str(path))
+    return Path(path)
+
+
 def _build_train_test_split(log: Any, traces: List[Any], test_indices: List[int]) -> TrainTestSplit:
     """Shared by every split() variant: given the full trace list and the
     already-selected test indices, write the remaining traces to a temporary
@@ -342,15 +381,9 @@ def _build_train_test_split(log: Any, traces: List[Any], test_indices: List[int]
     test_cases = [traces[i] for i in test_indices]
     train_traces = [traces[i] for i in range(len(traces)) if i not in test_set]
 
-    train_log = pm4py.objects.log.obj.EventLog(
-        train_traces,
-        attributes=log.attributes,
-    )
-
     tmp = tempfile.NamedTemporaryFile(suffix=".xes", delete=False)
     tmp.close()
-    train_path = Path(tmp.name)
-    pm4py.write_xes(train_log, str(train_path))
+    train_path = write_traces_xes(log, train_traces, Path(tmp.name))
 
     return TrainTestSplit(
         train_path=train_path,

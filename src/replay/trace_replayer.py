@@ -447,6 +447,33 @@ class TraceReplayer:
         check_deadline is True, accumulating duration_seconds along that tail
         only (never time before the cut) against deadline_seconds.
         """
+        phase1 = self._evaluation_phase1(trace)
+        return self._evaluation_tail(phase1, n_prefix, check_deadline, deadline_seconds)
+
+    def replay_all_splits(
+        self,
+        trace: Any,
+        n_prefixes: List[int],
+        check_deadline: bool = False,
+        deadline_seconds: Optional[float] = None,
+    ) -> Dict[int, EvaluationReplayOutcome]:
+        """replay_evaluation_split for several cut points of the same trace,
+        running Phase 1 (alignment + snapshots, the expensive part) once.
+        Returns {n_prefix: outcome}, each outcome identical to what
+        replay_evaluation_split(trace, n_prefix, ...) returns."""
+        # Phase 1 once for the whole trace; _evaluation_tail does not mutate
+        # it, so each cut point can reuse it.
+        phase1 = self._evaluation_phase1(trace)
+        return {
+            n: self._evaluation_tail(phase1, n, check_deadline, deadline_seconds)
+            for n in n_prefixes
+        }
+
+    def _evaluation_phase1(self, trace: Any) -> Tuple[
+        List[FiringStep], List[Set[str]], List[Dict[str, str]], List[int], List[str],
+    ]:
+        """Phase 1 of replay_evaluation_split on the whole trace: alignment
+        firing steps, plus the log-observed snapshots after each step."""
         model = self.petrinet_model
         execution, phase1_warnings = align_single_trace(
             trace, model.petrinet, model.initial_marking, model.final_marking,
@@ -457,7 +484,19 @@ class TraceReplayer:
         marking_at, raw_attributes_at, event_counts, snapshot_warnings = (
             self._build_snapshots(firing_steps)
         )
-        warnings = phase1_warnings + snapshot_warnings
+        return firing_steps, marking_at, raw_attributes_at, event_counts, phase1_warnings + snapshot_warnings
+
+    def _evaluation_tail(
+        self,
+        phase1: Tuple[List[FiringStep], List[Set[str]], List[Dict[str, str]], List[int], List[str]],
+        n_prefix: int,
+        check_deadline: bool,
+        deadline_seconds: Optional[float],
+    ) -> EvaluationReplayOutcome:
+        """Cut + Phase 2 of replay_evaluation_split, from a Phase 1 result
+        (never mutated, so it can be shared across cut points)."""
+        firing_steps, marking_at, raw_attributes_at, event_counts, phase1_warnings = phase1
+        warnings = list(phase1_warnings)
 
         total_events = event_counts[-1]
         if n_prefix > total_events:

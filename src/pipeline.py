@@ -24,7 +24,7 @@ re-implementing it or re-running the search.
 import dataclasses
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import core_utils as utils
 from models import AnalysisConfig, ParseResult
@@ -78,6 +78,7 @@ class Pipeline:
         snapshot_dir: Optional[str] = None,
         discretizer_cache_path: Optional[Path] = None,
         force_rediscretize: bool = False,
+        search_split: Optional[Sequence[str]] = None,
     ) -> BuildResult:
 
         """Search (optionally) + parse + encode a single XES log file.
@@ -121,6 +122,12 @@ class Pipeline:
             discretizer_cache_path: Optional path to cache discretizer boundaries
                 across calls (see parsing.xes_parser.Parser).
             force_rediscretize: If True, ignore an existing discretizer cache.
+            search_split: Optional explicit held-out set for the search, as the
+                case ids (trace concept:name) of log_path to score candidates
+                on. When given, it replaces the random split driven by
+                search_test_pct/search_seed — e.g. paper_eval passes the
+                temporally last cases of the training log (its validation
+                set). None keeps the random split.
 
         Returns:
             BuildResult with the parse result, prepared domain input, PDDL
@@ -138,7 +145,13 @@ class Pipeline:
             logger.info("Step 0/5: Searching for the best AnalysisConfig (%d trials)", search_n_trials)
             original_activity_names = utils.activity_names(log_path)
             base_config = config or AnalysisConfig()
-            with utils.split(log_path, test_pct=search_test_pct, seed=search_seed) as split_result:
+            # Held-out set for scoring the trials: explicit case ids when
+            # given (paper_eval: temporal VAL), otherwise the random split.
+            if search_split is not None:
+                search_tts = utils.split_by_case_ids(log_path, search_split)
+            else:
+                search_tts = utils.split(log_path, test_pct=search_test_pct, seed=search_seed)
+            with search_tts as split_result:
                 config, trial_records = find_best_config(
                     training_log_path=str(split_result.train_path),
                     test_traces=split_result.test_cases,

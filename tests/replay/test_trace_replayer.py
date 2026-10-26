@@ -590,3 +590,48 @@ class TestMaxModeledDurationInEvaluationSplit:
 
         assert outcome.max_modeled_duration_seconds == 0.0
         assert outcome.min_modeled_duration_seconds == 0.0
+
+
+class TestReplayAllSplits:
+    """replay_all_splits runs Phase 1 once and must give, for every cut
+    point, exactly what replay_evaluation_split gives on its own."""
+
+    def _replayer_ab(self, tau_seq_net):
+        trans_a = PreparedTransition(
+            activity_name="A", input_places=["p_in"], preconditions=[], effect_groups=[],
+            duration=_duration(1.0, 10.0),
+        )
+        trans_b = PreparedTransition(
+            activity_name="B", input_places=["p_mid2"], preconditions=[], effect_groups=[],
+            duration=_duration(2.0, 20.0),
+        )
+        return _replayer(tau_seq_net, {"A": trans_a, "B": trans_b})
+
+    def test_matches_replay_evaluation_split_for_every_cut(self, tau_seq_net):
+        replayer = self._replayer_ab(tau_seq_net)
+        trace = make_trace(make_event("A"), make_event("B"))
+
+        all_splits = replayer.replay_all_splits(trace, [0, 1, 2])
+
+        assert set(all_splits) == {0, 1, 2}
+        for n_prefix, outcome in all_splits.items():
+            assert outcome == replayer.replay_evaluation_split(trace, n_prefix)
+
+    def test_cut_points_do_not_share_mutable_state(self, tau_seq_net):
+        replayer = self._replayer_ab(tau_seq_net)
+        trace = make_trace(make_event("A"), make_event("B"))
+
+        all_splits = replayer.replay_all_splits(trace, [0, 1])
+        all_splits[0].warnings.append("mutated")
+
+        assert "mutated" not in all_splits[1].warnings
+
+    def test_alignment_runs_once(self, tau_seq_net):
+        from unittest.mock import patch
+        import replay.trace_replayer as module
+
+        replayer = self._replayer_ab(tau_seq_net)
+        trace = make_trace(make_event("A"), make_event("B"))
+        with patch.object(module, "align_single_trace", wraps=module.align_single_trace) as align:
+            replayer.replay_all_splits(trace, [0, 1, 2])
+        assert align.call_count == 1
