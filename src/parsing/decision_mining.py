@@ -355,7 +355,11 @@ class DecisionMiner:
             - guards: Dict[activity, List[List[Guard]]] in SOP form.
             - accuracy: DT training accuracy (0.0 if training fails).
         """
+        # Fixed column order: sklearn breaks ties between equally good splits
+        # by feature position, and the incoming order is not stable across
+        # runs, so without this the same data could yield different trees.
         X = X.copy()
+        X = X.reindex(sorted(X.columns), axis=1)
         X.dropna(axis=1, how="all", inplace=True)
         if X.empty:
             return {}, 0.0
@@ -395,7 +399,7 @@ class DecisionMiner:
                 X_for_enc[col] = X_for_enc[col].fillna(0)
             else:
                 X_for_enc[col] = X_for_enc[col].fillna("none")
-        X_enc = pd.get_dummies(X_for_enc, columns=list(categorical_cols), dummy_na=False)
+        X_enc = pd.get_dummies(X_for_enc, columns=sorted(categorical_cols), dummy_na=False)
         X_enc = X_enc.rename(columns={c: c for c in X_enc.columns})
 
         if X_enc.empty or X_enc.shape[1] == 0:

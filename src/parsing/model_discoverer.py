@@ -71,8 +71,12 @@ class ModelDiscoverer:
             if not final_marking:
                 logger.warning("Discovered Petri net has an empty final marking")
 
+            # pm4py names transitions with random uuid4s and iterates sets hashed
+            # by object id, so names and orders change from run to run. Give
+            # the net deterministic names/order before anything reads them.
+            ordered_transitions = self._canonicalize_net(petrinet, initial_marking, final_marking)
             activities, silent_transitions = self._extract_activities_and_silent(
-                petrinet.transitions
+                ordered_transitions
             )
             trans_inputs, trans_outputs = self._build_arc_maps(petrinet.arcs)
             xor_splits = self._identify_xor_splits(petrinet.arcs)
@@ -101,6 +105,77 @@ class ModelDiscoverer:
     # ---------------------------------------------------------------------------
     # Private structural helpers
     # ---------------------------------------------------------------------------
+
+    @staticmethod
+    def _canonicalize_net(
+        net: PetriNet, initial_marking: Any, final_marking: Any,
+    ) -> List[Transition]:
+        """Rename places and transitions deterministically, in place.
+
+        Nodes are ordered by colour refinement (Weisfeiler-Leman) starting
+        from transition labels and the initial/final marking, so the order
+        depends only on the structure of the net, not on pm4py's uuid names
+        or on object ids. Nodes still tied after refinement are structurally
+        indistinguishable (in practice automorphic twins), so which of them
+        gets which index does not change the model.
+
+        Places become p_<i>, visible transitions t_<i> and silent ones
+        tau_<i>, numbered in canonical order.
+
+        Returns:
+            The transitions in canonical order.
+        """
+        initial = {p.name for p in initial_marking}
+        final = {p.name for p in final_marking}
+        nodes: List[Any] = list(net.places) + list(net.transitions)
+        pred: Dict[Any, List[Any]] = {n: [] for n in nodes}
+        succ: Dict[Any, List[Any]] = {n: [] for n in nodes}
+        for arc in net.arcs:
+            succ[arc.source].append(arc.target)
+            pred[arc.target].append(arc.source)
+
+        def initial_key(n: Any) -> Tuple:
+            if isinstance(n, PetriNet.Place):
+                return (0, "", n.name in initial, n.name in final)
+            return (1, n.label or "", False, False)
+
+        def to_ranks(keys: Dict[Any, Any]) -> Dict[Any, int]:
+            rank = {key: i for i, key in enumerate(sorted(set(keys.values())))}
+            return {n: rank[k] for n, k in keys.items()}
+
+        color = to_ranks({n: initial_key(n) for n in nodes})
+        for _ in range(len(nodes)):
+            refined = to_ranks({
+                n: (
+                    color[n],
+                    tuple(sorted(color[m] for m in pred[n])),
+                    tuple(sorted(color[m] for m in succ[n])),
+                )
+                for n in nodes
+            })
+            stable = len(set(refined.values())) == len(set(color.values()))
+            color = refined
+            if stable:
+                break
+
+        # Equal colours only remain for indistinguishable nodes; the old name
+        # (random for uuids) is just a last-resort key for a total order.
+        ordered = sorted(nodes, key=lambda n: (color[n], n.name))
+        n_place = n_visible = n_silent = 0
+        ordered_transitions: List[Transition] = []
+        for node in ordered:
+            if isinstance(node, PetriNet.Place):
+                n_place += 1
+                node.name = f"p_{n_place}"
+            else:
+                ordered_transitions.append(node)
+                if node.label is None:
+                    n_silent += 1
+                    node.name = f"tau_{n_silent}"
+                else:
+                    n_visible += 1
+                    node.name = f"t_{n_visible}"
+        return ordered_transitions
 
     def _extract_activities_and_silent(
         self,

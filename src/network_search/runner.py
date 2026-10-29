@@ -292,6 +292,7 @@ def find_best_config(
     promotion_fraction: float = 0.35,
     min_promoted: int = 7,
     base_config: Optional[AnalysisConfig] = None,
+    seed: Optional[int] = None,
 ) -> Tuple[AnalysisConfig, List[TrialRecord]]:
     """Successive Halving loop (phase 5) — docs/network_improvement_loop_plan.md §7.
 
@@ -331,7 +332,11 @@ def find_best_config(
     preloaded_replay = preload_replay(preloaded, base_config)
 
     records: List[TrialRecord] = []
-    study = optuna.create_study(direction="maximize")
+    # Seeded so the same inputs and seed always propose the same configs
+    # (seed=None keeps the old unseeded behaviour).
+    study = optuna.create_study(
+        direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed),
+    )
     best_score_so_far = float("-inf")
 
     remaining = n_trials

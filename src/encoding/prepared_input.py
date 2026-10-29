@@ -269,6 +269,10 @@ class PreparedDomainInput:
             source_id = source.name if hasattr(source, "name") else str(id(source))
             target_id = target.name if hasattr(target, "name") else str(id(target))
             edges.append(GraphEdge(source=source_id, target=target_id))
+        # pm4py keeps places/transitions/arcs in sets ordered by object id, so
+        # sort for a stable output.
+        nodes.sort(key=lambda n: n.id)
+        edges.sort(key=lambda e: (e.source, e.target))
         return nodes, edges
 
     def to_dict(self) -> Dict[str, Any]:

@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import List
@@ -164,5 +166,15 @@ def main(argv=None) -> None:
             run_volume(args.log, cfg, paths)
 
 
+def _ensure_hash_seed(seed: int = 42) -> None:
+    """Re-execute with PYTHONHASHSEED fixed: str hashing (and so set order)
+    is only seeded at interpreter start, and it would otherwise change
+    from run to run."""
+    if os.environ.get("PYTHONHASHSEED") != str(seed):
+        os.environ["PYTHONHASHSEED"] = str(seed)
+        os.execv(sys.executable, [sys.executable, "-m", "paper_eval.run", *sys.argv[1:]])
+
+
 if __name__ == "__main__":
+    _ensure_hash_seed()
     main()

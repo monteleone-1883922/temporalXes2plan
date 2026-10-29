@@ -60,7 +60,9 @@ from .temporal_extractor import ExternalDuration, TemporalExtractor
 
 SEED = 42
 random.seed(SEED)
-os.environ['PYTHONHASHSEED'] = str(SEED)
+# PYTHONHASHSEED is read when the interpreter starts, so setting it here has
+# no effect: set it in the launching environment (paper_eval.run re-executes
+# itself with it).
 np.random.seed(SEED)
 
 logger = utils.get_logger(__name__)

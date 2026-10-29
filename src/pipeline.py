@@ -114,7 +114,8 @@ class Pipeline:
                 the winning config, not on that split.
             search_n_trials: Number of candidate configs to evaluate when search=True.
             search_test_pct: Fraction of traces held out to score candidates when search=True.
-            search_seed: Random seed for the search's train/test split.
+            search_seed: Random seed for the search: its TPE sampler and, when
+                search_split is not given, the train/test split.
             search_weights: ScoreWeights for the search; defaults to ScoreWeights()
                 (placeholder values, docs/network_improvement_loop.md §8).
             snapshot_dir: When set, overrides config.snapshot_dir before parsing
@@ -161,6 +162,7 @@ class Pipeline:
                     coverage_percentage=coverage_percentage,
                     discovery_algorithm=discovery_algorithm,
                     base_config=base_config,
+                    seed=search_seed,
                 )
         else:
             config = config or AnalysisConfig()
