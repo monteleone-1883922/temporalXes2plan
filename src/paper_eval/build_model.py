@@ -106,7 +106,9 @@ def build_model(
             coverage_percentage=cfg.coverage_percentage,
             use_durative=True,
             use_costs=True,
-            config=AnalysisConfig(),
+            # The cap on effect groups per transition keeps TPE configs whose
+            # group product would not fit in memory out of the search.
+            config=AnalysisConfig(max_effect_groups_per_transition=cfg.max_effect_groups),
             search=True,
             search_n_trials=cfg.search_n_trials,
             search_seed=cfg.seed,
@@ -132,7 +134,12 @@ def build_model(
     )
     # One entry per TPE trial, to report how the search behaved.
     trials = [
-        {"trial_number": r.trial_number, "score": r.score}
+        {
+            "trial_number": r.trial_number,
+            "score": r.score,
+            "rejected_reason": r.rejected_reason,
+            "max_effect_groups": r.max_effect_groups,
+        }
         for r in (result.trial_records or [])
     ]
     (model_dir / "search_trials.json").write_text(json.dumps(trials, indent=2), encoding="utf-8")

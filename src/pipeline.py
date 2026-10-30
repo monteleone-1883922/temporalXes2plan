@@ -32,6 +32,7 @@ from parsing.xes_parser import Parser
 from encoding.domain_builder import DomainBuilder, build_domain_with_variant_map
 from encoding.pddl_model import PDDLDomain
 from encoding.prepared_input import PreparedDomainInput, VariantInfo
+from encoding.effect_group_builder import EffectGroupBudgetExceeded
 from network_search.runner import find_best_config, TrialRecord
 from network_search.scoring import ScoreWeights
 
@@ -170,23 +171,52 @@ class Pipeline:
         if snapshot_dir is not None:
             config.snapshot_dir = snapshot_dir
 
-        # 1 — Parse
-        logger.info("Step 1/5: Parsing %s", log_path)
-        parser = Parser(
-            log_path=log_path,
-            coverage_percentage=coverage_percentage,
-            discovery_algorithm=discovery_algorithm,
-            use_activity_classifier=use_activity_classifier,
-            config=config,
-            discretizer_cache_path=discretizer_cache_path,
-            force_rediscretize=force_rediscretize,
-        )
-        parse_result = parser.parse_result
+        # Candidate configs for the final build: the chosen one first; when a
+        # search ran, the other trials that passed rung 0 follow, best score
+        # first. The final network is built on more data than the search
+        # trials saw, so a config can exceed the effect-group limit here even
+        # though it fit during the search.
+        candidates = [config]
+        if trial_records:
+            runners_up = sorted(
+                (r for r in trial_records if r.rejected_reason is None and r.config is not config),
+                key=lambda r: r.score if r.score is not None else float("-inf"),
+                reverse=True,
+            )
+            candidates.extend(r.config for r in runners_up)
 
-        # 2 — Encode
-        logger.info("Step 2/4: Building PDDL domain")
-        builder = DomainBuilder()
-        prepared = builder.build_prepared_input(parse_result, config=config)
+        for attempt, candidate in enumerate(candidates, start=1):
+            config = candidate
+            if snapshot_dir is not None:
+                config.snapshot_dir = snapshot_dir
+            try:
+                # 1 — Parse
+                logger.info("Step 1/5: Parsing %s", log_path)
+                parser = Parser(
+                    log_path=log_path,
+                    coverage_percentage=coverage_percentage,
+                    discovery_algorithm=discovery_algorithm,
+                    use_activity_classifier=use_activity_classifier,
+                    config=config,
+                    discretizer_cache_path=discretizer_cache_path,
+                    force_rediscretize=force_rediscretize,
+                )
+                parse_result = parser.parse_result
+
+                # 2 — Encode
+                logger.info("Step 2/4: Building PDDL domain")
+                builder = DomainBuilder()
+                prepared = builder.build_prepared_input(parse_result, config=config)
+                break
+            except EffectGroupBudgetExceeded as exc:
+                if attempt == len(candidates):
+                    logger.error("No candidate config fits the effect-group limit in the final build")
+                    raise
+                logger.warning(
+                    "Final build with candidate config %d/%d exceeded the effect-group limit "
+                    "(transition '%s', %d groups, limit %d); trying the next best config",
+                    attempt, len(candidates), exc.activity_name, exc.n_groups, exc.limit,
+                )
         domain, variant_map = build_domain_with_variant_map(
             prepared,
             config=config,

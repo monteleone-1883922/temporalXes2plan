@@ -139,6 +139,7 @@ class DomainBuilder:
                 preconditions=[],
                 effect_groups=_prepared_effect_groups(
                     info, track_appearance_cost, track_value_cost,
+                    config.max_effect_groups_per_transition,
                 ),
                 cost=0.0,
                 duration=info.duration,

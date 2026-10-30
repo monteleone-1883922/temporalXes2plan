@@ -20,6 +20,8 @@ import pytest
 from pm4py.objects.log.obj import Event, EventLog, Trace
 
 import core_utils as utils
+from encoding.domain_builder import DomainBuilder
+from encoding.effect_group_builder import EffectGroupBudgetExceeded
 from models import AnalysisConfig
 from network_search.runner import TrialRecord, find_best_config, save_trial_records
 from network_search.scoring import ScoreWeights, TrialMetrics, combine
@@ -376,3 +378,101 @@ class TestBaseConfigPropagation:
         best_config, _ = base_config_search_result
         assert best_config.replay_engine == CUSTOM_BASE_CONFIG.replay_engine
         assert best_config.snapshot_dir == CUSTOM_BASE_CONFIG.snapshot_dir
+
+
+# ---------------------------------------------------------------------------
+# Rung 0 -- feasibility gate on the effect groups per transition
+# ---------------------------------------------------------------------------
+
+LIMIT = 10
+
+
+def _reject_every_other_build(monkeypatch):
+    """Make DomainBuilder.build_prepared_input raise the budget error on every
+    second call (calls 2, 4, ...), as if those trials' groups had blown up."""
+    real = DomainBuilder.build_prepared_input
+    calls = {"n": 0}
+
+    def fake(self, parse_result, config=None):
+        calls["n"] += 1
+        if calls["n"] % 2 == 0:
+            raise EffectGroupBudgetExceeded("approve", 4 * LIMIT, LIMIT)
+        return real(self, parse_result, config=config)
+
+    monkeypatch.setattr(DomainBuilder, "build_prepared_input", fake)
+
+
+def _search(split_result, n_trials=6):
+    return find_best_config(
+        training_log_path=str(split_result.train_path),
+        test_traces=split_result.test_cases,
+        n_trials=n_trials,
+        round_size=n_trials, promotion_fraction=1.0, min_promoted=n_trials,
+        base_config=AnalysisConfig(max_effect_groups_per_transition=LIMIT),
+        seed=0,
+    )
+
+
+@pytest.mark.integration
+class TestRung0FeasibilityGate:
+    def test_rejected_trials_are_recorded_and_never_promoted(self, split_result, monkeypatch):
+        _reject_every_other_build(monkeypatch)
+        _, records = _search(split_result)
+        rejected = [r for r in records if r.rejected_reason is not None]
+        assert len(rejected) == 3
+        for r in rejected:
+            assert r.rejected_reason == "effect_group_budget"
+            assert r.promoted_to_rung2 is False
+            assert r.metrics.reproducibility_score is None
+            assert r.max_effect_groups == 4 * LIMIT
+        # everything else went through even though promotion_fraction=1.0
+        assert all(r.promoted_to_rung2 for r in records if r.rejected_reason is None)
+
+    def test_the_winner_is_never_a_rejected_trial(self, split_result, monkeypatch):
+        _reject_every_other_build(monkeypatch)
+        best, records = _search(split_result)
+        assert any(best is r.config for r in records if r.rejected_reason is None)
+        assert not any(best is r.config for r in records if r.rejected_reason is not None)
+
+    def test_optuna_is_told_which_trials_violated_the_constraint(self, split_result, monkeypatch):
+        _reject_every_other_build(monkeypatch)
+        told = []
+        real_tell = optuna.study.Study.tell
+
+        def spy(self, trial, *args, **kwargs):
+            told.append(trial.user_attrs.get("constraint"))
+            return real_tell(self, trial, *args, **kwargs)
+
+        monkeypatch.setattr(optuna.study.Study, "tell", spy)
+        _search(split_result)
+        assert len(told) == 6
+        assert sorted(v[0] > 0 for v in told) == [False] * 3 + [True] * 3
+        # log2(40 / 10) for the rejected ones, 0 for the others
+        assert sorted(v[0] for v in told)[-1] == pytest.approx(2.0)
+        assert sorted(v[0] for v in told)[0] == 0.0
+
+    def test_all_trials_rejected_is_an_explicit_error(self, split_result, monkeypatch):
+        def always(self, parse_result, config=None):
+            raise EffectGroupBudgetExceeded("approve", 4 * LIMIT, LIMIT)
+
+        monkeypatch.setattr(DomainBuilder, "build_prepared_input", always)
+        with pytest.raises(RuntimeError, match="rejected at rung 0"):
+            _search(split_result, n_trials=3)
+
+    def test_without_a_limit_nothing_is_rejected(self, split_result):
+        _, records = find_best_config(
+            training_log_path=str(split_result.train_path),
+            test_traces=split_result.test_cases,
+            n_trials=3, seed=0,
+        )
+        assert all(r.rejected_reason is None for r in records)
+        assert all(r.max_effect_groups is not None and r.max_effect_groups >= 1 for r in records)
+
+    def test_same_seed_gives_the_same_trial_configs(self, split_result):
+        first = [r.config for r in find_best_config(
+            training_log_path=str(split_result.train_path), test_traces=split_result.test_cases,
+            n_trials=3, seed=7)[1]]
+        second = [r.config for r in find_best_config(
+            training_log_path=str(split_result.train_path), test_traces=split_result.test_cases,
+            n_trials=3, seed=7)[1]]
+        assert first == second

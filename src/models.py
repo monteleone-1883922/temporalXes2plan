@@ -658,6 +658,14 @@ class AnalysisConfig:
     # the analysis for that (transition, attribute) pair.
     attr_precondition_min_firings: int = 10
 
+    # --- Encoding size guard ---
+    # Maximum number of effect groups (action variants) one transition may
+    # reach while its groups are being built; going over raises
+    # EffectGroupBudgetExceeded. The groups are a product over the attributes
+    # a transition sets, so some configs blow up memory (see
+    # encoding/effect_group_builder.py). None = no limit.
+    max_effect_groups_per_transition: Optional[int] = None
+
     # --- Logging ---
     log_removed_effects: bool = True
 

@@ -878,7 +878,7 @@ class Parser:
                     else None
                 ),
             )
-            for attr, values in attr_values.items()
+            for attr, values in sorted(attr_values.items())
         }
 
     def _collect_negated_attributes(self) -> Set[str]:

@@ -10,7 +10,10 @@ import logging
 
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 
+import pytest
+
 from encoding.domain_builder import DomainBuilder, _prepared_effect_groups
+from encoding.effect_group_builder import EffectGroupBudgetExceeded
 from models import (
     ActionDurationStats,
     AttributeCatalogEntry,
@@ -297,3 +300,71 @@ class TestBuildPreparedDomainInputEndToEnd:
         activity_b = prepared.transitions["activity_b"]
         assert all(g.assignments == [] for g in activity_b.effect_groups)
         assert activity_b.preconditions == []
+
+
+def _binary_attributes(n: int) -> TransitionInfo:
+    """n attributes that each may or may not be set, with a fixed value when
+    set: they multiply the groups by 2 each, so the transition ends with 2**n."""
+    return _transition_info({
+        f"attr_{i}": _effect(
+            f"attr_{i}", appearance_level=2, presence_probability=0.5,
+            value_level=1, value_probabilities={"x": 1.0},
+        )
+        for i in range(n)
+    })
+
+
+class TestEffectGroupBudget:
+    def test_limit_exceeded_raises_with_details(self):
+        with pytest.raises(EffectGroupBudgetExceeded) as exc:
+            _prepared_effect_groups(_binary_attributes(6), max_groups=63)
+        assert exc.value.activity_name == "activity_a"
+        assert exc.value.limit == 63
+        assert exc.value.n_groups > 63
+
+    def test_exactly_at_the_limit_is_allowed(self):
+        assert len(_prepared_effect_groups(_binary_attributes(6), max_groups=64)) == 64
+
+    def test_no_limit_gives_the_same_groups_as_a_generous_one(self):
+        info = _binary_attributes(5)
+        unlimited = _prepared_effect_groups(info)
+        generous = _prepared_effect_groups(info, max_groups=10_000)
+        assert [(g.assignments, g.probability) for g in unlimited] == \
+               [(g.assignments, g.probability) for g in generous]
+
+    def test_abort_happens_before_the_product_is_built(self):
+        # 2**30 groups if it were built; the check inside the phase must stop
+        # it after about 2 * limit partial groups.
+        with pytest.raises(EffectGroupBudgetExceeded) as exc:
+            _prepared_effect_groups(_binary_attributes(30), max_groups=100)
+        assert exc.value.n_groups <= 2 * 100 + 2
+
+    def test_value_phase_is_checked_too(self):
+        info = _transition_info({
+            f"attr_{i}": _effect(
+                f"attr_{i}", appearance_level=1, value_level=2,
+                value_probabilities={"a": 0.5, "b": 0.3, "c": 0.2},
+            )
+            for i in range(10)
+        })
+        with pytest.raises(EffectGroupBudgetExceeded):
+            _prepared_effect_groups(info, max_groups=50)
+
+    def test_domain_builder_uses_the_config_limit(self):
+        from models import AnalysisConfig
+        parse_result = ParseResult(
+            petri_net_model=_sequence_petri_net_model(),
+            place_predecessors={},
+            transition_predecessors={},
+            transitions={"activity_a": _binary_attributes(6)},
+            start_place="p_start",
+            end_place="p_end",
+            attribute_catalog={},
+        )
+        with pytest.raises(EffectGroupBudgetExceeded):
+            DomainBuilder().build_prepared_input(
+                parse_result, config=AnalysisConfig(max_effect_groups_per_transition=10),
+            )
+        # no limit by default: same input builds fine
+        prepared = DomainBuilder().build_prepared_input(parse_result)
+        assert len(prepared.transitions["activity_a"].effect_groups) == 64

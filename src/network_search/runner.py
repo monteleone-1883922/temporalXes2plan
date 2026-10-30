@@ -34,18 +34,27 @@ Phase 6 (docs/network_improvement_loop.md §5.4.2, plan §7 point f) adds
 exact early stopping *inside* rung 2: replay stops the moment
 max_reachable_score() proves a trial cannot beat the best score found so
 far, no matter how the remaining test traces replay.
+
+Rung 0 (feasibility gate) sits at the start of rung 1: while a trial's
+effect groups are built, a transition that grows past
+AnalysisConfig.max_effect_groups_per_transition aborts the build
+(EffectGroupBudgetExceeded). Such a trial is never promoted, and Optuna is
+told it violated a constraint, so TPE steers away from that region. This keeps
+configs whose effect-group product would not fit in memory out of the search.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from typing import Any, List, Optional, Set, Tuple
 
 import optuna
 
 import core_utils as utils
 from encoding.domain_builder import DomainBuilder
+from encoding.effect_group_builder import EffectGroupBudgetExceeded
 from encoding.prepared_input import PreparedDomainInput
 from models import AnalysisConfig, ParseResult
 from parsing.xes_parser import (
@@ -88,6 +97,12 @@ class TrialRecord:
     score: Optional[float]
     promoted_to_rung2: bool
     stopped_early: bool
+    # Set when rung 0 rejected the trial (it never reached a score of its own
+    # beyond the rung-1 partial one); max_effect_groups is then the number of
+    # groups reached when the build was aborted, otherwise the largest group
+    # count of any transition.
+    rejected_reason: Optional[str] = None
+    max_effect_groups: Optional[int] = None
 
 
 @dataclasses.dataclass
@@ -98,13 +113,17 @@ class _Rung1Result:
 
     trial: optuna.Trial
     config: AnalysisConfig
-    parse_result: ParseResult
-    prepared: PreparedDomainInput
+    # parse_result/prepared are None for a trial rejected at rung 0 (nothing
+    # to keep), and are dropped once a trial is recorded (frees memory).
+    parse_result: Optional[ParseResult]
+    prepared: Optional[PreparedDomainInput]
     xor_score: float
     effect_score: float
     duplication_score: float
     coverage: float
     partial_score: float
+    rejected_reason: Optional[str] = None
+    max_effect_groups: Optional[int] = None
 
 
 def _evaluate_rung1(
@@ -135,15 +154,37 @@ def _evaluate_rung1(
         preloaded_replay=preloaded_replay,
     )
     parse_result = parser.parse_result
-    prepared = DomainBuilder().build_prepared_input(parse_result, config=config)
 
+    # These three come from the parser alone, so they exist even for a trial
+    # that rung 0 rejects below.
     xor_score = compute_xor_score(parser.xor_screening, weights)
     effect_score = compute_effect_score(parser.effect_screening, weights)
-    duplication_score = compute_duplication_score(prepared.transitions)
     coverage = (
         compute_coverage(parse_result, original_activity_names)
         if original_activity_names is not None else 1.0
     )
+
+    # Rung 0: feasibility gate. The build aborts as soon as one transition's
+    # effect groups pass the limit, long before they could exhaust memory.
+    rejected_reason: Optional[str] = None
+    try:
+        prepared = DomainBuilder().build_prepared_input(parse_result, config=config)
+        duplication_score = compute_duplication_score(prepared.transitions)
+        max_effect_groups = max((len(t.effect_groups) for t in prepared.transitions.values()), default=0)
+    except EffectGroupBudgetExceeded as exc:
+        prepared = None
+        rejected_reason = "effect_group_budget"
+        max_effect_groups = exc.n_groups
+        # Best duplication score the trial could still have had: one
+        # transition already has more than `limit` groups and every other
+        # has at least one (compute_duplication_score's n / total_groups).
+        n_transitions = len(parse_result.transitions)
+        duplication_score = n_transitions / (exc.limit + max(n_transitions - 1, 0)) if n_transitions else 0.0
+        parse_result = None
+        logger.info(
+            "Trial %d: rejected at rung 0 (transition '%s' reached %d effect groups, limit %d)",
+            trial.number, exc.activity_name, exc.n_groups, exc.limit,
+        )
     partial_metrics = TrialMetrics(
         xor_score=xor_score,
         effect_score=effect_score,
@@ -165,11 +206,14 @@ def _evaluate_rung1(
         duplication_score=duplication_score,
         coverage=coverage,
         partial_score=partial_score,
+        rejected_reason=rejected_reason,
+        max_effect_groups=max_effect_groups,
     )
 
 
 def _discarded_record(rung1: _Rung1Result) -> TrialRecord:
-    """Not promoted to rung 2 — score stays the rung-1-only partial_score."""
+    """Not promoted to rung 2 — score stays the rung-1-only partial_score.
+    Also used for trials rejected at rung 0 (rung1.rejected_reason set)."""
     metrics = TrialMetrics(
         xor_score=rung1.xor_score,
         effect_score=rung1.effect_score,
@@ -194,6 +238,8 @@ def _discarded_record(rung1: _Rung1Result) -> TrialRecord:
         score=rung1.partial_score,
         promoted_to_rung2=False,
         stopped_early=False,
+        rejected_reason=rung1.rejected_reason,
+        max_effect_groups=rung1.max_effect_groups,
     )
 
 
@@ -277,6 +323,7 @@ def _evaluate_rung2(
         score=score,
         promoted_to_rung2=True,
         stopped_early=stopped_early,
+        max_effect_groups=rung1.max_effect_groups,
     )
 
 
@@ -334,8 +381,15 @@ def find_best_config(
     records: List[TrialRecord] = []
     # Seeded so the same inputs and seed always propose the same configs
     # (seed=None keeps the old unseeded behaviour).
+    # Rung 0 reports a violated constraint through the trial's "constraint"
+    # user attribute (> 0 = violated), which TPE uses to rank infeasible trials
+    # below feasible ones whatever their score.
     study = optuna.create_study(
-        direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed),
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(
+            seed=seed,
+            constraints_func=lambda frozen: frozen.user_attrs.get("constraint", (0.0,)),
+        ),
     )
     best_score_so_far = float("-inf")
 
@@ -364,21 +418,41 @@ def find_best_config(
                     preloaded, preloaded_replay, base_config=base_config,
                 )
             )
+        # Rung 0 rejects never compete: only the others are ranked and promoted.
         # Best partial_score first -- ties broken by ask() order (stable sort).
-        rung1_results.sort(key=lambda r: r.partial_score, reverse=True)
+        eligible = []
+        rejected = []
+        for r in rung1_results:
+            if r.rejected_reason is None:
+                eligible.append(r)
+            else:
+                rejected.append(r)
+        eligible.sort(key=lambda r: r.partial_score, reverse=True)
 
         n_promote = min(
             max(round(this_round_size * promotion_fraction), min_promoted),
             this_round_size,
         )
-        for i, rung1 in enumerate(rung1_results):
-            if i < n_promote:
+        for i, rung1 in enumerate(eligible + rejected):
+            violation = 0.0
+            if rung1.rejected_reason is not None:
+                record = _discarded_record(rung1)
+                # > 0 whenever the groups went past the limit; grows with how
+                # far over it the build was when aborted.
+                limit = rung1.config.max_effect_groups_per_transition
+                violation = math.log2(rung1.max_effect_groups / limit)
+            elif i < n_promote:
                 record = _evaluate_rung2(rung1, test_traces, weights, best_score_so_far)
                 best_score_so_far = max(best_score_so_far, record.score)
             else:
                 record = _discarded_record(rung1)
             records.append(record)
+            rung1.trial.set_user_attr("constraint", (violation,))
             study.tell(rung1.trial, record.score)
+            # The record has what is needed; drop the heavy objects now
+            # instead of holding all of the round's trials until it ends.
+            rung1.parse_result = None
+            rung1.prepared = None
 
         remaining -= this_round_size
         logger.info(
@@ -386,7 +460,15 @@ def find_best_config(
             round_num, n_promote, this_round_size, best_score_so_far,
         )
 
-    best_record = max(records, key=lambda r: r.score)
+    feasible = [r for r in records if r.rejected_reason is None]
+    if not feasible:
+        raise RuntimeError(
+            f"All {len(records)} trials were rejected at rung 0: every config's effect groups "
+            f"exceeded max_effect_groups_per_transition="
+            f"{records[0].config.max_effect_groups_per_transition}. Raise the limit or "
+            f"widen the search space."
+        )
+    best_record = max(feasible, key=lambda r: r.score)
     logger.info(
         "Search complete: %d trials evaluated, best trial #%d score=%.4f",
         len(records), best_record.trial_number, best_record.score,

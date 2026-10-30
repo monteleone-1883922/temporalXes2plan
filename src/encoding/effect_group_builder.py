@@ -8,7 +8,7 @@ engine (encoding/transition_action_builder.py), not its output.
 """
 import dataclasses
 from collections import defaultdict
-from typing import Dict, FrozenSet, List, Set, Tuple
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 import core_utils as utils
 from encoding.prepared_input import PreparedEffectGroup
@@ -16,6 +16,37 @@ from encoding.transition_action_builder import _dedupe_sop
 from models import EffectInfo, Guard, TransitionInfo
 
 logger = utils.get_logger(__name__)
+
+
+class EffectGroupBudgetExceeded(RuntimeError):
+    """A transition's effect groups grew past the configured limit.
+
+    Raised while the groups are still being built, so the combinatorial
+    product never gets the chance to exhaust memory (see
+    AnalysisConfig.max_effect_groups_per_transition).
+
+    Attributes:
+        activity_name: Transition whose groups exceeded the limit.
+        n_groups: Number of partial groups when the limit was crossed
+            (a lower bound of what the full product would have been).
+        limit: The configured maximum.
+    """
+
+    def __init__(self, activity_name: str, n_groups: int, limit: int) -> None:
+        super().__init__(
+            f"Transition '{activity_name}' reached {n_groups} effect groups "
+            f"(limit {limit})"
+        )
+        self.activity_name = activity_name
+        self.n_groups = n_groups
+        self.limit = limit
+
+
+def _check_budget(info: TransitionInfo, n_groups: int, max_groups: Optional[int]) -> None:
+    """Raise EffectGroupBudgetExceeded when n_groups is over max_groups.
+    max_groups=None means no limit."""
+    if max_groups is not None and n_groups > max_groups:
+        raise EffectGroupBudgetExceeded(info.activity_name, n_groups, max_groups)
 
 
 def _is_fully_deterministic(effect: EffectInfo) -> bool:
@@ -81,6 +112,7 @@ def _prepared_appearance_phase(
     groups: List[_PartialGroup],
     track_cost: bool,
     log_and_skip,
+    max_groups: Optional[int] = None,
 ) -> Tuple[List[_PartialGroup], List[_PartialGroup]]:
     """Returns (with_effect, without_effect) partial-group lists."""
     # always appear but not always with same value
@@ -124,6 +156,7 @@ def _prepared_appearance_phase(
                     guard_clause=g.guard_clause + list(clause),
                     probability=g.probability,
                 ))
+            _check_budget(info, len(with_eff) + len(without), max_groups)
         return with_eff, without
 
     # probably appear
@@ -149,6 +182,7 @@ def _prepared_appearance_phase(
             without.append(_PartialGroup(
                 assignments=list(g.assignments), guard_clause=list(g.guard_clause), probability=without_prob,
             ))
+            _check_budget(info, len(with_eff) + len(without), max_groups)
         return with_eff, without
 
     # appearance_level == 3 (or unrecognised): no data -> effect never applied
@@ -162,6 +196,7 @@ def _prepared_value_phase(
     groups: List[_PartialGroup],
     track_cost: bool,
     log_and_skip,
+    max_groups: Optional[int] = None,
 ) -> List[_PartialGroup]:
     """Assigns a value to attr_name for every group that got the effect in
     the appearance phase (groups here are already "with effect")."""
@@ -200,6 +235,7 @@ def _prepared_value_phase(
                         guard_clause=g.guard_clause + list(clause),
                         probability=g.probability,
                     ))
+            _check_budget(info, len(result), max_groups)
         return result
 
     if effect.value_level == 2:
@@ -212,6 +248,7 @@ def _prepared_value_phase(
                     guard_clause=list(g.guard_clause),
                     probability=probability,
                 ))
+            _check_budget(info, len(result), max_groups)
         return result
 
     # value_level == 3 / no data: attribute "appears" but no value assigned;
@@ -223,8 +260,13 @@ def _prepared_effect_groups(
     info: TransitionInfo,
     track_appearance_cost: bool = True,
     track_value_cost: bool = True,
+    max_groups: Optional[int] = None,
 ) -> List[PreparedEffectGroup]:
     """Derive PreparedEffectGroup combinations directly from TransitionInfo.effects.
+
+    max_groups caps the number of partial groups alive at any point (checked
+    inside the appearance/value phases, so memory stays bounded); crossing it
+    raises EffectGroupBudgetExceeded. None means no cap.
 
     Ports the same combinatorial semantics as EffectDuplicator
     (encoding/effect_duplicator.py), but works on abstract (attribute, value)
@@ -262,10 +304,10 @@ def _prepared_effect_groups(
             continue
 
         with_groups, without_groups = _prepared_appearance_phase(
-            info, attr_name, effect, groups, track_appearance_cost, _log_and_skip
+            info, attr_name, effect, groups, track_appearance_cost, _log_and_skip, max_groups
         )
         valued = _prepared_value_phase(
-            info, attr_name, effect, with_groups, track_value_cost, _log_and_skip
+            info, attr_name, effect, with_groups, track_value_cost, _log_and_skip, max_groups
         )
         # "without" groups never got the attribute, so they pass through
         # unchanged into the next attribute's iteration alongside the newly

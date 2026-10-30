@@ -83,6 +83,9 @@ class PaperEvalConfig:
     buckets_by_log: Dict[str, List[Bucket]] = field(default_factory=dict)
     seed: int = 42  # TPE seed
     search_n_trials: int = 30  # TPE trials
+    # Rung 0 of the TPE search: trials where one transition's effect groups pass
+    # this are rejected before they can exhaust memory (None = no limit).
+    max_effect_groups: Optional[int] = 4096
     discovery_algorithm: str = "inductive"
     coverage_percentage: float = 0.001  # variant coverage filter, as in Pipeline
     data_dir: Path = _REPO_ROOT / "data" / "paper_eval"  # prepared logs
