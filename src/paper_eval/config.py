@@ -1,4 +1,4 @@
-"""Configuration for the paper evaluation suite (see docs/EVALUATION_PLAN.md).
+"""Configuration for the paper evaluation suite (see TIMING_PLAN.md).
 
 Logs come from ERamaM/ProcessMiningDatasets — the same XES versions used by
 the Rama-Maneiro et al. (IEEE TSC 2023) benchmark — pinned to a commit and
@@ -86,6 +86,10 @@ class PaperEvalConfig:
     # Rung 0 of the TPE search: trials where one transition's effect groups pass
     # this are rejected before they can exhaust memory (None = no limit).
     max_effect_groups: Optional[int] = 4096
+    # The first event of a case is input data, not modelled behaviour: its
+    # attributes seed the initial state and its effects are not mined (see
+    # AnalysisConfig.initial_event_as_input).
+    initial_event_as_input: bool = True
     discovery_algorithm: str = "inductive"
     coverage_percentage: float = 0.001  # variant coverage filter, as in Pipeline
     data_dir: Path = _REPO_ROOT / "data" / "paper_eval"  # prepared logs

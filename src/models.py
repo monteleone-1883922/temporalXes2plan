@@ -666,6 +666,19 @@ class AnalysisConfig:
     # encoding/effect_group_builder.py). None = no limit.
     max_effect_groups_per_transition: Optional[int] = None
 
+    # --- First event as input data ---
+    # When True, the attributes written by the first visible event of a trace
+    # are treated as the case's input data, not as behaviour to model: the
+    # first occurrence of an activity is left out of effect and guard mining
+    # (a later occurrence, e.g. in a loop, is mined as usual), and a replay
+    # that starts from zero begins right after that first event, with its
+    # observed attributes as the initial state. Nothing is known before the
+    # first event, so a decision tree cannot explain those values anyway and
+    # they would otherwise be modelled as independent random effects.
+    # Consequence: planning or replaying from an empty trace expects the
+    # initial attributes to be supplied; the model no longer sets them.
+    initial_event_as_input: bool = False
+
     # --- Logging ---
     log_removed_effects: bool = True
 

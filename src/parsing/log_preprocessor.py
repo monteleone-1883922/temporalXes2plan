@@ -89,6 +89,8 @@ class LogPreprocessor:
                 if t in ('categorical', 'numerical')
             }
             attr_is_static: Dict[str, bool] = {}
+            # True until the first visible (non-tau) step of this execution.
+            at_first_event = True
 
             for step in execution.steps:
                 # Tau transitions carry no observable activity and are never
@@ -142,7 +144,18 @@ class LogPreprocessor:
                     changed_attrs=changed,
                     from_places=frozenset(step.from_places),
                 )
-                transition_firings[act].append(fd)
+                if self.config.initial_event_as_input and at_first_event:
+                    # The first event's attributes are the case's input, not a
+                    # modelled effect: keep it out of effect/guard mining. The
+                    # key is still created so the activity counts as fired
+                    # (an activity seen only first ends up with no firings).
+                    # Its XOR firing below is kept: it still says which branch
+                    # was taken. The state update (step 4) still runs, so
+                    # later pre_states include these attributes.
+                    transition_firings.setdefault(act, [])
+                else:
+                    transition_firings[act].append(fd)
+                at_first_event = False
 
                 # If this step traverses one or more XOR-split places, index
                 # the same object under each place it crosses.

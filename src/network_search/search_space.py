@@ -169,5 +169,6 @@ def suggest_config(trial: optuna.Trial, base_config: Optional[AnalysisConfig] = 
         attr_precondition_min_firings=base.attr_precondition_min_firings,
         log_removed_effects=base.log_removed_effects,
         max_effect_groups_per_transition=base.max_effect_groups_per_transition,
+        initial_event_as_input=base.initial_event_as_input,
         snapshot_dir=base.snapshot_dir,
     )

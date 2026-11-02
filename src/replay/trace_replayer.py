@@ -395,9 +395,22 @@ class TraceReplayer:
             model.trans_inputs, model.trans_outputs, model.silent_transitions,
             self.config, is_partial=False,
         )
+        steps = execution.steps
         initial_marking = {p.name for p in model.initial_marking}
+        initial_attributes: Dict[str, str] = {}
+        snapshot_warnings: List[str] = []
+        if self.config.initial_event_as_input:
+            # Start right after the first visible event, with the attributes
+            # it carries (see AnalysisConfig.initial_event_as_input).
+            marking_at, raw_attributes_at, event_counts, snapshot_warnings = (
+                self._build_snapshots(execution.steps)
+            )
+            start = next((k for k in range(len(event_counts)) if event_counts[k] >= 1), len(steps))
+            steps = steps[start:]
+            initial_marking = marking_at[start]
+            initial_attributes = raw_attributes_at[start]
         result = self._walk(
-            execution.steps, initial_marking=initial_marking, initial_attributes={},
+            steps, initial_marking=initial_marking, initial_attributes=initial_attributes,
             target_final_attributes=None, accumulate_duration=False,
         )
         return ReplayOutcome(
@@ -407,7 +420,7 @@ class TraceReplayer:
             steps=result.steps,
             final_marking=result.final_marking,
             final_attributes=result.final_attributes,
-            warnings=phase1_warnings + result.warnings,
+            warnings=phase1_warnings + snapshot_warnings + result.warnings,
         )
 
     def replay_partial_trace(self, trace: Any) -> PartialTraceSnapshot:
@@ -499,6 +512,11 @@ class TraceReplayer:
         warnings = list(phase1_warnings)
 
         total_events = event_counts[-1]
+        if self.config.initial_event_as_input and n_prefix < 1 and total_events >= 1:
+            # Replaying from zero: the first event is input data, so the walk
+            # starts right after it with its observed attributes as the state
+            # (see AnalysisConfig.initial_event_as_input).
+            n_prefix = 1
         if n_prefix > total_events:
             warnings.append(
                 f"n_prefix ({n_prefix}) exceeds the {total_events} visible "

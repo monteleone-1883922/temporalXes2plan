@@ -25,12 +25,12 @@ _FLAG_RISK_CATALOG = {
 }
 
 
-def _replayer(tau_seq_net, transitions, catalog=None):
+def _replayer(tau_seq_net, transitions, catalog=None, config=None):
     prepared = PreparedDomainInput(
         transitions=transitions, xor_branches={},
         attribute_catalog=catalog or _FLAG_RISK_CATALOG, nodes=[], edges=[],
     )
-    return TraceReplayer(prepared, tau_seq_net, AnalysisConfig())
+    return TraceReplayer(prepared, tau_seq_net, config or AnalysisConfig())
 
 
 class TestReplayFullTraceNoAmbiguity:
@@ -635,3 +635,60 @@ class TestReplayAllSplits:
         with patch.object(module, "align_single_trace", wraps=module.align_single_trace) as align:
             replayer.replay_all_splits(trace, [0, 1, 2])
         assert align.call_count == 1
+
+
+class TestInitialEventAsInput:
+    """With initial_event_as_input the first event's attributes are the
+    initial state, so a first transition without effect groups costs nothing
+    and a replay from zero starts right after it."""
+
+    @staticmethod
+    def _transitions():
+        # A has no effect groups (its attributes are input data); B sets risk.
+        trans_a = PreparedTransition(activity_name="A", input_places=["p_in"], preconditions=[], effect_groups=[])
+        trans_b = PreparedTransition(
+            activity_name="B", input_places=["p_mid2"], preconditions=[],
+            effect_groups=[PreparedEffectGroup(assignments=[("risk", "high")], guard=[], probability=1.0)],
+        )
+        return {"A": trans_a, "B": trans_b}
+
+    @staticmethod
+    def _trace():
+        return make_trace(make_event("A", flag="x"), make_event("B", risk="high"))
+
+    def test_without_the_flag_a_first_transition_without_effects_loses_its_attributes(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, self._transitions())
+        outcome = replayer.replay_evaluation_split(self._trace(), n_prefix=0)
+        assert outcome.reached_end
+        assert not outcome.matches_expected_final_state  # flag=x was never set
+
+    def test_with_the_flag_a_replay_from_zero_matches_the_final_state(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, self._transitions(), config=AnalysisConfig(initial_event_as_input=True))
+        outcome = replayer.replay_evaluation_split(self._trace(), n_prefix=0)
+        assert outcome.reached_end
+        assert outcome.matches_expected_final_state
+        assert outcome.split_attributes == {"flag": "x"}
+        assert [s.activity_name for s in outcome.steps] == ["tau_1", "B"]  # A itself is not walked
+
+    def test_with_the_flag_n_prefix_zero_is_the_same_as_one(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, self._transitions(), config=AnalysisConfig(initial_event_as_input=True))
+        zero = replayer.replay_evaluation_split(self._trace(), n_prefix=0)
+        one = replayer.replay_evaluation_split(self._trace(), n_prefix=1)
+        assert zero.split_marking == one.split_marking
+        assert zero.split_attributes == one.split_attributes
+        assert zero.final_attributes == one.final_attributes
+
+    def test_a_cut_after_the_first_event_is_unaffected_by_the_flag(self, tau_seq_net):
+        base = _replayer(tau_seq_net, self._transitions()).replay_evaluation_split(self._trace(), n_prefix=2)
+        flagged = _replayer(
+            tau_seq_net, self._transitions(), config=AnalysisConfig(initial_event_as_input=True),
+        ).replay_evaluation_split(self._trace(), n_prefix=2)
+        assert base.split_attributes == flagged.split_attributes
+        assert base.final_attributes == flagged.final_attributes
+
+    def test_replay_full_trace_starts_after_the_first_event(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, self._transitions(), config=AnalysisConfig(initial_event_as_input=True))
+        outcome = replayer.replay_full_trace(self._trace())
+        assert outcome.is_replayable
+        assert outcome.final_attributes == {"flag": "x", "risk": "high"}
+        assert outcome.final_marking == {"p_out"}

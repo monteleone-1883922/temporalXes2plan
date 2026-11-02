@@ -514,3 +514,80 @@ class TestTransitionFiringCounts:
         ])]
         result = _preprocessor().preprocess(_pn_log(execs), {})
         assert len(result.transition_firings["A"]) == 2
+
+
+# ===========================================================================
+# initial_event_as_input
+# ===========================================================================
+
+class TestInitialEventAsInput:
+    """The first visible event of a trace is the case's input data: with the
+    flag on it is left out of effect/guard mining, but the state still
+    carries its attributes into every later pre_state."""
+
+    @staticmethod
+    def _log():
+        t_reg = _transition("t_reg", "Register")
+        t_work = _transition("t_work", "Work")
+        p_in, p_mid, p_out = _place("p_in"), _place("p_mid"), _place("p_out")
+        execs = [
+            _execution(f"c{i}", [
+                _step(t_reg, {p_in}, attributes={"risk": "high"}),
+                _step(t_work, {p_mid}, attributes={"done": "yes"}),
+            ])
+            for i in range(3)
+        ]
+        return _pn_log(execs)
+
+    def test_off_by_default_first_event_is_mined(self):
+        result = _preprocessor().preprocess(self._log(), {})
+        assert len(result.transition_firings["Register"]) == 3
+
+    def test_first_event_is_left_out_of_effect_mining(self):
+        config = AnalysisConfig(initial_event_as_input=True)
+        result = _preprocessor(config).preprocess(self._log(), {})
+        assert result.transition_firings["Register"] == []
+        assert len(result.transition_firings["Work"]) == 3
+
+    def test_activity_seen_only_first_is_still_listed_as_fired(self):
+        config = AnalysisConfig(initial_event_as_input=True)
+        result = _preprocessor(config).preprocess(self._log(), {})
+        assert "Register" in result.transition_firings
+
+    def test_later_pre_state_still_carries_the_first_events_attributes(self):
+        config = AnalysisConfig(initial_event_as_input=True)
+        result = _preprocessor(config).preprocess(self._log(), {})
+        assert result.transition_firings["Work"][0].pre_state["risk"] == "high"
+
+    def test_a_repeated_activity_is_mined_from_later_occurrences_only(self):
+        t_reg = _transition("t_reg", "Register")
+        p = _place("p")
+        execs = [_execution("c1", [
+            _step(t_reg, {p}, attributes={"risk": "high"}),
+            _step(t_reg, {p}, attributes={"risk": "low"}),
+            _step(t_reg, {p}, attributes={"risk": "low"}),
+        ])]
+        config = AnalysisConfig(initial_event_as_input=True)
+        result = _preprocessor(config).preprocess(_pn_log(execs), {})
+        firings = result.transition_firings["Register"]
+        assert len(firings) == 2
+        assert [fd.changed_attrs for fd in firings] == [{"risk": "low"}, {}]
+
+    def test_tau_before_the_first_event_does_not_count_as_it(self):
+        t_tau = _transition("t_tau", None)
+        t_reg = _transition("t_reg", "Register")
+        p = _place("p")
+        execs = [_execution("c1", [
+            _step(t_tau, {p}, is_tau=True),
+            _step(t_reg, {p}, attributes={"risk": "high"}),
+        ])]
+        config = AnalysisConfig(initial_event_as_input=True)
+        result = _preprocessor(config).preprocess(_pn_log(execs), {})
+        assert result.transition_firings["Register"] == []
+
+    def test_first_events_xor_firing_is_kept_for_branch_probabilities(self):
+        t_src, t_b, t_c, p_in, p_xor = _xor_net()
+        execs = [_execution("c1", [_step(t_b, {p_xor}, attributes={"x": "1"})])]
+        config = AnalysisConfig(initial_event_as_input=True)
+        result = _preprocessor(config).preprocess(_pn_log(execs), {p_xor: [t_b, t_c]})
+        assert len(result.xor_firings[p_xor.name]) == 1

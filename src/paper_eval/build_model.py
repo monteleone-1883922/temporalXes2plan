@@ -108,7 +108,10 @@ def build_model(
             use_costs=True,
             # The cap on effect groups per transition keeps TPE configs whose
             # group product would not fit in memory out of the search.
-            config=AnalysisConfig(max_effect_groups_per_transition=cfg.max_effect_groups),
+            config=AnalysisConfig(
+                max_effect_groups_per_transition=cfg.max_effect_groups,
+                initial_event_as_input=cfg.initial_event_as_input,
+            ),
             search=True,
             search_n_trials=cfg.search_n_trials,
             search_seed=cfg.seed,
