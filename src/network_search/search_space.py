@@ -170,5 +170,12 @@ def suggest_config(trial: optuna.Trial, base_config: Optional[AnalysisConfig] = 
         log_removed_effects=base.log_removed_effects,
         max_effect_groups_per_transition=base.max_effect_groups_per_transition,
         initial_event_as_input=base.initial_event_as_input,
+        keep_attributes=base.keep_attributes,
+        noise_filter=base.noise_filter,
+        noise_max_distinct_text=base.noise_max_distinct_text,
+        noise_counter_min_distinct=base.noise_counter_min_distinct,
+        noise_counter_min_carry=base.noise_counter_min_carry,
+        noise_counter_min_change=base.noise_counter_min_change,
+        unused_attribute_filter=base.unused_attribute_filter,
         snapshot_dir=base.snapshot_dir,
     )

@@ -158,7 +158,11 @@ def _evaluate_rung1(
     # These three come from the parser alone, so they exist even for a trial
     # that rung 0 rejects below.
     xor_score = compute_xor_score(parser.xor_screening, weights)
-    effect_score = compute_effect_score(parser.effect_screening, weights)
+    # Attributes the unused-attribute filter drops from the model must not
+    # count in the score either, or the TPE would be penalised for attributes
+    # that are no longer there (empty set when the filter is off).
+    unused_attributes = DomainBuilder().unused_attributes(parse_result, config)
+    effect_score = compute_effect_score(parser.effect_screening, weights, exclude_attributes=unused_attributes)
     coverage = (
         compute_coverage(parse_result, original_activity_names)
         if original_activity_names is not None else 1.0
@@ -375,7 +379,11 @@ def find_best_config(
     """
     weights = weights or ScoreWeights()
 
-    preloaded = load_and_discover(training_log_path, coverage_percentage, discovery_algorithm)
+    # base_config carries the attribute lists and noise settings; the TPE never
+    # tunes them, so one load serves every trial.
+    preloaded = load_and_discover(
+        training_log_path, coverage_percentage, discovery_algorithm, config=base_config,
+    )
     preloaded_replay = preload_replay(preloaded, base_config)
 
     records: List[TrialRecord] = []

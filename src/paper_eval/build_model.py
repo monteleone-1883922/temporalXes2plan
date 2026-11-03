@@ -20,14 +20,14 @@ import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from core_utils import _load_log, save_original_and_current, write_traces_xes
-from encoding.domain_builder import build_domain_with_variant_map
+from encoding.domain_builder import DomainBuilder, build_domain_with_variant_map
 from encoding.prepared_graph_utils import build_petrinet_model_from_prepared
 from encoding.prepared_input import PreparedDomainInput
 from models import AnalysisConfig
-from paper_eval.config import PaperEvalConfig
+from paper_eval.config import LogSpec, PaperEvalConfig
 from paper_eval.split import SplitResult, case_id
 from pipeline import Pipeline
 
@@ -60,14 +60,19 @@ def config_to_dict(config: AnalysisConfig) -> Dict[str, Any]:
 def config_from_dict(data: Dict[str, Any]) -> AnalysisConfig:
     data = dict(data)
     data["ignored_attributes"] = set(data.get("ignored_attributes", []))
+    data["keep_attributes"] = tuple(data.get("keep_attributes", ()))  # JSON gives a list
     return AnalysisConfig(**data)
 
 
 def build_model(
     log_xes: Path, split: SplitResult, cfg: PaperEvalConfig, model_dir: Path, force: bool = False,
+    log_spec: Optional[LogSpec] = None,
 ) -> Path:
     """Run the search + final build on TRAIN and persist the result in
-    model_dir. Skipped when model_dir/current.json exists, unless force."""
+    model_dir. Skipped when model_dir/current.json exists, unless force.
+
+    log_spec supplies this log's attribute lists (ignore and keep); None means
+    no lists, only the defaults and the automatic filters."""
     model_dir = Path(model_dir)
     # Cache: current.json is the last file written, so its presence means
     # a previous build completed.
@@ -91,6 +96,20 @@ def build_model(
             f"split lists {len(train_ids)} training cases, {len(train_traces)} found in {log_xes}"
         )
 
+    # The log's own ignore list ADDS to AnalysisConfig's default ignored set
+    # (org:resource, ...); keep protects attributes from the two automatic
+    # filters only. AnalysisConfig raises if an attribute is in both lists.
+    ignore_list = tuple(log_spec.ignore_attributes) if log_spec else ()
+    keep_list = tuple(log_spec.keep_attributes) if log_spec else ()
+    analysis_config = AnalysisConfig(
+        max_effect_groups_per_transition=cfg.max_effect_groups,
+        initial_event_as_input=cfg.initial_event_as_input,
+        ignored_attributes=AnalysisConfig().ignored_attributes | set(ignore_list),
+        keep_attributes=keep_list,
+        noise_filter=cfg.noise_filter,
+        unused_attribute_filter=cfg.unused_attribute_filter,
+    )
+
     # The Parser reads from file, so the TRAIN subset goes to a temp XES.
     with tempfile.TemporaryDirectory() as tmp:
         train_xes = write_traces_xes(log, train_traces, Path(tmp) / "train.xes")
@@ -108,10 +127,7 @@ def build_model(
             use_costs=True,
             # The cap on effect groups per transition keeps TPE configs whose
             # group product would not fit in memory out of the search.
-            config=AnalysisConfig(
-                max_effect_groups_per_transition=cfg.max_effect_groups,
-                initial_event_as_input=cfg.initial_event_as_input,
-            ),
+            config=analysis_config,
             search=True,
             search_n_trials=cfg.search_n_trials,
             search_seed=cfg.seed,
@@ -135,6 +151,19 @@ def build_model(
     (model_dir / "analysis_config.json").write_text(
         json.dumps(config_to_dict(result.config), indent=2), encoding="utf-8",
     )
+    # What the attribute filters did, for the paper's per-log table and for
+    # reproducibility. noise_filter comes from the final build; the unused
+    # attributes are recomputed from its ParseResult by the same function the
+    # encoding used.
+    attribute_report = {
+        "ignored_by_user": sorted(ignore_list),
+        "kept_by_user": sorted(keep_list),
+        "noise_filter": result.noise_attributes,
+        "unused_attribute_filter": sorted(DomainBuilder().unused_attributes(result.parse_result, result.config)),
+        "attribute_catalog_size_before": len(result.parse_result.attribute_catalog),
+        "attribute_catalog_size_after": len(result.prepared.attribute_catalog),
+    }
+    (model_dir / "attribute_filter.json").write_text(json.dumps(attribute_report, indent=2), encoding="utf-8")
     # One entry per TPE trial, to report how the search behaved.
     trials = [
         {

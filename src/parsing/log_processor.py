@@ -1,7 +1,7 @@
 
 import copy
 from tqdm import tqdm
-from typing import Dict, Any, Tuple, Set
+from typing import Dict, Any, Iterable, Optional, Tuple, Set
 import pm4py
 import core_utils as utils
 from parsing.csv_loader import csv_to_event_log, load_mapping_file
@@ -15,16 +15,32 @@ class LogProcessor:
     """
     IGNORED_ATTRIBUTES = {'case:concept:name', 'concept:name', 'time:timestamp', 'lifecycle:transition', 'org:resource', 'org:group', 'variant-index', 'Resource', 'org:role'}
 
-    def __init__(self, log_path: str, use_activity_classifier: bool = False) -> None:
+    def __init__(
+        self,
+        log_path: str,
+        use_activity_classifier: bool = False,
+        ignored_attributes: Optional[Iterable[str]] = None,
+    ) -> None:
         """
         Initialize the LogProcessor.
 
         Args:
             log_path: Path to the XES event log file.
             use_activity_classifier: Whether to combine concept:name and lifecycle:transition as activity names.
+            ignored_attributes: Event attributes to leave out of the attribute
+                catalog (and so out of discretization and of the model state).
+                None keeps the class default; callers that have an AnalysisConfig
+                pass config.ignored_attributes so both agree on the same list.
         """
         self.log_path = log_path
         self.use_activity_classifier = use_activity_classifier
+        self.ignored_attributes = (
+            frozenset(ignored_attributes) if ignored_attributes is not None else frozenset(self.IGNORED_ATTRIBUTES)
+        )
+        # attribute -> {value: number of events}, filled by categorize_attributes
+        # and reused by the noise filter (parsing/attribute_filter.py) so the
+        # log is not scanned a second time for the same counts.
+        self.attribute_value_counts: Dict[str, Dict[Any, int]] = {}
 
     def load_and_filter_log(self, coverage_percentage: float) -> Tuple[Any, Any, Any]:
         """
@@ -63,7 +79,14 @@ class LogProcessor:
                 if 'complete' in lifecycle_values:
                     n_traces_before = len(log)
                     events_before = sum(len(t) for t in log)
-                    log = pm4py.filter_event_attribute_values(log, 'lifecycle:transition', ['complete'])
+                    # level="event" removes the EVENTS that are not 'complete'. pm4py's default,
+                    # level="case", keeps every trace that contains at least one 'complete'
+                    # event and removes no event at all, so start events used to stay in the
+                    # log the Petri net is discovered from (each activity then appeared twice
+                    # in a row and the net got spurious loops and silent steps).
+                    log = pm4py.filter_event_attribute_values(
+                        log, 'lifecycle:transition', ['complete'], level="event",
+                    )
                     n_traces_after = len(log)
                     events_after = sum(len(t) for t in log)
                     logger.info(
@@ -72,8 +95,10 @@ class LogProcessor:
                         n_traces_after, n_traces_before - n_traces_after,
                         events_after, events_before - events_after,
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                # A log without a lifecycle attribute lands here too; say so instead of
+                # failing silently, since a skipped filter changes the discovered net.
+                logger.warning("Lifecycle filter skipped: %s", exc)
 
         full_log = log  # Store full log for frequency computation
         
@@ -112,7 +137,7 @@ class LogProcessor:
             Tuple of (attributes_set, attribute_categories_dict).
         """
         attributes = {attr for attr in pm4py.get_event_attributes(full_log)
-                      if attr not in self.IGNORED_ATTRIBUTES}
+                      if attr not in self.ignored_attributes}
         attribute_categories = self.categorize_attributes(full_log)
         return attributes, attribute_categories
 
@@ -141,10 +166,14 @@ class LogProcessor:
         
         # Include event attributes
         for attr in pm4py.get_event_attributes(full_log):
-            if attr in self.IGNORED_ATTRIBUTES:
+            if attr in self.ignored_attributes:
                 continue 
             sanitized_name = attr
-            values = pm4py.get_event_attribute_values(full_log, attr).keys()
+            # pm4py returns {value: count}; the counts are kept for the noise
+            # filter, the categorisation below only needs the values.
+            value_counts = pm4py.get_event_attribute_values(full_log, attr)
+            self.attribute_value_counts[sanitized_name] = value_counts
+            values = value_counts.keys()
             attr_categories[sanitized_name] = 'boolean' \
                 if all(isinstance(val, bool) for val in values) \
                 else 'numerical' \

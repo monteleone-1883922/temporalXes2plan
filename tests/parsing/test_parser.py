@@ -656,3 +656,92 @@ class TestPreloadedEquivalence:
         direct_durations = {t.activity_name for t in direct.transitions.values() if t.duration is not None}
         preloaded_durations = {t.activity_name for t in via_preloaded.transitions.values() if t.duration is not None}
         assert direct_durations == preloaded_durations
+
+
+# ---------------------------------------------------------------------------
+# Attribute filters: ignore list, noise filter (filter 1), unused filter (filter 2)
+# ---------------------------------------------------------------------------
+
+def _make_noisy_xor_log() -> EventLog:
+    """The XOR log plus three kinds of attribute that should not reach the model:
+    event_id (unique per event), const (one value) and junk (will be ignored by name)."""
+    log = _make_xor_log()
+    n = 0
+    for trace in log:
+        for event in trace:
+            event["event_id"] = f"e{n}"
+            event["const"] = "same"
+            event["junk"] = f"j{n % 3}"
+            n += 1
+    return log
+
+
+@pytest.mark.integration
+class TestAttributeFilters:
+    @staticmethod
+    def _xes(tmp_path_factory) -> str:
+        tmp = tmp_path_factory.mktemp("parser_attribute_filters")
+        path = str(tmp / "noisy.xes")
+        pm4py.write_xes(_make_noisy_xor_log(), path)
+        return path
+
+    @staticmethod
+    def _config(tmp_path_factory, **kwargs) -> AnalysisConfig:
+        return AnalysisConfig(
+            dt_min_samples=20, probability_min_samples=5,
+            snapshot_dir=str(tmp_path_factory.mktemp("snap")), **kwargs,
+        )
+
+    def test_without_filters_every_attribute_is_catalogued(self, tmp_path_factory):
+        xes = self._xes(tmp_path_factory)
+        parser = Parser(xes, 0.8, "inductive", config=self._config(tmp_path_factory))
+        assert {"event_id", "const", "junk"} <= set(parser.attribute_categories)
+        assert parser.noise_attributes == {}
+
+    def test_ignore_list_removes_the_attribute_from_the_whole_model(self, tmp_path_factory):
+        xes = self._xes(tmp_path_factory)
+        ignored = AnalysisConfig().ignored_attributes | {"junk"}
+        parser = Parser(xes, 0.8, "inductive", config=self._config(tmp_path_factory, ignored_attributes=ignored))
+        assert "junk" not in parser.attribute_categories
+        assert all("junk" not in t.effects for t in parser.parse_result.transitions.values())
+        assert "junk" not in parser.parse_result.attribute_catalog
+
+    def test_noise_filter_removes_unique_ids_and_constants_but_not_real_attributes(self, tmp_path_factory):
+        xes = self._xes(tmp_path_factory)
+        parser = Parser(xes, 0.8, "inductive", config=self._config(tmp_path_factory, noise_filter=True))
+        assert {"event_id", "const"} <= set(parser.noise_attributes)
+        assert "risk" not in parser.noise_attributes and "outcome" not in parser.noise_attributes
+        assert not ({"event_id", "const"} & set(parser.attribute_categories))
+        for info in parser.parse_result.transitions.values():
+            assert not ({"event_id", "const"} & set(info.effects))
+        assert not ({"event_id", "const"} & set(parser.parse_result.attribute_catalog))
+
+    def test_keep_attributes_survive_the_noise_filter(self, tmp_path_factory):
+        xes = self._xes(tmp_path_factory)
+        config = self._config(tmp_path_factory, noise_filter=True, keep_attributes=("const",))
+        parser = Parser(xes, 0.8, "inductive", config=config)
+        assert "const" not in parser.noise_attributes
+        assert "const" in parser.attribute_categories
+        assert "event_id" in parser.noise_attributes
+
+    def test_the_noise_filter_works_through_preloaded_data_too(self, tmp_path_factory):
+        # the TPE loads once and shares the result across trials: noise_attributes must travel with it
+        xes = self._xes(tmp_path_factory)
+        config = self._config(tmp_path_factory, noise_filter=True)
+        preloaded = load_and_discover(xes, 0.8, "inductive", config=config)
+        assert {"event_id", "const"} <= set(preloaded.noise_attributes)
+        parser = Parser(xes, 0.8, "inductive", config=config, preloaded=preloaded)
+        assert parser.noise_attributes == preloaded.noise_attributes
+
+    def test_unused_filter_keeps_only_the_attributes_a_guard_reads(self, tmp_path_factory):
+        from encoding.domain_builder import DomainBuilder
+        xes = self._xes(tmp_path_factory)
+        config = self._config(tmp_path_factory, noise_filter=True, unused_attribute_filter=True)
+        parse_result = Parser(xes, 0.8, "inductive", config=config).parse_result
+        unused = DomainBuilder().unused_attributes(parse_result, config)
+        assert "risk" not in unused  # read by the XOR split's guards
+        prepared = DomainBuilder().build_prepared_input(parse_result, config)
+        assert "risk" in prepared.attribute_catalog
+        assert not (unused & set(prepared.attribute_catalog))
+        assigned = {a for t in prepared.transitions.values() for g in t.effect_groups for a, _ in g.assignments}
+        assert not (unused & assigned)

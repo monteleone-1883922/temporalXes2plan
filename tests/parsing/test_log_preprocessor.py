@@ -591,3 +591,37 @@ class TestInitialEventAsInput:
         config = AnalysisConfig(initial_event_as_input=True)
         result = _preprocessor(config).preprocess(_pn_log(execs), {p_xor: [t_b, t_c]})
         assert len(result.xor_firings[p_xor.name]) == 1
+
+
+# ===========================================================================
+# ignored_attributes (explicit list, e.g. config list plus noise-filter result)
+# ===========================================================================
+
+class TestExplicitIgnoredAttributes:
+    @staticmethod
+    def _log():
+        t_reg = _transition("t_reg", "Register")
+        t_work = _transition("t_work", "Work")
+        p_in, p_mid = _place("p_in"), _place("p_mid")
+        return _pn_log([_execution("c1", [
+            _step(t_reg, {p_in}, attributes={"risk": "high", "junk": "j1"}),
+            _step(t_work, {p_mid}, attributes={"done": "yes", "junk": "j2"}),
+        ])])
+
+    def test_attribute_in_the_explicit_list_never_reaches_state_or_firings(self):
+        pre = LogPreprocessor(config=AnalysisConfig(), ignored_attributes={"junk"})
+        result = pre.preprocess(self._log(), {})
+        work = result.transition_firings["Work"][0]
+        assert "junk" not in work.pre_state and "junk" not in work.changed_attrs
+        assert work.pre_state["risk"] == "high"
+
+    def test_without_the_list_the_configs_ignored_set_applies(self):
+        # junk is not in the config's default ignored set, so it is mined as usual
+        result = _preprocessor().preprocess(self._log(), {})
+        assert result.transition_firings["Work"][0].pre_state["junk"] == "j1"
+
+    def test_explicit_list_replaces_the_configs_set(self):
+        # the Parser passes config.ignored_attributes | noise; a bare list is used as is
+        pre = LogPreprocessor(config=AnalysisConfig(), ignored_attributes=set())
+        result = pre.preprocess(self._log(), {})
+        assert result.transition_firings["Work"][0].changed_attrs["junk"] == "j2"

@@ -18,7 +18,8 @@ The heavy lifting is delegated to sibling modules, one per build phase:
     encoding/transition_action_builder.py — the 3-axis action-variant engine
 This file only orchestrates them and assembles the final PDDLDomain.
 """
-from typing import Dict, List, Optional, Tuple
+import dataclasses
+from typing import Dict, List, Optional, Set, Tuple
 
 import core_utils as utils
 from encoding.effect_group_builder import _prepared_effect_groups
@@ -105,8 +106,48 @@ def _maybe_rescale_durations(domain: PDDLDomain) -> None:
     )
 
 
+def _attribute_usage(parse_result: ParseResult) -> Tuple[Set[str], Set[str]]:
+    """(written, read) attributes of a ParseResult.
+
+    written: attributes that some transition assigns (keys of TransitionInfo.effects).
+    read:    attributes that appear in a guard, i.e. in anything that decides
+             whether an action is applicable: the guards of an XOR branch and
+             the appearance/value guards of an effect (which become part of
+             the action's preconditions).
+    """
+    written: Set[str] = set()
+    read: Set[str] = set()
+    for info in parse_result.transitions.values():
+        written |= set(info.effects)
+        for branch in (info.xor_branches or []):
+            for clause in (branch.guards or []):
+                read |= {g.attribute for g in clause}
+        for effect in info.effects.values():
+            for effect_guards in (effect.appearance_guards, effect.value_guards):
+                if effect_guards is not None:
+                    for sop in effect_guards.guards.values():
+                        for clause in sop:
+                            read |= {g.attribute for g in clause}
+    return written, read
+
+
 class DomainBuilder:
     """Builds a PDDLDomain from a ParseResult."""
+
+    def unused_attributes(
+        self, parse_result: ParseResult, config: Optional[AnalysisConfig] = None,
+    ) -> Set[str]:
+        """Attributes the unused-attribute filter (filter 2) would drop.
+
+        Written by some transition, read by no guard, and not protected by
+        config.keep_attributes. Empty when the filter is off. Pure, so tests,
+        the TPE score and the report can all ask the same question.
+        """
+        config = config or AnalysisConfig()
+        if not config.unused_attribute_filter:
+            return set()
+        written, read = _attribute_usage(parse_result)
+        return written - read - set(config.keep_attributes)
 
     def build_prepared_input(
         self, parse_result: ParseResult, config: Optional[AnalysisConfig] = None,
@@ -124,6 +165,16 @@ class DomainBuilder:
         track_appearance_cost = config.effect_appearance_mode != "duplicate_no_cost"
         track_value_cost = config.effect_value_mode != "duplicate_no_cost"
 
+        # Filter 2: attributes no guard reads cannot change which actions are
+        # applicable, so their effects are dropped BEFORE the effect groups are
+        # built. Building without them is what "merges the groups that become
+        # equal": two groups that differed only in an unused attribute are now
+        # one, with the sum of their probabilities (the values of an attribute
+        # have probabilities that add up to 1, so summing over the dropped
+        # attribute gives exactly the product over the remaining ones). It
+        # also keeps the product from growing with attributes nobody reads.
+        unused = self.unused_attributes(parse_result, config)
+
         xor_branches: Dict[str, List[PreparedXorBranch]] = {}
         transitions: Dict[str, PreparedTransition] = {}
         for trans_name, info in sorted(parse_result.transitions.items()):
@@ -133,17 +184,33 @@ class DomainBuilder:
                         PreparedXorBranch(trans_name, xor_branch.guards, xor_branch.probability)
                     )
 
+            effect_source = info
+            if unused:
+                effect_source = dataclasses.replace(
+                    info, effects={a: e for a, e in info.effects.items() if a not in unused},
+                )
+
             transitions[trans_name] = PreparedTransition(
                 activity_name=trans_name,
                 input_places=info.input_places,
                 preconditions=[],
                 effect_groups=_prepared_effect_groups(
-                    info, track_appearance_cost, track_value_cost,
+                    effect_source, track_appearance_cost, track_value_cost,
                     config.max_effect_groups_per_transition,
                 ),
                 cost=0.0,
                 duration=info.duration,
             )
+
+        attribute_catalog = parse_result.attribute_catalog
+        if config.unused_attribute_filter:
+            # With the effects gone, an attribute that is neither read by a
+            # guard nor protected by keep_attributes cannot matter, so it
+            # leaves the catalog too (fewer types and predicates in the PDDL;
+            # the replay already ignores attributes that are not in the catalog).
+            _, read = _attribute_usage(parse_result)
+            keep = read | set(config.keep_attributes)
+            attribute_catalog = {a: entry for a, entry in attribute_catalog.items() if a in keep}
 
         nodes, edges = PreparedDomainInput.build_graph_from_petri_net(parse_result.petri_net_model)
         return PreparedDomainInput(
@@ -151,7 +218,7 @@ class DomainBuilder:
             edges=edges,
             transitions=transitions,
             xor_branches=xor_branches,
-            attribute_catalog=parse_result.attribute_catalog,
+            attribute_catalog=attribute_catalog,
         )
 
 

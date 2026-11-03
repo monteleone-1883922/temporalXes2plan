@@ -45,11 +45,18 @@ class LogPreprocessor:
         self,
         config: Optional[AnalysisConfig] = None,
         discretizer: Optional[Discretizer] = None,
-        attribute_categories: Optional[Dict[str, str]] = None
+        attribute_categories: Optional[Dict[str, str]] = None,
+        ignored_attributes: Optional[Set[str]] = None,
     ) -> None:
         self.config = config or AnalysisConfig()
         self._discretizer = discretizer
         self.attribute_categories = attribute_categories or {}
+        # Attributes that must never enter the running state or a firing. The
+        # Parser passes config.ignored_attributes plus whatever the noise
+        # filter found; without it the config's own list is used.
+        self.ignored_attributes = (
+            ignored_attributes if ignored_attributes is not None else self.config.ignored_attributes
+        )
 
     def preprocess(
         self,
@@ -122,7 +129,7 @@ class LogPreprocessor:
                 for attr, val in step.attributes.items():
                     if attr not in attr_is_static:
                         attr_is_static[attr] = True
-                    if attr in self.config.ignored_attributes or val is None:
+                    if attr in self.ignored_attributes or val is None:
                         continue
                     sanitized = attr
                     if (self._discretizer is not None
@@ -170,7 +177,7 @@ class LogPreprocessor:
                 # attribute set, not just `changed`, to ensure the state stays
                 # in sync even if an attribute is rewritten with the same value.
                 for attr, val in step.attributes.items():
-                    if attr in self.config.ignored_attributes or val is None:
+                    if attr in self.ignored_attributes or val is None:
                         continue
                     sanitized = attr
                     if (self._discretizer is not None

@@ -307,3 +307,35 @@ class TestComputeCoverage:
     def test_no_activities_present_returns_zero(self):
         pr = _FakeParseResult([])
         assert compute_coverage(pr, {"a", "b"}) == 0.0
+
+
+class TestComputeEffectScoreExcludedAttributes:
+    """exclude_attributes: the attributes the unused-attribute filter removes
+    must not count, or the TPE would be penalised for them."""
+
+    @staticmethod
+    def _screening():
+        return {"act": TransitionScreening(
+            transition_name="act", total_firings=10,
+            attributes={
+                "kept": _effect_attr("deterministic", "deterministic"),
+                "dropped": _effect_attr("fallback", "fallback"),
+            },
+        )}
+
+    def test_without_exclusion_every_attribute_counts(self):
+        both = compute_effect_score(self._screening(), WEIGHTS)
+        reward, penalty = 0.5 + 0.5 * WEIGHTS.w_det_eff, 0.5 - 0.5 * WEIGHTS.w_fb_eff
+        assert both == pytest.approx((2 * reward + 2 * penalty) / 4)
+
+    def test_excluded_attribute_does_not_count(self):
+        only_kept = compute_effect_score(self._screening(), WEIGHTS, exclude_attributes={"dropped"})
+        assert only_kept == pytest.approx(0.5 + 0.5 * WEIGHTS.w_det_eff)
+
+    def test_excluding_everything_gives_the_neutral_score(self):
+        assert compute_effect_score(self._screening(), WEIGHTS, exclude_attributes={"kept", "dropped"}) == 0.5
+
+    def test_default_is_no_exclusion(self):
+        assert compute_effect_score(self._screening(), WEIGHTS) == compute_effect_score(
+            self._screening(), WEIGHTS, exclude_attributes=()
+        )

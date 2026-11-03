@@ -268,3 +268,53 @@ class TestBaseConfigOverride:
         default = AnalysisConfig()
         assert cfg.kde_grid_points == default.kde_grid_points
         assert cfg.snapshot_dir == default.snapshot_dir
+
+
+class TestFieldsNotTunedComeFromTheBaseConfig:
+    """suggest_config rebuilds an AnalysisConfig field by field, so a field
+    added to AnalysisConfig and forgotten there would silently fall back to its
+    default in every trial. Guard: every field the TPE does not tune must be
+    copied from the base config."""
+
+    TUNED_BY_DERIVATION = {"dt_min_samples", "dt_min_prob_to_use"}  # base + offset, see suggest_config
+
+    @staticmethod
+    def _mutated(value):
+        if isinstance(value, bool):
+            return not value
+        if isinstance(value, int):
+            return value + 7
+        if isinstance(value, float):
+            return value + 0.0123
+        if isinstance(value, str):
+            return value + "_x"
+        if isinstance(value, tuple):
+            return value + ("keep_extra",)  # a different marker from the set below: keep and ignored must not overlap
+        if isinstance(value, (set, frozenset)):
+            return set(value) | {"ignored_extra"}
+        if value is None:
+            return 123
+        raise AssertionError(f"teach this test how to mutate {type(value).__name__}")
+
+    def test_every_untuned_field_is_taken_from_the_base(self):
+        import dataclasses
+        default = AnalysisConfig()
+        base = dataclasses.replace(
+            default, **{f.name: self._mutated(getattr(default, f.name)) for f in dataclasses.fields(AnalysisConfig)}
+        )
+        seen = {}
+
+        def objective(trial):
+            seen["tuned"] = None
+            seen["config"] = suggest_config(trial, base)
+            seen["params"] = None
+            return 0.0
+
+        study = optuna.create_study(sampler=optuna.samplers.RandomSampler(seed=0))
+        study.optimize(objective, n_trials=1)
+        tuned = set(study.trials[0].params) | self.TUNED_BY_DERIVATION
+        lost = [
+            f.name for f in dataclasses.fields(AnalysisConfig)
+            if f.name not in tuned and getattr(seen["config"], f.name) != getattr(base, f.name)
+        ]
+        assert lost == [], f"suggest_config does not copy these fields from the base config: {lost}"

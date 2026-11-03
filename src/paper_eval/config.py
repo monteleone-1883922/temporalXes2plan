@@ -27,12 +27,18 @@ class LogSpec:
         sha256: Checksum of the downloaded .xes.gz file.
         has_lifecycle: True when the log carries start/complete pairs, so
             activity durations come from lifecycle instead of inter-event gaps.
+        ignore_attributes: Event attributes removed from the model for this
+            log, on top of AnalysisConfig's default ignored set.
+        keep_attributes: Event attributes the two automatic filters (noise,
+            unused) must not remove. An attribute cannot be in both lists.
     """
 
     name: str
     file_name: str
     sha256: str
     has_lifecycle: bool
+    ignore_attributes: Tuple[str, ...] = ()
+    keep_attributes: Tuple[str, ...] = ()
 
     @property
     def url(self) -> str:
@@ -42,8 +48,11 @@ class LogSpec:
 LOGS: Dict[str, LogSpec] = {
     spec.name: spec
     for spec in [
+        # Diagnose has 146 distinct values, so the noise filter (N2) would drop it, but
+        # it is a real clinical attribute that the decision trees do read: keep it.
         LogSpec("sepsis", "SEPSIS.xes",
-                "709c52340306415952811b9b9c5dc6bcc8f8d47d583eba39df9a538459dc543a", False),
+                "709c52340306415952811b9b9c5dc6bcc8f8d47d583eba39df9a538459dc543a", False,
+                keep_attributes=("Diagnose",)),
         LogSpec("road_fines", "road_fine.xes",
                 "efa992309da64516f0e9f58e02c0c9d6377ded03db4c393713151bf09fd12097", False),
         LogSpec("bpic12_a", "BPI_Challenge_2012_A.xes",
@@ -90,6 +99,10 @@ class PaperEvalConfig:
     # attributes seed the initial state and its effects are not mined (see
     # AnalysisConfig.initial_event_as_input).
     initial_event_as_input: bool = True
+    # The two automatic attribute filters (see AnalysisConfig): noise (statistics
+    # of each attribute) and unused (written but never read by a guard).
+    noise_filter: bool = True
+    unused_attribute_filter: bool = True
     discovery_algorithm: str = "inductive"
     coverage_percentage: float = 0.001  # variant coverage filter, as in Pipeline
     data_dir: Path = _REPO_ROOT / "data" / "paper_eval"  # prepared logs

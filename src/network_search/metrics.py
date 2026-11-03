@@ -32,7 +32,7 @@ the constructed network exactly rather than the screening decision:
 
 from __future__ import annotations
 
-from typing import Dict, List, Set
+from typing import Collection, Dict, List, Set
 
 from encoding.prepared_input import PreparedTransition
 from models import ParseResult, TransitionScreening, XorSplitScreening
@@ -109,12 +109,17 @@ def compute_xor_score(
 def compute_effect_score(
     effect_screening: Dict[str, TransitionScreening],
     weights: ScoreWeights,
+    exclude_attributes: Collection[str] = (),
 ) -> float:
     """Asse B (effetti) — docs/network_improvement_loop.md §3.2.
 
     Every decision contributes a value in [0, 1], with 0.5 as the neutral
     point, exactly like compute_xor_score — weights.w_det_eff/w_fb_eff must
     themselves be in [0, 1].
+
+    exclude_attributes are skipped: the attributes the unused-attribute filter
+    removes from the model (DomainBuilder.unused_attributes), so the score
+    measures the model that is actually used.
 
     Returns 0.5 (neutral) when there are no conditional effects to classify
     at all, rather than dividing by zero.
@@ -123,7 +128,9 @@ def compute_effect_score(
     n_decisions = 0
 
     for transition_screening in effect_screening.values():
-        for attr_screening in transition_screening.attributes.values():
+        for attr_name, attr_screening in transition_screening.attributes.items():
+            if attr_name in exclude_attributes:
+                continue
             for action in (attr_screening.appearance_action, attr_screening.value_action):
                 #todo what about dt leaves?
                 if action == _EFFECT_NEVER:

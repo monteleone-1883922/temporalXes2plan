@@ -49,6 +49,7 @@ from models import (
     XorSplitStats,
 )
 from .decision_mining import DecisionMiner
+from .attribute_filter import find_noise_attributes
 from .discretizer import Discretizer
 from .effect_correlation_analyzer import EffectCorrelationAnalyzer
 from .log_preprocessor import LogPreprocessor
@@ -87,6 +88,10 @@ class PreloadedLogAndNet:
     attributes: Any
     attribute_categories: Any
     petri_net_model: PetriNetModel
+    # Attributes the noise filter removed, {attribute: reason} (empty when the
+    # filter is off). They are already out of `attributes` and
+    # `attribute_categories`; the Parser also keeps them out of the model state.
+    noise_attributes: Dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 def load_and_discover(
@@ -94,16 +99,35 @@ def load_and_discover(
     coverage_percentage: float,
     discovery_algorithm: str = 'inductive',
     use_activity_classifier: bool = False,
+    config: Optional[AnalysisConfig] = None,
 ) -> PreloadedLogAndNet:
     """Steps 1-2 of Parser.__init__, extracted verbatim so callers that run
     many trials against the same log/discovery settings (but varying
-    AnalysisConfig) can compute this once — see PreloadedLogAndNet."""
+    AnalysisConfig) can compute this once — see PreloadedLogAndNet.
+
+    config only supplies the attribute lists and the noise-filter settings
+    (ignored_attributes, keep_attributes, noise_*), none of which the TPE tunes,
+    so any trial's config, or the search's base config, gives the same result."""
+    config = config or AnalysisConfig()
     # --- Step 1: log loading and filtering ---
     logger.info("Loading and filtering log: %s", log_path)
-    processor = LogProcessor(log_path, use_activity_classifier)
+    processor = LogProcessor(log_path, use_activity_classifier, ignored_attributes=config.ignored_attributes)
     log, full_log, full_lifecycle_log = processor.load_and_filter_log(coverage_percentage)
     attributes, attribute_categories = processor.initialize_attributes(full_log)
     logger.info("Log loaded: %d traces, %d attributes", len(log), len(attributes))
+
+    # --- Step 1b: noise filter (filter 1 of the attribute filters) ---
+    # Drops attributes whose statistics mark them as noise, before the
+    # discretizer, the replay or the decision trees ever see them.
+    noise_attributes: Dict[str, str] = {}
+    if config.noise_filter:
+        noise_attributes = find_noise_attributes(
+            full_log, attribute_categories, processor.attribute_value_counts, config,
+        )
+        for attr, reason in noise_attributes.items():
+            logger.info("Noise filter removed attribute '%s': %s", attr, reason)
+        attributes = {a for a in attributes if a not in noise_attributes}
+        attribute_categories = {a: t for a, t in attribute_categories.items() if a not in noise_attributes}
 
     # --- Step 2: Petri net discovery ---
     logger.info("Starting Petri net discovery [%s]", discovery_algorithm)
@@ -119,6 +143,7 @@ def load_and_discover(
         attributes=attributes,
         attribute_categories=attribute_categories,
         petri_net_model=petri_net_model,
+        noise_attributes=noise_attributes,
     )
 
 
@@ -259,13 +284,15 @@ class Parser:
 
         if preloaded is None:
             preloaded = load_and_discover(
-                log_path, coverage_percentage, discovery_algorithm, use_activity_classifier
+                log_path, coverage_percentage, discovery_algorithm, use_activity_classifier,
+                config=self.config,
             )
         self.log = preloaded.log
         self.full_log = preloaded.full_log
         self.full_lifecycle_log = preloaded.full_lifecycle_log
         self.attributes = preloaded.attributes
         self.attribute_categories = preloaded.attribute_categories
+        self.noise_attributes = preloaded.noise_attributes
         self.petri_net_model = preloaded.petri_net_model
         pnm = self.petri_net_model
 
@@ -333,7 +360,9 @@ class Parser:
         self.preprocessed_log: PreprocessedLog = LogPreprocessor(
             config=self.config,
             discretizer=discretizer,
-            attribute_categories=self.attribute_categories
+            attribute_categories=self.attribute_categories,
+            # What the user ignores plus what the noise filter removed.
+            ignored_attributes=set(self.config.ignored_attributes) | set(self.noise_attributes),
         ).preprocess(self.pn_log, pnm.xor_splits)
         _all_labeled = {t.label for t in pnm.petrinet.transitions if t.label is not None}
         _fired = set(self.preprocessed_log.transition_firings.keys())

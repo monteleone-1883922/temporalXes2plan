@@ -56,6 +56,9 @@ class BuildResult:
     config: AnalysisConfig
     domain_name: str
     trial_records: Optional[List[TrialRecord]] = None
+    # Attributes the noise filter removed from this build, {attribute: reason}
+    # (empty when the filter is off); reported by paper_eval/build_model.py.
+    noise_attributes: Dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 class Pipeline:
@@ -234,6 +237,7 @@ class Pipeline:
             config=config,
             domain_name=domain_name,
             trial_records=trial_records,
+            noise_attributes=parser.noise_attributes,
         )
 
     def run(

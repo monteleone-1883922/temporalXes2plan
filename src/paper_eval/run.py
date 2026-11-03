@@ -135,11 +135,20 @@ def main(argv=None) -> None:
     parser.add_argument("--phase", default="all", choices=PHASES)
     parser.add_argument("--force", action="store_true", help="recompute the selected phase(s)")
     parser.add_argument("--search-n-trials", type=int, default=None)
+    # Switches for the two automatic attribute filters (defaults come from PaperEvalConfig).
+    parser.add_argument("--noise-filter", action=argparse.BooleanOptionalAction, default=None,
+                        help="drop noise attributes (constant, long text, counter-like)")
+    parser.add_argument("--unused-filter", action=argparse.BooleanOptionalAction, default=None,
+                        help="drop attributes no guard reads, merging the groups that become equal")
     args = parser.parse_args(argv)
 
     cfg = PaperEvalConfig()
     if args.search_n_trials is not None:
         cfg.search_n_trials = args.search_n_trials
+    if args.noise_filter is not None:
+        cfg.noise_filter = args.noise_filter
+    if args.unused_filter is not None:
+        cfg.unused_attribute_filter = args.unused_filter
     paths = Paths(args.log, cfg)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -159,7 +168,10 @@ def main(argv=None) -> None:
             run_split(args.log, cfg, paths, args.force)
         elif phase == "model":
             split = read_split(paths.split_json)
-            build_model(paths.log_xes, split, cfg, paths.model_dir(split.split_hash), force=args.force)
+            build_model(
+                paths.log_xes, split, cfg, paths.model_dir(split.split_hash),
+                force=args.force, log_spec=spec,
+            )
         elif phase == "prefixes":
             run_prefixes(args.log, cfg, paths, args.force)
         elif phase == "volume":

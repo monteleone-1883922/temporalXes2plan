@@ -679,6 +679,37 @@ class AnalysisConfig:
     # initial attributes to be supplied; the model no longer sets them.
     initial_event_as_input: bool = False
 
+    # --- Attribute filters ---
+    # Besides ignored_attributes (removed outright, listed by the user), two
+    # automatic filters can drop attributes that only add noise or duplicated
+    # actions. keep_attributes protects the listed attributes from BOTH
+    # automatic filters (it does not override ignored_attributes: an attribute
+    # in both lists is a mistake and raises, see __post_init__).
+    # A tuple rather than a set so the config stays JSON-serialisable.
+    keep_attributes: Tuple[str, ...] = ()
+
+    # Filter 1 - noise (parsing/attribute_filter.py). Looks at statistical
+    # properties of each event attribute, once per log load:
+    #   N1 constant:     a single distinct value
+    #   N2 long text:    categorical with more than noise_max_distinct_text values
+    #   N3 counter-like: carried by >= noise_counter_min_carry of the events,
+    #                    different from the previous event's value in
+    #                    >= noise_counter_min_change of the pairs, with at
+    #                    least noise_counter_min_distinct distinct values
+    # These are data properties, not model quality: the TPE does not tune them.
+    noise_filter: bool = False
+    noise_max_distinct_text: int = 50
+    noise_counter_min_distinct: int = 10
+    noise_counter_min_carry: float = 0.9
+    noise_counter_min_change: float = 0.9
+
+    # Filter 2 - unused attributes (encoding/domain_builder.py). An attribute
+    # that some transition writes but no guard ever reads cannot change which
+    # actions are applicable, so its effects are dropped before the effect
+    # groups are built (groups that would then coincide become one).
+    # Leave it off when a goal mentions attribute values (thesis Q3).
+    unused_attribute_filter: bool = False
+
     # --- Logging ---
     log_removed_effects: bool = True
 
@@ -686,6 +717,18 @@ class AnalysisConfig:
     # Directory where pre-pruning analysis debug files are written.
     # Pipeline.run() overrides this to data/<config>/analysis_debug/.
     snapshot_dir: str = "analysis_debug"
+
+    def __post_init__(self) -> None:
+        # keep_attributes only protects from the automatic filters; an
+        # attribute that is also ignored is contradictory, so say so instead
+        # of silently picking one of the two lists.
+        conflict = set(self.keep_attributes) & set(self.ignored_attributes)
+        if conflict:
+            raise ValueError(
+                f"Attributes {sorted(conflict)} are in both keep_attributes and "
+                f"ignored_attributes; remove them from one of the two lists "
+                f"(keep_attributes does not override the ignored ones, defaults included)."
+            )
 
 
 # ---------------------------------------------------------------------------
