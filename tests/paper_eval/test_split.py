@@ -89,3 +89,36 @@ class TestSplitHashAndIO:
         loaded = sp.read_split(tmp_path / "out" / "split.json")
         assert loaded == split
         assert loaded.train_ids == split.train_fit_ids + split.val_ids
+
+
+class TestVariantMeanDurations:
+    """Mean case duration of each variant (distinct activity sequence)."""
+
+    @staticmethod
+    def _variant_trace(case_id, acts, hours):
+        return make_trace(
+            *[make_event(a, offset=int(h * 3600)) for a, h in zip(acts, hours)],
+            case_id=case_id,
+        )
+
+    def test_mean_over_the_cases_of_each_variant(self):
+        traces = [
+            self._variant_trace("c1", "ABC", [0, 1, 2]),  # variant ABC, 2 h
+            self._variant_trace("c2", "ABC", [0, 2, 4]),  # variant ABC, 4 h
+            self._variant_trace("c3", "ABD", [0, 1, 10]),  # variant ABD, 10 h
+        ]
+        means = sp.variant_mean_durations(traces)
+        assert means == {("A", "B", "C"): pytest.approx(3 * 3600), ("A", "B", "D"): pytest.approx(10 * 3600)}
+
+    def test_only_the_control_flow_view_counts(self):
+        # start events are not activity executions: the variant is A, B and the
+        # duration runs from the first to the last COMPLETE event
+        trace = make_trace(
+            make_event("A", lifecycle="start", offset=0), make_event("A", lifecycle="complete", offset=3600),
+            make_event("B", lifecycle="start", offset=3600), make_event("B", lifecycle="complete", offset=7200),
+            case_id="c1",
+        )
+        assert sp.variant_mean_durations([trace]) == {("A", "B"): pytest.approx(3600)}
+
+    def test_no_traces_gives_no_variants(self):
+        assert sp.variant_mean_durations([]) == {}

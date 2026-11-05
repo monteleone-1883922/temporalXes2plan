@@ -121,3 +121,57 @@ def test_attribute_lists_and_filters_end_to_end(tmp_path):
     assert config_from_dict(saved).keep_attributes == ("junk",)
     catalog = load_model(model_dir).prepared.attribute_catalog
     assert "mine" not in catalog and "event_id" not in catalog
+
+
+@pytest.mark.integration
+def test_plan_stats_and_report_chain_on_a_real_model(tmp_path):
+    """Model and instances are real; only OPTIC is replaced by a fake. Checks that
+    the plan, stats and report phases fit together on what the earlier phases wrote."""
+    from paper_eval import model_stats as ms
+    from paper_eval import plan as pl
+    from paper_eval import report as rp
+    from paper_eval.build_model import build_model
+    from paper_eval.split import read_split
+
+    cfg = PaperEvalConfig(data_dir=tmp_path / "data", results_dir=tmp_path / "results", search_n_trials=2)
+    paths = runner.Paths("toy", cfg)
+    paths.log_dir.mkdir(parents=True)
+    cfg.data_dir.mkdir(parents=True)
+    log = preprocess(_synthetic_log(), cfg.min_trace_len)
+    write_traces_xes(log, list(log), paths.log_xes)
+    runner.run_split("toy", cfg, paths, force=False)
+    split = read_split(paths.split_json)
+    model_dir = build_model(paths.log_xes, split, cfg, paths.model_dir(split.split_hash))
+    runner.run_prefixes("toy", cfg, paths, force=False)
+    instances = px.read_jsonl(model_dir / "instances.jsonl")
+    assert {i["goal"] for i in instances} == {"completion", "deadline"}
+
+    problems = []
+
+    def fake_optic(pddl_dir, timeout, memory_mb, stop_at_first):
+        # the problem the runner built for a REAL instance of the REAL model
+        problems.append((pddl_dir / "problem.pddl").read_text())
+        return {
+            "success": True, "solvability": "solved", "plan_text": "0.000: (a)  [1.000]",
+            "plan_actions": ["a"], "message": "ok",
+            "metrics": {"duration": 1.0, "expanded_nodes": 3, "total_time": 0.01},
+            "timings": {"grounding_s": 0.1, "first_plan_s": 0.3, "planning_s": 0.2, "wall_s": 0.4, "cpu_s": 0.01},
+        }
+
+    counts = pl.run_plan("toy", cfg, runner.Paths("toy", cfg), runner=fake_optic)
+    rows = pl.read_results(model_dir / pl.RESULTS_FILE)
+    assert len(rows) == len(instances) and sum(counts.values()) == len(instances)
+    assert all("(:domain paper_eval)" in p and "(marked" in p for p in problems)
+    # an instance whose deadline is already past is not sent to OPTIC
+    assert counts["solved"] == len(problems) <= len(instances)
+
+    summary = rp.run_report(model_dir)
+    assert set(summary) <= {"completion", "deadline"} and "completion" in summary
+    assert (model_dir / rp.SUMMARY_MD).exists()
+
+    stats = ms.run_stats(model_dir, cfg.data_dir / "toy.stats.json")
+    assert (model_dir / ms.STATS_FILE).exists()
+    net = stats["petri_net"]
+    assert net["places"] > 0 and net["transitions"] == net["transitions_visible"] + net["transitions_silent"]
+    assert stats["pddl"]["actions"] >= 1 and stats["pddl"]["domain_bytes"] > 0
+    assert stats["split"]["test"] == 18 and stats["search"]["trials"] == 2

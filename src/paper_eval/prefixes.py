@@ -3,11 +3,13 @@ ground truth, its goals, and the deduplicated instances every method is
 evaluated on.
 
 Goals per prefix:
-  - "completion": predict the suffix and the remaining time;
-  - "deadline_q<NN>": will the case end within T_q? The deadline handed to
-    a method is d = T_q - elapsed (time already spent at the cut), the label
-    is case_duration <= T_q. When d <= 0 the deadline has already expired
-    at the cut: the row is flagged expired and reported separately.
+  - "completion": reach the end of the process, no deadline;
+  - "deadline": reach the end within d = min(M - elapsed, R), where M is the
+    mean duration of the variant (the whole trace's activity sequence) over
+    the TRAIN cases, elapsed is the time already spent at the cut, and R is
+    the real remaining time of the case. When the variant does not occur in
+    TRAIN, d = R. When d <= 0 the deadline has already expired at the cut:
+    the row is flagged expired and reported separately.
 
 Deduplication (decision D1): two occurrences are the same instance when
 they have the same prefix activity sequence, the same initial state of the
@@ -41,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 DAY_S = 86400.0
 COMPLETION_GOAL = "completion"
+DEADLINE_GOAL = "deadline"
 
 
 
@@ -78,8 +81,10 @@ class PrefixRecord:
     reached_within_time: Optional[bool] = None
     # Goal. Default = "completion": no deadline, no label.
     goal: str = COMPLETION_GOAL
-    deadline_s: Optional[float] = None  # T_q - elapsed (deadline goals only)
-    label_feasible: Optional[bool] = None  # case_duration <= T_q (deadline goals only)
+    deadline_s: Optional[float] = None  # min(variant mean - elapsed, real remaining) (deadline goal only)
+    # The two terms of the minimum, kept for the paper (deadline goal only):
+    deadline_variant_s: Optional[float] = None  # variant mean - elapsed; None if the variant is not in TRAIN
+    deadline_source: Optional[str] = None  # "variant_mean" or "real_remaining": which term won
     expired: bool = False  # deadline already past at the cut
     # Set by group_instances: the instance this record belongs to.
     group_id: Optional[int] = None
@@ -133,7 +138,8 @@ class CaseGroundTruth:
     elapsed_s: float
     case_duration_s: float
     deadline_s: Optional[float]
-    label_feasible: Optional[bool]
+    deadline_variant_s: Optional[float]
+    deadline_source: Optional[str]
     reached_end: Optional[bool]
     is_replayable: Optional[bool]
     reached_within_time: Optional[bool]
@@ -182,13 +188,16 @@ def pddl_deadline_key(deadline_s: float, duration_scale_factor: float) -> float:
 def prefix_records_for_trace(
     trace: Any,
     replayer: Any,
-    thresholds_s: Dict[str, float],
+    variant_means: Dict[Tuple[str, ...], float],
     buckets: List[Bucket],
     k_min: int,
 ) -> List[PrefixRecord]:
     """One record per (prefix, goal) of trace. Replay failures are recorded
     (replay_ok=False) instead of dropping the prefix: the instance still
-    exists for the methods that do not need the model."""
+    exists for the methods that do not need the model.
+
+    variant_means: mean duration in seconds of each variant over the TRAIN
+    cases (split.variant_mean_durations); gives the deadline goal its first term."""
     # --- 1. Which prefixes exist -------------------------------------------
     # Work on the control-flow view (activity executions only), so that k and
     # n count the same events the model was discovered from.
@@ -257,22 +266,29 @@ def prefix_records_for_trace(
             record.set_initial_state(sample, k, outcomes)
 
         # --- 6. One record per goal, all copying the prefix fields -------
-        # completion: no deadline, no feasible/unfeasible label.
+        # completion: no deadline.
         records.append(record)
-        # deadline goals, one per threshold T_q (name e.g. "q50"):
-        #   deadline handed to the methods = T_q - elapsed
-        #   label = did the real case finish within T_q?
-        #   expired = the deadline is already past at the cut (<= 0)
-        # E.g. T_q=5d, elapsed=1d -> deadline 4d; case lasted 8d -> label False.
-        for name, t_q in thresholds_s.items():
-            deadline_s = t_q - elapsed_s
-            records.append(dataclasses.replace(
-                record,
-                goal=f"deadline_{name}",
-                deadline_s=deadline_s,
-                label_feasible=case_duration_s <= t_q,
-                expired=deadline_s <= 0,
-            ))
+        # deadline: d = min(variant mean - elapsed, real remaining time).
+        #   The variant is the whole trace's activity sequence; its mean
+        #   duration comes from the TRAIN cases only. If TRAIN never saw the
+        #   variant, only the real remaining time is available.
+        #   expired = the deadline is already past at the cut (<= 0).
+        # E.g. variant mean 6h, elapsed 1h -> 5h; real remaining 4h -> d = 4h
+        # (source "real_remaining"). With real remaining 7h -> d = 5h ("variant_mean").
+        variant_mean_s = variant_means.get(tuple(activities))
+        variant_deadline_s = None if variant_mean_s is None else variant_mean_s - elapsed_s
+        if variant_deadline_s is not None and variant_deadline_s < record.true_rt_s:
+            deadline_s, source = variant_deadline_s, "variant_mean"
+        else:
+            deadline_s, source = record.true_rt_s, "real_remaining"
+        records.append(dataclasses.replace(
+            record,
+            goal=DEADLINE_GOAL,
+            deadline_s=deadline_s,
+            deadline_variant_s=variant_deadline_s,
+            deadline_source=source,
+            expired=deadline_s <= 0,
+        ))
     return records
 
 
@@ -346,7 +362,7 @@ def prefix_stats(records: List[PrefixRecord], instances: List[EvaluationInstance
 def generate(
     test_traces: Iterable[Any],
     replayer: Any,
-    thresholds_s: Dict[str, float],
+    variant_means: Dict[Tuple[str, ...], float],
     buckets: List[Bucket],
     k_min: int,
     duration_scale_factor: float,
@@ -355,7 +371,7 @@ def generate(
     duration_scale_factor comes from the model's domain (see pddl_deadline_key)."""
     records: List[PrefixRecord] = []
     for trace in test_traces:
-        records.extend(prefix_records_for_trace(trace, replayer, thresholds_s, buckets, k_min))
+        records.extend(prefix_records_for_trace(trace, replayer, variant_means, buckets, k_min))
     instances = group_instances(records, duration_scale_factor)
     return records, instances
 

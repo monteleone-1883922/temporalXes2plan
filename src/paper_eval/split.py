@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 
@@ -95,6 +96,27 @@ def deadline_thresholds(train_traces: Iterable[Any], quantiles: Sequence[float])
     traces, keyed "q50", "q75", … (linear interpolation, numpy default)."""
     durations = np.array([case_duration_seconds(t) for t in train_traces], dtype=float)
     return {f"q{round(q * 100)}": float(np.quantile(durations, q)) for q in quantiles}
+
+
+def variant_mean_durations(traces: Iterable[Any]) -> Dict[Tuple[str, ...], float]:
+    """Mean case duration (seconds) of each variant, i.e. of each distinct
+    sequence of activities, measured on the control-flow view.
+
+    Used for the deadline goal: a test trace is compared with the mean
+    duration of the variant it follows, computed on the TRAIN traces only.
+    E.g. if the variant (A, B, C) lasted 2 h and 4 h in two TRAIN cases, its
+    mean is 3 h.
+    """
+    total: Dict[Tuple[str, ...], float] = defaultdict(float)
+    count: Dict[Tuple[str, ...], int] = defaultdict(int)
+    for trace in traces:
+        view = control_flow_view(trace)
+        if not view:
+            continue
+        variant = tuple(e["concept:name"] for e in view)
+        total[variant] += (view[-1]["time:timestamp"] - view[0]["time:timestamp"]).total_seconds()
+        count[variant] += 1
+    return {variant: total[variant] / count[variant] for variant in total}
 
 
 def compute_split_hash(log_sha256: str, params: Dict[str, Any]) -> str:

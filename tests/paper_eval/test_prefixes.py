@@ -90,24 +90,72 @@ class TestPrefixRecords:
         trace = _trace("c1", "AB", [0, 1])
         assert px.prefix_records_for_trace(trace, _replayer(), {}, DEFAULT_BUCKETS, 2) == []
 
-    def test_deadline_goals(self):
-        # case lasts 4 days; prefix k=2 elapsed 1 day.
+    def test_two_goals_per_prefix(self):
         trace = _trace("c1", "ABC", [0, 1, 4])
-        thresholds = {"q50": 3 * DAY, "q90": 5 * DAY}
-        recs = px.prefix_records_for_trace(trace, _replayer(), thresholds, DEFAULT_BUCKETS, 2)
-        by_goal = {r.goal: r for r in recs}
-        assert set(by_goal) == {"completion", "deadline_q50", "deadline_q90"}
-        assert by_goal["deadline_q50"].deadline_s == pytest.approx(2 * DAY)
-        assert by_goal["deadline_q50"].label_feasible is False  # 4 days > 3
-        assert by_goal["deadline_q90"].label_feasible is True   # 4 days <= 5
-        assert by_goal["completion"].deadline_s is None
+        recs = px.prefix_records_for_trace(trace, _replayer(), {}, DEFAULT_BUCKETS, 2)
+        assert [r.goal for r in recs] == ["completion", "deadline"]
+        assert recs[0].deadline_s is None  # completion has no deadline
+
+
+class TestDeadlineGoal:
+    """deadline = min(variant mean - elapsed, real remaining time)."""
+
+    ABC = ("A", "B", "C")
+
+    @staticmethod
+    def _deadline(variant_means, offsets=(0, 1, 4)):
+        # case lasts offsets[-1] days; prefix k=2 has elapsed offsets[1] days.
+        trace = _trace("c1", "ABC", offsets)
+        recs = px.prefix_records_for_trace(trace, _replayer(), variant_means, DEFAULT_BUCKETS, 2)
+        return [r for r in recs if r.goal == px.DEADLINE_GOAL][0]
+
+    def test_real_remaining_time_wins_when_it_is_smaller(self):
+        # variant term = 5 - 1 = 4 days, real remaining = 4 - 1 = 3 days
+        rec = self._deadline({self.ABC: 5 * DAY})
+        assert rec.deadline_s == pytest.approx(3 * DAY)
+        assert rec.deadline_source == "real_remaining"
+        assert rec.deadline_variant_s == pytest.approx(4 * DAY)  # kept for the paper
+
+    def test_variant_mean_wins_when_it_is_smaller(self):
+        # variant term = 3 - 1 = 2 days < real remaining 3 days
+        rec = self._deadline({self.ABC: 3 * DAY})
+        assert rec.deadline_s == pytest.approx(2 * DAY)
+        assert rec.deadline_source == "variant_mean"
+        assert rec.deadline_variant_s == pytest.approx(2 * DAY)
+
+    def test_a_tie_goes_to_the_real_remaining_time(self):
+        rec = self._deadline({self.ABC: 4 * DAY})  # 4 - 1 = 3 days = real remaining
+        assert rec.deadline_source == "real_remaining"
+
+    def test_variant_unseen_in_train_uses_only_the_real_remaining_time(self):
+        rec = self._deadline({("A", "X", "C"): 9 * DAY})
+        assert rec.deadline_s == pytest.approx(3 * DAY)
+        assert rec.deadline_source == "real_remaining"
+        assert rec.deadline_variant_s is None
+
+    def test_variant_is_the_whole_traces_activity_sequence_not_the_prefix(self):
+        # a mean stored for the PREFIX (A, B) must not be used
+        rec = self._deadline({("A", "B"): 1 * DAY})
+        assert rec.deadline_source == "real_remaining"
 
     def test_expired_deadline_flagged(self):
-        trace = _trace("c1", "ABC", [0, 5, 6])
-        recs = px.prefix_records_for_trace(trace, _replayer(), {"q50": 3 * DAY}, DEFAULT_BUCKETS, 2)
-        deadline = [r for r in recs if r.goal == "deadline_q50"][0]
-        assert deadline.expired is True
-        assert deadline.deadline_s < 0
+        # elapsed 5 days at the cut, variant mean 3 days -> 3 - 5 = -2 days
+        rec = self._deadline({self.ABC: 3 * DAY}, offsets=(0, 5, 6))
+        assert rec.expired is True
+        assert rec.deadline_s == pytest.approx(-2 * DAY)
+        assert rec.deadline_source == "variant_mean"
+
+    def test_deadline_is_never_expired_when_only_the_real_remaining_time_applies(self):
+        rec = self._deadline({}, offsets=(0, 5, 6))
+        assert rec.expired is False and rec.deadline_s == pytest.approx(1 * DAY)
+
+    def test_the_records_deadline_fields_reach_the_cases_ground_truth(self):
+        trace = _trace("c1", "ABC", [0, 1, 4])
+        _, instances = px.generate([trace], _replayer(), {self.ABC: 3 * DAY}, DEFAULT_BUCKETS, 2, 1.0)
+        case = [i for i in instances if i.goal == px.DEADLINE_GOAL][0].cases[0]
+        assert case.deadline_source == "variant_mean"
+        assert case.deadline_variant_s == pytest.approx(2 * DAY)
+
 
     def test_buckets_configurable(self):
         trace = _trace("c1", "ABCDEF", [0, 1, 2, 3, 4, 5])
@@ -136,11 +184,13 @@ class TestGrouping:
         t1 = _trace("c1", "ABC", [0, 1, 2])
         t2 = _trace("c2", "ABD", [0, 1, 5])
         records, instances = px.generate([t1, t2], _replayer(), {}, DEFAULT_BUCKETS, 2, 1.0)
-        assert len(instances) == 1
-        cases = instances[0].cases
+        completion = [i for i in instances if i.goal == px.COMPLETION_GOAL]
+        assert len(completion) == 1
+        cases = completion[0].cases
         assert [m.case_id for m in cases] == ["c1", "c2"]
         assert [m.true_suffix_acts for m in cases] == [["C"], ["D"]]
-        assert {r.group_id for r in records} == {0}
+        # every completion record points to that one instance
+        assert {r.group_id for r in records if r.goal == px.COMPLETION_GOAL} == {completion[0].group_id}
 
     def test_different_marking_gives_different_instances(self):
         t1 = _trace("c1", "ABC", [0, 1, 2])
@@ -150,7 +200,7 @@ class TestGrouping:
             {2: _outcome(marking=("p_x",))}, {2: _outcome(marking=("p_y",))},
         ]
         _, instances = px.generate([t1, t2], replayer, {}, DEFAULT_BUCKETS, 2, 1.0)
-        assert len(instances) == 2
+        assert len([i for i in instances if i.goal == px.COMPLETION_GOAL]) == 2
 
     def test_different_attributes_give_different_instances(self):
         t1 = _trace("c1", "ABC", [0, 1, 2])
@@ -160,38 +210,44 @@ class TestGrouping:
             {2: _outcome(attrs={"crp": "low"})}, {2: _outcome(attrs={"crp": "high"})},
         ]
         _, instances = px.generate([t1, t2], replayer, {}, DEFAULT_BUCKETS, 2, 1.0)
-        assert len(instances) == 2
+        assert len([i for i in instances if i.goal == px.COMPLETION_GOAL]) == 2
 
     def test_deadline_goals_grouped_at_pddl_resolution(self):
-        # Same prefix/state; elapsed 120 s vs 121 s. With durations in
-        # minutes (scale 60) the deadlines 380 s / 379 s are both written as
-        # 6.3 in the PDDL problem -> one deadline instance, whose cases
-        # keep their own labels.
+        # Same prefix/state; elapsed 120 s vs 121 s, variant mean 500 s, real
+        # remaining times large: deadlines 380 s / 379 s. With durations in
+        # minutes (scale 60) both are written as 6.3 in the PDDL problem -> one
+        # deadline instance, whose cases keep their own exact deadlines.
         t1 = make_trace(make_event("A", offset=0), make_event("B", offset=120),
-                        make_event("C", offset=200), case_id="c1")
+                        make_event("C", offset=1000), case_id="c1")
         t2 = make_trace(make_event("A", offset=0), make_event("B", offset=121),
-                        make_event("C", offset=900), case_id="c2")
-        _, instances = px.generate([t1, t2], _replayer(), {"q50": 500.0}, DEFAULT_BUCKETS, 2, 60.0)
-        deadline_instances = [i for i in instances if i.goal == "deadline_q50"]
+                        make_event("C", offset=1000), case_id="c2")
+        means = {("A", "B", "C"): 500.0}
+        _, instances = px.generate([t1, t2], _replayer(), means, DEFAULT_BUCKETS, 2, 60.0)
+        deadline_instances = [i for i in instances if i.goal == px.DEADLINE_GOAL]
         assert len(deadline_instances) == 1
-        assert [m.label_feasible for m in deadline_instances[0].cases] == [True, False]
+        assert [m.deadline_s for m in deadline_instances[0].cases] == pytest.approx([380.0, 379.0])
         assert deadline_instances[0].deadline_s == pytest.approx(6.3 * 60)
 
     def test_deadlines_differing_in_pddl_give_different_instances(self):
+        # deadlines 380 s and 340 s: 6.3 and 5.7 minutes in the PDDL
         t1 = make_trace(make_event("A", offset=0), make_event("B", offset=120),
-                        make_event("C", offset=200), case_id="c1")
+                        make_event("C", offset=1000), case_id="c1")
         t2 = make_trace(make_event("A", offset=0), make_event("B", offset=160),
-                        make_event("C", offset=900), case_id="c2")
-        _, instances = px.generate([t1, t2], _replayer(), {"q50": 500.0}, DEFAULT_BUCKETS, 2, 60.0)
-        assert len([i for i in instances if i.goal == "deadline_q50"]) == 2
+                        make_event("C", offset=1000), case_id="c2")
+        means = {("A", "B", "C"): 500.0}
+        _, instances = px.generate([t1, t2], _replayer(), means, DEFAULT_BUCKETS, 2, 60.0)
+        assert len([i for i in instances if i.goal == px.DEADLINE_GOAL]) == 2
 
     def test_stats(self):
         t1 = _trace("c1", "ABC", [0, 1, 2])
         t2 = _trace("c2", "ABD", [0, 1, 5])
-        records, instances = px.generate([t1, t2], _replayer(), {"q50": 3 * DAY}, DEFAULT_BUCKETS, 2, 1.0)
+        records, instances = px.generate([t1, t2], _replayer(), {}, DEFAULT_BUCKETS, 2, 1.0)
         stats = px.prefix_stats(records, instances)
         assert stats["overall"]["n_prefixes"] == 2
         assert stats["overall"]["n_instances_by_goal"]["completion"] == 1
+        # the two traces have different real remaining times (1 and 4 days), so
+        # their deadline goals do not merge
+        assert stats["overall"]["n_instances_by_goal"]["deadline"] == 2
         assert stats["by_bucket"]["2"]["n_prefixes"] == 2
 
     def test_jsonl_roundtrip(self, tmp_path):

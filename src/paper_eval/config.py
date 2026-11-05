@@ -88,7 +88,10 @@ class PaperEvalConfig:
     val_pct: float = 0.2  # last 20% of TRAIN -> VAL, scores the TPE trials
     min_trace_len: int = 3  # traces with fewer control-flow events are dropped
     k_min: int = 2  # shortest prefix generated
-    deadline_quantiles: Tuple[float, ...] = (0.5, 0.75, 0.9)  # T_q goals q50/q75/q90
+    # No longer used for the goals (the deadline is now min(variant mean - elapsed,
+    # real remaining time), see prefixes.py), but part of the split hash: removing
+    # it would rename every model folder and redo the TPE, so it stays for now.
+    deadline_quantiles: Tuple[float, ...] = (0.5, 0.75, 0.9)
     buckets_by_log: Dict[str, List[Bucket]] = field(default_factory=dict)
     seed: int = 42  # TPE seed
     search_n_trials: int = 30  # TPE trials
@@ -103,6 +106,12 @@ class PaperEvalConfig:
     # of each attribute) and unused (written but never read by a guard).
     noise_filter: bool = True
     unused_attribute_filter: bool = True
+    # Phase "plan" (OPTIC on every instance). The values are starting points to
+    # be reviewed per log before the definitive runs; *_by_log override them for one log.
+    plan_timeout_s: int = 60  # wall-clock limit of one OPTIC run
+    plan_memory_mb: int = 4000  # virtual memory limit of one OPTIC run (ulimit -v)
+    plan_timeout_by_log: Dict[str, int] = field(default_factory=dict)
+    plan_memory_by_log: Dict[str, int] = field(default_factory=dict)
     discovery_algorithm: str = "inductive"
     coverage_percentage: float = 0.001  # variant coverage filter, as in Pipeline
     data_dir: Path = _REPO_ROOT / "data" / "paper_eval"  # prepared logs
@@ -110,6 +119,14 @@ class PaperEvalConfig:
 
     def buckets_for(self, log_name: str) -> List[Bucket]:
         return self.buckets_by_log.get(log_name, DEFAULT_BUCKETS)
+
+    def timeout_for(self, log_name: str) -> int:
+        """OPTIC wall-clock limit (seconds) for this log."""
+        return self.plan_timeout_by_log.get(log_name, self.plan_timeout_s)
+
+    def memory_for(self, log_name: str) -> int:
+        """OPTIC virtual memory limit (MB) for this log."""
+        return self.plan_memory_by_log.get(log_name, self.plan_memory_mb)
 
 
 def bucket_label(k: int, buckets: List[Bucket]) -> Optional[str]:
