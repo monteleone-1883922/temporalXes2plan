@@ -92,6 +92,11 @@ class PaperEvalConfig:
     # real remaining time), see prefixes.py), but part of the split hash: removing
     # it would rename every model folder and redo the TPE, so it stays for now.
     deadline_quantiles: Tuple[float, ...] = (0.5, 0.75, 0.9)
+    # Deadline rule of the "deadline" goal (see prefixes.py). False: min(variant
+    # mean - elapsed, real remaining time). True: always variant mean - elapsed
+    # (real remaining time only when the variant is not in TRAIN). Not part of
+    # the split hash: it only changes the prefixes phase.
+    deadline_variant_only: bool = False
     buckets_by_log: Dict[str, List[Bucket]] = field(default_factory=dict)
     seed: int = 42  # TPE seed
     search_n_trials: int = 30  # TPE trials

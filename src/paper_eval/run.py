@@ -18,6 +18,7 @@ Phases that are NOT part of "all" (they run OPTIC or read its results):
             --force discards the previous results)
   stats     descriptive statistics of the model -> <split_hash>/model_stats.json
   report    RQ1 table from plan_results.jsonl -> <split_hash>/rq1_summary.{json,md}
+  query     --sql "SELECT ..." on the per-case views (see paper_eval/query.py)
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from paper_eval import prefixes as px
 from paper_eval.build_model import build_model, load_model
 from paper_eval.config import LOGS, PaperEvalConfig, bucket_label
 from paper_eval.model_stats import run_stats
-from paper_eval.plan import GOAL_CHOICES, run_plan
+from paper_eval.plan import GOAL_CHOICES, PREFIXES_META, prefixes_deadline_variant_only, run_plan
 from paper_eval.prepare import prepare_log
 from paper_eval.report import run_report
 from paper_eval.split import (
@@ -47,7 +48,7 @@ from replay.trace_replayer import TraceReplayer
 
 logger = logging.getLogger("paper_eval")
 
-PHASES = ("prepare", "split", "model", "prefixes", "volume", "plan", "stats", "report", "all")
+PHASES = ("prepare", "split", "model", "prefixes", "volume", "plan", "stats", "report", "query", "all")
 
 
 class Paths:
@@ -89,7 +90,16 @@ def _test_traces(log, test_ids: List[str]):
 def run_prefixes(log_name: str, cfg: PaperEvalConfig, paths: Paths, force: bool) -> None:
     split = read_split(paths.split_json)
     model_dir = paths.model_dir(split.split_hash)
+    meta_path = model_dir / PREFIXES_META
     if (model_dir / "instances.jsonl").exists() and not force:
+        # Instances made with another deadline rule must not be silently reused:
+        # the plan results (keyed by group_id) would not match them.
+        existing = prefixes_deadline_variant_only(model_dir)
+        if existing != cfg.deadline_variant_only:
+            raise ValueError(
+                f"{model_dir / 'instances.jsonl'} was made with deadline_variant_only={existing}, "
+                f"but the current value is {cfg.deadline_variant_only}. Use --force to regenerate."
+            )
         logger.info("[%s] prefixes already in %s — skipped", log_name, model_dir)
         return
     # Replay runs on the model built from TRAIN, over TEST traces only.
@@ -107,7 +117,9 @@ def run_prefixes(log_name: str, cfg: PaperEvalConfig, paths: Paths, force: bool)
         cfg.buckets_for(log_name),
         cfg.k_min,
         model.domain.duration_scale_factor,
+        variant_only=cfg.deadline_variant_only,
     )
+    meta_path.write_text(json.dumps({"deadline_variant_only": cfg.deadline_variant_only}), encoding="utf-8")
     # prefixes.jsonl = one row per (prefix, goal); instances.jsonl = the same
     # after deduplication, each with the ground truth of the cases it groups.
     px.write_jsonl(records, model_dir / "prefixes.jsonl")
@@ -155,6 +167,8 @@ def main(argv=None) -> None:
                         help="drop noise attributes (constant, long text, counter-like)")
     parser.add_argument("--unused-filter", action=argparse.BooleanOptionalAction, default=None,
                         help="drop attributes no guard reads, merging the groups that become equal")
+    parser.add_argument("--deadline-variant-only", action=argparse.BooleanOptionalAction, default=None,
+                        help="prefixes: deadline = variant mean - elapsed always (default: min with real remaining time)")
     # Options of the "plan" phase.
     parser.add_argument("--goal", default="all", choices=GOAL_CHOICES,
                         help="plan: which instances to run (default: all)")
@@ -164,6 +178,7 @@ def main(argv=None) -> None:
                         help="plan: OPTIC wall-clock limit in seconds (default: per-log value of the config)")
     parser.add_argument("--memory-mb", type=int, default=None,
                         help="plan: OPTIC virtual memory limit in MB (default: per-log value of the config)")
+    parser.add_argument("--sql", default=None, help="query: SELECT to run on the views prefixes, plan_results, cases, instances_view")
     args = parser.parse_args(argv)
 
     cfg = PaperEvalConfig()
@@ -173,6 +188,8 @@ def main(argv=None) -> None:
         cfg.noise_filter = args.noise_filter
     if args.unused_filter is not None:
         cfg.unused_attribute_filter = args.unused_filter
+    if args.deadline_variant_only is not None:
+        cfg.deadline_variant_only = args.deadline_variant_only
     paths = Paths(args.log, cfg)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -212,6 +229,12 @@ def main(argv=None) -> None:
         elif phase == "report":
             split = read_split(paths.split_json)
             run_report(paths.model_dir(split.split_hash))
+        elif phase == "query":
+            if not args.sql:
+                parser.error("--phase query needs --sql")
+            from paper_eval.query import run_query  # duckdb is needed by this phase only
+            split = read_split(paths.split_json)
+            print(run_query(paths.model_dir(split.split_hash), args.sql))
 
 
 def _ensure_hash_seed(seed: int = 42) -> None:

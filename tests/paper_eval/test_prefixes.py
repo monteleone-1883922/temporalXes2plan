@@ -103,10 +103,11 @@ class TestDeadlineGoal:
     ABC = ("A", "B", "C")
 
     @staticmethod
-    def _deadline(variant_means, offsets=(0, 1, 4)):
+    def _deadline(variant_means, offsets=(0, 1, 4), variant_only=False):
         # case lasts offsets[-1] days; prefix k=2 has elapsed offsets[1] days.
         trace = _trace("c1", "ABC", offsets)
-        recs = px.prefix_records_for_trace(trace, _replayer(), variant_means, DEFAULT_BUCKETS, 2)
+        recs = px.prefix_records_for_trace(
+            trace, _replayer(), variant_means, DEFAULT_BUCKETS, 2, variant_only=variant_only)
         return [r for r in recs if r.goal == px.DEADLINE_GOAL][0]
 
     def test_real_remaining_time_wins_when_it_is_smaller(self):
@@ -122,6 +123,22 @@ class TestDeadlineGoal:
         assert rec.deadline_s == pytest.approx(2 * DAY)
         assert rec.deadline_source == "variant_mean"
         assert rec.deadline_variant_s == pytest.approx(2 * DAY)
+
+    def test_variant_only_uses_the_variant_term_even_when_the_real_time_is_smaller(self):
+        # variant term = 5 - 1 = 4 days, real remaining = 3 days: the variant wins anyway
+        rec = self._deadline({self.ABC: 5 * DAY}, variant_only=True)
+        assert rec.deadline_s == pytest.approx(4 * DAY)
+        assert rec.deadline_source == "variant_mean"
+
+    def test_variant_only_falls_back_to_the_real_time_when_the_variant_is_unseen(self):
+        rec = self._deadline({("A", "X", "C"): 9 * DAY}, variant_only=True)
+        assert rec.deadline_s == pytest.approx(3 * DAY)
+        assert rec.deadline_source == "real_remaining"
+
+    def test_variant_only_can_expire_the_deadline(self):
+        # variant mean 1 day, elapsed 1 day -> d = 0 (expired), although 3 days really remain
+        rec = self._deadline({self.ABC: 1 * DAY}, variant_only=True)
+        assert rec.expired
 
     def test_a_tie_goes_to_the_real_remaining_time(self):
         rec = self._deadline({self.ABC: 4 * DAY})  # 4 - 1 = 3 days = real remaining

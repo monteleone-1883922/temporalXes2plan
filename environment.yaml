@@ -22,3 +22,4 @@ dependencies:
     - ckwrap==1.2.3
     - flask
     - optuna==4.9.0
+    - duckdb

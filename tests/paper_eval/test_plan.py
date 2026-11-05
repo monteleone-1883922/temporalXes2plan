@@ -65,7 +65,8 @@ class FakeRunner:
         return self.results.get(len(self.calls), _result())
 
 
-SETTINGS = {"timeout_s": 60, "memory_mb": 4000, "metric": pl.DEFAULT_METRIC, "mode": "first_plan", "stop_at_first": True}
+SETTINGS = {"timeout_s": 60, "memory_mb": 4000, "metric": pl.DEFAULT_METRIC, "mode": "first_plan", "stop_at_first": True,
+            "deadline_variant_only": False}
 
 
 class TestBuildProblemText:
@@ -217,6 +218,26 @@ class TestRunPlan:
         with pytest.raises(ValueError, match="other settings"):
             pl.run_plan("toy", setup.cfg, setup.paths, timeout_s=10, runner=FakeRunner())
         assert len(_rows(setup.model_dir)) == 1  # untouched
+
+    def test_rows_count_the_replayable_cases(self, setup):
+        px.write_jsonl([
+            {**_instance(0), "cases": [{"is_replayable": True}, {"is_replayable": False}, {"is_replayable": None}]},
+        ], setup.model_dir / "instances.jsonl")
+        pl.run_plan("toy", setup.cfg, setup.paths, runner=FakeRunner())
+        row = _rows(setup.model_dir)[0]
+        assert (row["n_cases"], row["n_cases_replayable"]) == (3, 1)
+
+    def test_deadline_rule_of_the_instances_is_part_of_the_settings(self, setup):
+        (setup.model_dir / pl.PREFIXES_META).write_text(json.dumps({"deadline_variant_only": True}))
+        pl.run_plan("toy", setup.cfg, setup.paths, limit=1, runner=FakeRunner())
+        meta = json.loads((setup.model_dir / pl.META_FILE).read_text())
+        assert meta["settings"]["deadline_variant_only"] is True
+
+    def test_results_made_on_instances_with_another_deadline_rule_are_not_mixed(self, setup):
+        pl.run_plan("toy", setup.cfg, setup.paths, limit=1, runner=FakeRunner())
+        (setup.model_dir / pl.PREFIXES_META).write_text(json.dumps({"deadline_variant_only": True}))
+        with pytest.raises(ValueError, match="other settings"):
+            pl.run_plan("toy", setup.cfg, setup.paths, runner=FakeRunner())
 
     def test_force_discards_the_old_results_and_starts_over(self, setup):
         pl.run_plan("toy", setup.cfg, setup.paths, limit=1, runner=FakeRunner())

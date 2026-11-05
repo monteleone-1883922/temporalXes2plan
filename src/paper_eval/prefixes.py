@@ -8,7 +8,8 @@ Goals per prefix:
     mean duration of the variant (the whole trace's activity sequence) over
     the TRAIN cases, elapsed is the time already spent at the cut, and R is
     the real remaining time of the case. When the variant does not occur in
-    TRAIN, d = R. When d <= 0 the deadline has already expired at the cut:
+    TRAIN, d = R. With the option deadline_variant_only, d = M - elapsed
+    always (R only when the variant is not in TRAIN). When d <= 0 the deadline has already expired at the cut:
     the row is flagged expired and reported separately.
 
 Deduplication (decision D1): two occurrences are the same instance when
@@ -191,13 +192,17 @@ def prefix_records_for_trace(
     variant_means: Dict[Tuple[str, ...], float],
     buckets: List[Bucket],
     k_min: int,
+    variant_only: bool = False,
 ) -> List[PrefixRecord]:
     """One record per (prefix, goal) of trace. Replay failures are recorded
     (replay_ok=False) instead of dropping the prefix: the instance still
     exists for the methods that do not need the model.
 
     variant_means: mean duration in seconds of each variant over the TRAIN
-    cases (split.variant_mean_durations); gives the deadline goal its first term."""
+    cases (split.variant_mean_durations); gives the deadline goal its first term.
+    variant_only: the deadline is always variant mean - elapsed, not the minimum
+    with the real remaining time (which is still the fallback when the variant
+    is not in TRAIN)."""
     # --- 1. Which prefixes exist -------------------------------------------
     # Work on the control-flow view (activity executions only), so that k and
     # n count the same events the model was discovered from.
@@ -275,9 +280,12 @@ def prefix_records_for_trace(
         #   expired = the deadline is already past at the cut (<= 0).
         # E.g. variant mean 6h, elapsed 1h -> 5h; real remaining 4h -> d = 4h
         # (source "real_remaining"). With real remaining 7h -> d = 5h ("variant_mean").
+        # With variant_only the variant term is used even when the real
+        # remaining time is smaller; the fallback to the real time only
+        # happens when the variant is not in TRAIN.
         variant_mean_s = variant_means.get(tuple(activities))
         variant_deadline_s = None if variant_mean_s is None else variant_mean_s - elapsed_s
-        if variant_deadline_s is not None and variant_deadline_s < record.true_rt_s:
+        if variant_deadline_s is not None and (variant_only or variant_deadline_s < record.true_rt_s):
             deadline_s, source = variant_deadline_s, "variant_mean"
         else:
             deadline_s, source = record.true_rt_s, "real_remaining"
@@ -366,12 +374,15 @@ def generate(
     buckets: List[Bucket],
     k_min: int,
     duration_scale_factor: float,
+    variant_only: bool = False,
 ) -> Tuple[List[PrefixRecord], List[EvaluationInstance]]:
     """All records of all TEST traces, plus the deduplicated instances.
-    duration_scale_factor comes from the model's domain (see pddl_deadline_key)."""
+    duration_scale_factor comes from the model's domain (see pddl_deadline_key).
+    variant_only: see prefix_records_for_trace."""
     records: List[PrefixRecord] = []
     for trace in test_traces:
-        records.extend(prefix_records_for_trace(trace, replayer, variant_means, buckets, k_min))
+        records.extend(prefix_records_for_trace(
+            trace, replayer, variant_means, buckets, k_min, variant_only=variant_only))
     instances = group_instances(records, duration_scale_factor)
     return records, instances
 
