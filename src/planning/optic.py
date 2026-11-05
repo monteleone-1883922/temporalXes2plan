@@ -2,9 +2,13 @@
 
 import os
 import re
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -229,6 +233,165 @@ def run(
         "stdout": out,
         "stderr": err,
         "message": message,
+    }
+
+
+# OPTIC prints this once, right after parsing the PDDL, grounding it and
+# evaluating the heuristic of the initial state (FFSolver.cpp). Everything
+# before it is "grounding"; the search starts after it.
+_INITIAL_HEURISTIC_MARK = "Initial heuristic"
+# OPTIC announces a plan with this marker. It is on the SAME line as the search
+# progress ("b (1.000 | 0.000)(G);;;; Solution Found"), so it is looked for
+# anywhere in a line, not at its start (same substring _parse_optic_stdout uses).
+_SOLUTION_FOUND_MARK = ";;; Solution Found"
+
+
+def run_timed(
+    pddl_dir: Path,
+    timeout: int = 60,
+    memory_mb: int = 4000,
+    stop_at_first: bool = True,
+    optic_cmd: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Like run(), but timestamps OPTIC's output to split grounding from planning.
+
+    OPTIC runs under ``stdbuf -oL`` so every line is written to the pipe as soon
+    as it is printed (on a pipe its stdout would otherwise be block-buffered and
+    all the lines would arrive together at the end). A reader thread records
+    when each line arrived, in seconds since the process was started.
+
+    Differences from run():
+      * the output is read as a stream, so on a timeout the part printed so far
+        is kept (grounding may have finished even if the search did not);
+      * stderr is merged into stdout, so lines keep their real order;
+      * nothing is built or written besides the planner process itself, and
+        run() itself is untouched.
+
+    Args:
+        pddl_dir: Directory with domain.pddl and problem.pddl.
+        timeout: Hard wall-clock limit in seconds; the whole process group is killed.
+        memory_mb: Virtual memory limit (``ulimit -v``); OPTIC's out-of-memory
+            abort is classified as "out_of_memory".
+        stop_at_first: Pass -N: stop at the first plan, do not optimise.
+        optic_cmd: Replaces the OPTIC wrapper script; used by the tests to run a
+            fake planner. A list of command words.
+
+    Returns:
+        The same keys as run() (success, solvability, plan_text, plan_actions,
+        metrics, stdout, stderr, message) plus ``timings``:
+          grounding_s   seconds until the "Initial heuristic" line (None if never printed);
+                        covers reading the PDDL, grounding and the first
+                        relaxed planning graph, and also the few milliseconds
+                        taken to start the process;
+          first_plan_s  seconds until the first plan was announced (None if none);
+          planning_s    first_plan_s - grounding_s, or, for a problem OPTIC proved
+                        unsolvable, the end of the run minus grounding_s (None otherwise);
+          wall_s        seconds from start to the end of the process (or to the kill);
+          cpu_s         the "; Time" line OPTIC prints (CPU time, 10 ms resolution).
+    """
+    result = _empty_result()
+    result["timings"] = {"grounding_s": None, "first_plan_s": None, "planning_s": None,
+                         "wall_s": None, "cpu_s": None}
+
+    if shutil.which("stdbuf") is None:
+        # Without line buffering the timestamps would all be the end of the run.
+        raise RuntimeError("stdbuf (GNU coreutils) is required to time OPTIC's grounding and planning.")
+    if optic_cmd is None and not is_available():
+        return {**result, "message": "OPTIC binary not found (build it first)."}
+
+    domain = (pddl_dir / "domain.pddl").resolve()
+    problem = (pddl_dir / "problem.pddl").resolve()
+    if not domain.exists() or not problem.exists():
+        return {**result, "message": "domain.pddl or problem.pddl not found in pddl directory."}
+
+    words = list(optic_cmd) if optic_cmd is not None else [str(OPTIC_SH)]
+    flags = ["-N"] if stop_at_first else []
+    inner_cmd = (
+        f"ulimit -v {int(memory_mb) * 1024}; stdbuf -oL "
+        + " ".join(shlex.quote(w) for w in words + flags + [str(domain), str(problem)])
+    )
+
+    lines: List[tuple] = []  # (seconds since start, line)
+    started = time.perf_counter()
+    try:
+        proc = subprocess.Popen(
+            ["bash", "-c", inner_cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=str(OPTIC_DIR),
+            # Own process group, so the timeout can kill bash, the wrapper and the planner together.
+            start_new_session=True,
+        )
+    except Exception as exc:
+        return {**result, "solvability": "error", "stderr": str(exc), "message": f"Execution error: {exc}"}
+
+    def _read() -> None:
+        for line in iter(proc.stdout.readline, ""):
+            lines.append((time.perf_counter() - started, line))
+
+    reader = threading.Thread(target=_read, daemon=True)
+    reader.start()
+
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # exited between the timeout and the kill
+        proc.wait()
+    wall_s = time.perf_counter() - started
+    reader.join(timeout=5)  # the pipe closes when the process is gone
+
+    out = "".join(text for _, text in lines)
+    grounding_s = next((t for t, text in lines if _INITIAL_HEURISTIC_MARK in text), None)
+    first_plan_s = next((t for t, text in lines if _SOLUTION_FOUND_MARK in text), None)
+
+    plan_lines, plan_actions, makespan = _parse_optic_stdout(out)
+    plan_text = "\n".join(plan_lines) if plan_lines else None
+    metrics = _parse_optic_metrics(out, "", makespan)
+    metrics["solution_length"] = len(plan_actions) if plan_actions else None
+
+    if timed_out and first_plan_s is None:
+        solvability = "timeout"
+    else:
+        # A plan printed before the kill still counts as solved.
+        solvability = _classify(proc.returncode, plan_text is not None, out, "")
+
+    if first_plan_s is not None and grounding_s is not None:
+        planning_s: Optional[float] = first_plan_s - grounding_s
+    elif solvability == "unsolvable_structural" and grounding_s is not None:
+        planning_s = wall_s - grounding_s
+    else:
+        planning_s = None
+
+    message = (
+        f"Planner timed out after {timeout}s" if solvability == "timeout"
+        else f"Plan found — {len(plan_actions)} action(s)" if solvability == "solved"
+        else "Problem proved unsolvable" if solvability == "unsolvable_structural"
+        else f"Planner ran out of memory (exit {proc.returncode})" if solvability == "out_of_memory"
+        else f"No solution found (exit {proc.returncode})"
+    )
+    return {
+        **result,
+        "success": solvability == "solved",
+        "solvability": solvability,
+        "plan_text": plan_text,
+        "plan_actions": plan_actions,
+        "metrics": metrics,
+        "stdout": out,
+        "message": message,
+        "timings": {
+            "grounding_s": grounding_s,
+            "first_plan_s": first_plan_s,
+            "planning_s": planning_s,
+            "wall_s": wall_s,
+            "cpu_s": metrics.get("total_time"),
+        },
     }
 
 
