@@ -11,6 +11,13 @@ Phases (each skipped when its output already exists, unless --force):
   volume    results/paper_eval/<log>/volume.json — prefix counts per bucket
             without building the model (a quick size estimate)
   all       prepare + split + model + prefixes
+
+Phases that are NOT part of "all" (they run OPTIC or read its results):
+  plan      OPTIC on every instance -> <split_hash>/plan_results.jsonl, plan_meta.json
+            (resumable; one OPTIC at a time; --goal, --limit, --timeout, --memory-mb;
+            --force discards the previous results)
+  stats     descriptive statistics of the model -> <split_hash>/model_stats.json
+  report    RQ1 table from plan_results.jsonl -> <split_hash>/rq1_summary.{json,md}
 """
 
 from __future__ import annotations
@@ -28,15 +35,19 @@ from core_utils import _load_log
 from paper_eval import prefixes as px
 from paper_eval.build_model import build_model, load_model
 from paper_eval.config import LOGS, PaperEvalConfig, bucket_label
+from paper_eval.model_stats import run_stats
+from paper_eval.plan import GOAL_CHOICES, run_plan
 from paper_eval.prepare import prepare_log
+from paper_eval.report import run_report
 from paper_eval.split import (
-    case_id, chronological_case_ids, control_flow_view, make_split, read_split, write_split,
+    case_id, chronological_case_ids, control_flow_view, make_split, read_split, variant_mean_durations,
+    write_split,
 )
 from replay.trace_replayer import TraceReplayer
 
 logger = logging.getLogger("paper_eval")
 
-PHASES = ("prepare", "split", "model", "prefixes", "volume", "all")
+PHASES = ("prepare", "split", "model", "prefixes", "volume", "plan", "stats", "report", "all")
 
 
 class Paths:
@@ -85,10 +96,14 @@ def run_prefixes(log_name: str, cfg: PaperEvalConfig, paths: Paths, force: bool)
     model = load_model(model_dir)
     replayer = TraceReplayer(model.prepared, model.petri_net_model, config=model.config)
     log = _load_log(str(paths.log_xes), "xes", None)
+    # Mean duration of each variant over the TRAIN cases only: the first term
+    # of the deadline goal. The test traces never contribute to it.
+    train_ids = set(split.train_ids)
+    variant_means = variant_mean_durations(t for t in log if case_id(t) in train_ids)
     records, instances = px.generate(
         _test_traces(log, split.test_ids),
         replayer,
-        split.deadline_thresholds_s,
+        variant_means,
         cfg.buckets_for(log_name),
         cfg.k_min,
         model.domain.duration_scale_factor,
@@ -123,7 +138,7 @@ def run_volume(log_name: str, cfg: PaperEvalConfig, paths: Paths) -> None:
         "n_prefixes": sum(per_bucket.values()),
         "n_distinct_activity_prefixes": len(distinct),
         "n_prefixes_by_bucket": {str(b): n for b, n in per_bucket.items()},
-        "n_goals_per_prefix": 1 + len(cfg.deadline_quantiles),
+        "n_goals_per_prefix": 2,  # completion and deadline
     }
     paths.volume_json.write_text(json.dumps(volume, indent=2), encoding="utf-8")
     logger.info("[%s] volume: %s", log_name, volume)
@@ -140,6 +155,15 @@ def main(argv=None) -> None:
                         help="drop noise attributes (constant, long text, counter-like)")
     parser.add_argument("--unused-filter", action=argparse.BooleanOptionalAction, default=None,
                         help="drop attributes no guard reads, merging the groups that become equal")
+    # Options of the "plan" phase.
+    parser.add_argument("--goal", default="all", choices=GOAL_CHOICES,
+                        help="plan: which instances to run (default: all)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="plan: handle at most this many instances not done yet (to try the run)")
+    parser.add_argument("--timeout", type=int, default=None,
+                        help="plan: OPTIC wall-clock limit in seconds (default: per-log value of the config)")
+    parser.add_argument("--memory-mb", type=int, default=None,
+                        help="plan: OPTIC virtual memory limit in MB (default: per-log value of the config)")
     args = parser.parse_args(argv)
 
     cfg = PaperEvalConfig()
@@ -176,6 +200,18 @@ def main(argv=None) -> None:
             run_prefixes(args.log, cfg, paths, args.force)
         elif phase == "volume":
             run_volume(args.log, cfg, paths)
+        elif phase == "plan":
+            counts = run_plan(
+                args.log, cfg, paths, goal=args.goal, limit=args.limit,
+                timeout_s=args.timeout, memory_mb=args.memory_mb, force=args.force,
+            )
+            logger.info("[%s] plan: handled %d instances: %s", args.log, sum(counts.values()), dict(counts))
+        elif phase == "stats":
+            split = read_split(paths.split_json)
+            run_stats(paths.model_dir(split.split_hash), cfg.data_dir / f"{args.log}.stats.json")
+        elif phase == "report":
+            split = read_split(paths.split_json)
+            run_report(paths.model_dir(split.split_hash))
 
 
 def _ensure_hash_seed(seed: int = 42) -> None:
