@@ -18,7 +18,7 @@ Phases that are NOT part of "all" (they run OPTIC or read its results):
             --force discards the previous results)
   stats     descriptive statistics of the model -> <split_hash>/model_stats.json
   report    RQ1 table from plan_results.jsonl -> <split_hash>/rq1_summary.{json,md}
-  query     --sql "SELECT ..." on the per-case views (see paper_eval/query.py)
+  query     --sql "SELECT ..." on the DuckDB tables of the run (--all-logs: every log; see paper_eval/query.py)
 """
 
 from __future__ import annotations
@@ -178,7 +178,11 @@ def main(argv=None) -> None:
                         help="plan: OPTIC wall-clock limit in seconds (default: per-log value of the config)")
     parser.add_argument("--memory-mb", type=int, default=None,
                         help="plan: OPTIC virtual memory limit in MB (default: per-log value of the config)")
-    parser.add_argument("--sql", default=None, help="query: SELECT to run on the views prefixes, plan_results, cases, instances_view")
+    parser.add_argument("--sql", default=None,
+                        help="query: SELECT to run on the tables (see paper_eval/query.py: runs, prefixes, "
+                             "plan_results, cases, instances_view, models, ...)")
+    parser.add_argument("--all-logs", action="store_true",
+                        help="query: load every log found in the results folder (--log is then ignored)")
     args = parser.parse_args(argv)
 
     cfg = PaperEvalConfig()
@@ -232,9 +236,12 @@ def main(argv=None) -> None:
         elif phase == "query":
             if not args.sql:
                 parser.error("--phase query needs --sql")
-            from paper_eval.query import run_query  # duckdb is needed by this phase only
-            split = read_split(paths.split_json)
-            print(run_query(paths.model_dir(split.split_hash), args.sql))
+            from paper_eval.query import run_query, run_query_all  # duckdb is needed by this phase only
+            if args.all_logs:
+                print(run_query_all(cfg.results_dir, args.sql, cfg.data_dir))
+            else:
+                split = read_split(paths.split_json)
+                print(run_query(paths.model_dir(split.split_hash), args.sql, cfg.data_dir))
 
 
 def _ensure_hash_seed(seed: int = 42) -> None:
