@@ -1,432 +1,360 @@
-# XES2Plan: Enable Predictive Process Monitoring through Automated Planning 
-Source code, event log presented in the case study, and instructions for using the framework presented in the paper "Predictive Process Monitoring via Automated Planning".
+# temporalXes2plan
 
-## About
-Predictive Process Monitoring (PPM) forecasts the future behavior of ongoing business process executions to support proactive decision-making.
-Although state-of-the-art deep learning approaches achieve high predictive accuracy, they often act as black boxes, without explaining the execution steps that lead to a given outcome, thus limiting their applicability in scenarios requiring transparent what-if analysis.
+**Timed situation prescription via temporal planning.**
 
-In this paper, we propose a planning-based framework for \textit{situation prediction}, which anticipates not only whether a specific outcome is achievable but also the exact sequence of activities and data updates required to reach it. We introduce an automated pipeline that transforms event logs into PDDL planning tasks by combining process discovery with decision mining, allowing classical planners to generate compliant, goal-oriented predictions. Experiments on real-world logs show that our framework provides high solvability and predictive performance while offering transparency.
-![framework](figures/framework.png)
+temporalXes2plan turns an event log into a *timed, data-aware process model* and uses an off-the-shelf
+temporal planner to answer what-if questions about running cases:
 
-## Structure of the repository
+> *To reach situation X within deadline D, which activities must happen, and when?*
 
-```
-└── xes2plan/
-    ├── README.md
-    ├── LICENSE
-    ├── evaluation/
-    │   ├── README.md
-    │   └── batch_results/                   # output directory for batch evaluations
-    ├── figures/
-    │   └── framework.png
-    ├── logs/                                # folder containing event logs in XES format
-    │   ├── bpic_2012_a.xes
-    │   ├── bpic_2012_o.xes
-    │   ├── bpic_2012_w.xes
-    │   ├── bpic_2012_wc.xes
-    │   ├── bpic_2012.xes
-    │   ├── bpic_2013_cp.xes
-    │   ├── bpic_2013_i.xes
-    │   ├── bpic_2017.xes
-    │   ├── env_permit.xes
-    │   ├── helpdesk.xes
-    │   └── sepsis.xes                       # main case study log
-    ├── pddl/                                # folder containing the resulting encoding of the log in the PDDL domain and problem files
-    │   ├── domain.pddl
-    │   ├── problem.pddl
-    │   └── input/
-    │       ├── goal.pddl
-    │       └── init.pddl
-    └── src/                                 # source code for the parsing and encoding of the XES log into a PDDL specification
-        ├── analyze_results.py               # results analysis and visualization
-        ├── batch_evaluation.py              # batch evaluation system
-        ├── call_planner.py                  # script to handle Fast-Downward invocations
-        ├── eval_outcome_prediction.py       # outcome prediction evaluation module
-        ├── eval_planning.py                 # planning evaluation module
-        ├── eval_suffix_prediction.py        # suffix prediction evaluation module
-        ├── main.py
-        ├── pddl_encoder.py
-        ├── xes_parser.py
-        ├── downward/                        # Fast-Downward planner (git submodule)
-      └── ...
+From the event log alone, the tool discovers a Petri net with data guards, data effects, branch
+probabilities and duration bounds, and encodes it in PDDL 3.1. A running case (a trace prefix) and a
+target become a PDDL problem; the temporal planner [OPTIC](optic/README) returns a **timed,
+partially ordered plan** that runs independent activities in parallel and respects every guard, effect
+and duration bound of the model, or reports that the model admits none.
+
+Answers are:
+
+- **sound** with respect to the discovered model: every plan is an execution of the net that reaches the target in time;
+- **transparent**: each step carries its start time, its duration bounds and the condition that enables it, so an analyst can trace and check it;
+- **honest about failure**: a deadline the model cannot meet is reported as such (no plan), and `unknown` is returned only when a time or memory limit is reached.
+
+## How it works
+
+```mermaid
+flowchart TB
+    subgraph OFFLINE["Offline: discovery (once per log)"]
+        direction LR
+        L[("Event log<br/>XES / CSV")] --> CF["Control flow<br/>and log alignment"]
+        CF --> DS["Discretise<br/>numeric attributes"]
+        DS --> GE["Guards, effect groups,<br/>probabilities"]
+        GE --> DU["Durations"]
+        DU --> N["Timed data-aware<br/>Petri net"]
+        N --> DOM["PDDL 3.1 domain"]
+        TPE{{"TPE model selection<br/>(replay score on a validation split)"}} -.-> CF
+    end
+    subgraph ONLINE["Online: one query"]
+        direction LR
+        P["Running prefix"] --> R["Replay on the net"]
+        R --> S["State s_k"]
+        S --> PROB["PDDL problem"]
+        Q["Target: places, condition,<br/>deadline"] --> PROB
+        PROB --> OPT["OPTIC"]
+        D2["PDDL 3.1 domain<br/>(from the offline phase)"] --> OPT
+        OPT --> PLAN["Timed partial-order plan,<br/>or no plan / unknown"]
+    end
+    OFFLINE ==> ONLINE
 ```
 
-## Getting Started
+**Offline.** The control flow is discovered with one of five miners (`powl`, `inductive`, `alpha`,
+`heuristics`, `ilp`) and the log is replayed on the net so that every event is attached to a transition
+and a choice point. Numeric attributes are discretised with optimal one-dimensional clustering
+(Ckmeans.1d.dp) and kernel-density peaks; guards of exclusive choices are learned with a cascade of
+determinism thresholds and decision trees; conditional effects are split into appearance, value
+assignment and grouping; durations come from lifecycle events (start/complete), from the time to the
+next event, or from user-supplied bounds. The many thresholds of these steps are tuned automatically
+with a Tree-structured Parzen Estimator (Optuna) and successive halving, scoring each candidate net by
+how many validation traces it can replay.
 
-First, download the repository locally on your machine and navigate into the main folder.
+**Online.** The prefix of a running case is replayed on the net to obtain a state (marking and attribute
+values). Together with a target (places to mark, a condition on data, a deadline) it becomes a PDDL
+problem. The deadline is a timed initial literal that disables every action once it has passed, so it is a
+hard constraint. OPTIC returns a plan whose actions map back to transitions, effect groups and attribute
+values.
+
+## Features
+
+| Area | What it offers | Where |
+|---|---|---|
+| Event logs | XES and CSV loading, validation, lifecycle handling, variant-coverage filtering | `src/parsing/log_*.py`, `csv_loader.py` |
+| Control flow | `powl`, `inductive`, `alpha`, `heuristics`, `ilp` discovery; alignment-based replay that tolerates low fitness | `src/parsing/model_discoverer.py`, `petri_net_log_builder.py` |
+| Data awareness | Decision-tree guards for exclusive choices, conditional effects, effect co-occurrence analysis, branch and effect probabilities | `src/parsing/decision_mining.py`, `effect_correlation_analyzer.py`, `probability_estimator.py` |
+| Discretisation | Bounded intervals for numeric attributes (kernel-density peaks + Ckmeans.1d.dp with variance-fit selection of k) | `src/parsing/discretizer.py` |
+| Attribute filters | Automatic removal of noise attributes (constant, long text, counter-like) and of attributes no guard reads | `src/parsing/attribute_filter.py`, `src/encoding/domain_builder.py` |
+| Durations | Duration bounds from lifecycle events, inter-event times or external data | `src/parsing/temporal_extractor.py` |
+| Model selection | Hyperparameter search (TPE, successive halving, exact early stopping of replays, feasibility gate on effect-group blow-up) | `src/network_search/` |
+| PDDL encoding | PDDL 3.1 domain with durative actions, `total-cost` and `deadline_ok`; PDDL problems from a state, a target and a deadline | `src/encoding/` |
+| Planning | OPTIC (temporal, partial-order) and Fast Downward (classical); timeouts, memory limits, a timed run that splits grounding from planning | `src/planning/` |
+| Replay and validation | Replay of traces on the net and validation of planner plans against the domain | `src/replay/` |
+| Web interface | Upload and validate a log, run the pipeline as a background job, inspect and correct the discovered net, pose queries from a prefix | `src/web/` |
+| Evaluation | Two evaluation harnesses (see below) and SQL-queryable results (DuckDB) | `src/evaluation/`, `src/paper_eval/` |
+
+## Repository layout
+
+```
+temporalXes2plan/
+├── README.md
+├── LICENSE                      # GPL-3.0
+├── environment.yaml             # conda environment (Python 3.12 + pip packages)
+├── src/
+│   ├── main.py                  # command-line pipeline: log -> PDDL domain
+│   ├── pipeline.py              # pipeline coordinator (parse -> search -> encode -> persist)
+│   ├── models.py                # data model and AnalysisConfig (all tunable parameters)
+│   ├── core_utils.py            # logging, name sanitising, train/test splitting, XES writing
+│   ├── parsing/                 # log loading, discovery, decision mining, discretisation, durations
+│   ├── encoding/                # PDDL model, domain and problem builders, guard/effect encoders
+│   ├── network_search/          # TPE model selection: search space, scoring, early stopping
+│   ├── replay/                  # trace replayer (alignment + walk) and plan replayer
+│   ├── planning/                # OPTIC and Fast Downward wrappers, planner dispatcher and config
+│   ├── web/                     # Flask application, REST API, job tracker, templates, static files
+│   ├── evaluation/              # first evaluation harness (Q1/Q2/Q3 queries on public logs)
+│   └── paper_eval/              # evaluation protocol of the paper: phases, results, SQL tables
+├── optic/                       # OPTIC temporal planner (sources; own licence, see below)
+├── vendor/downward/             # Fast Downward (git submodule)
+├── scripts/                     # setup.sh (build Fast Downward), setup_submodules.sh
+├── tests/                       # test suite (mirrors the layout of src/)
+├── docs/                        # module reference and evaluation documentation
+├── figures/
+├── data/                        # created at run time, not versioned: logs, UI data
+└── results/                     # created at run time, not versioned: evaluation results
+```
+
+## Installation
+
+**Prerequisites** (Linux; the commands below assume Debian/Ubuntu):
 
 ```bash
-git clone --recurse-submodules https://github.com/angelo-casciani/xes2pddl
-cd xes2pddl
+sudo apt install git cmake g++ python3 perl bison flex libbz2-dev \
+                 coinor-libcbc-dev coinor-libclp-dev coinor-libcoinutils-dev
 ```
 
-Assuming a working version of Python (v.3.10.12) installed on the machine, create a virtual environment in the root folder of the project.
+`cmake`, `g++` and `python3` are needed for Fast Downward; the rest is needed to build OPTIC
+(see [`optic/README`](optic/README)). The timed runs of the evaluation use `stdbuf` from GNU coreutils.
+
+**Clone and create the environment:**
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+git clone --recurse-submodules <repository-url>
+cd temporalXes2plan
+conda env create -f environment.yaml
+conda activate temporalXes2Plan
 ```
 
-Run the following command to install the necessary packages along with their dependencies in the `requirements.txt` file using `pip`:
+The environment installs Python 3.12 and the pip packages listed in `environment.yaml` (PM4Py, Optuna,
+scikit-learn, NumPy, pandas, SciPy, Flask, DuckDB, `ckwrap`, ...).
+
+**Build the planners:**
 
 ```bash
-pip install -r requirements.txt
+# Fast Downward (initialises the submodule if needed, then compiles it)
+bash scripts/setup.sh
+
+# OPTIC (CLP variant): configure and compile in optic/
+cd optic && bash run-cmake-release && bash build-release && cd ..
 ```
 
-The event logs in the `logs/` folder are compressed. Unzip them before proceeding.
-
-### Setup for Planners
-
-This project uses PDDL planners as Git submodules:
-- [Fast-Downward](https://www.fast-downward.org/) - Classical PDDL planner
-
-#### Prerequisites
-
-**For Fast Downward:**
-- CMake
-  - Ubuntu/Debian: `sudo apt install cmake`
-  - macOS: `brew install cmake`
-
-**Important:** Install Fast Downward dependencies **before** running the setup script.
-
-#### Build Planners
-
-Run the setup script to initialize git submodules and build the planners.
+OPTIC can also be built from Python, and the first call of `planning.optic.run` builds it automatically
+if the binary is missing:
 
 ```bash
-# Setup Fast Downward
-./setup_submodules.sh
-
-# Setup only Fast Downward
-./setup_submodules.sh --only-fast-downward
-
-# Show help
-./setup_submodules.sh --help
+PYTHONPATH=src python -c "from planning import optic; print(optic.build(print)['message'])"
 ```
 
-## Usage
+The timed runner used by the evaluation (`planning.optic.run_timed`) does **not** build OPTIC: build it first.
 
-Run the framework:
-```bash
-cd src
-python3 main.py
-```
+All commands below are run from the repository root with `PYTHONPATH=src`.
 
-The complete encoding comprehensive of the PDDL domain and problem will be stored in two `.pddl` files in the [pddl](pddl) folder.
+## Quick start
 
-The default parameters are: 
-- Log Coverage (minimum cumulative coverage percentage for variant filtering): `0.003`;
-- XES event log to encode in PDDL: `'sepsis.xes'`;
-- Name of the PDDL domain to generate: `'xes_log'`;
-- Path to the file containing initial state predicates: `'../pddl/input/init.pddl'`;
-- Path to the file containing goal conditions: `'../pddl/input/goal.pddl'`;
-- Discovery algorithm for Petri net discovery: `'alpha'`;
-
-To customize these settings, modify the corresponding arguments when executing `main.py`:
-- Use `--log_coverage` to specify a different minimum cumulative coverage percentage for variant filtering.
-- Use `--xes_name` to specify a different XES event log to encode in PDDL (the corresponding XES log must be contained in the [logs](logs) folder);
-- Use `--pddl_name` to specify a different name of the PDDL domain to generate;
-- Use `--init` to specify a different path to the file containing initial state predicates;
-- Use `--goal` to specify a different path to the file containing goal conditions;
-- Use `--discovery_algorithm` to specify the discovery algorithm for Petri net discovery (options: `alpha`, `inductive`, `heuristics`, `ilp`).
-
-To specify different conditions on the predicates in the initial state and in the goal state, change the content of the corresponding files in the [input](input) folder.
-Each line in these files should contain a single PDDL predicate representing a condition for the initial or goal state, respectively. For example, an `init.pddl` file might look like:
-```bash
-(enabled some_starting_activity)
-(attribute1 value_a)
-(not (attribute2))
-```
-Note that the start activity is always enabled to always allow the generation of a plan.
-
-And a `goal.pddl` file:
-```bash
-(completed some_end_activity)
-(attribute3 value_b)
-```
-
-Once the translation is complete, we can use Fast Downward to generate a plan.
-
-### Using Fast Downward (Classical Planning)
-
-Once the planner is configured, we can use it to generate a plan (prediction). For example, using Fast-Downward set up as reported above, we can run the following command (assuming the previously generated PDDL domain and problem files are in a folder accessible by the planner) to generate a prediction leveraging A* with LM-cut heuristic:
-```bash
-cd src/downward
-./fast-downward.py ../../pddl/domain.pddl ../../pddl/problem.pddl --search "astar(lmcut())"
-```
-
-For the case study presented in the paper, the resulting plan (prediction) for the specified initial state and goal is as follows:
-```bash
-(er_registration)
-(er_triage)
-(leucocytes)
-(crp)
-```
-
-## Discovery Algorithms
-
-The framework supports four different discovery algorithms for Petri net discovery from event logs:
-1. *Alpha Miner (`alpha`)*;
-2. *Inductive Miner (`inductive`)*;
-3. *Heuristics Miner (`heuristics`)*;
-4. *ILP Miner (`ilp`)*.
-  
-### Usage Examples
-
-Use different discovery algorithms by specifying the `--discovery_algorithm` parameter:
+### Command line: from a log to a PDDL domain
 
 ```bash
-# Use Alpha Miner for simple logs
-python3 main.py --discovery_algorithm alpha
-
-# Use Inductive Miner for noisy logs (default)
-python3 main.py --discovery_algorithm inductive --xes_name helpdesk.xes
-
-# Use Heuristics Miner for complex control flow
-python3 main.py --discovery_algorithm heuristics --xes_name bpic_2017.xes
-
-# Use ILP Miner for optimal results
-python3 main.py --discovery_algorithm ilp --log_coverage 0.01
+PYTHONPATH=src python -m main --log path/to/log.xes --durative --algorithm powl
 ```
 
-## Evaluation
+| Option | Meaning |
+|---|---|
+| `--log PATH` | XES event log (required) |
+| `--algorithm` | `alpha`, `inductive` (default), `heuristics`, `ilp`, `powl` |
+| `--durative` | encode transitions as durative actions with duration bounds |
+| `--coverage FLOAT` | minimum cumulative variant coverage kept in the log (default `0.001`) |
+| `--activity-classifier` | use `concept:name` + `lifecycle:transition` as the activity label |
+| `--domain-name NAME` | domain name in the PDDL header (default: log file name) |
+| `--data-dir DIR`, `--pddl-out DIR` | where the UI data (`data/<log>/`) and the PDDL domain (`pddl/`) are written |
 
-The framework provides three types of evaluation to assess the effectiveness of the XES2PDDL approach:
+The run writes the discovered model as JSON for the web interface (`original.json`, `current.json`) and the
+PDDL domain file. The model search of the previous section is available from the web interface and from the
+Python API (`search=True`).
 
-1. **Planning evaluation** - Tests the technical feasibility of generating valid plans
-2. **Suffix prediction evaluation** - Measures accuracy of activity sequence predictions  
-3. **Outcome prediction evaluation** - Assesses numerical outcome prediction capabilities
-
-### 1. Planning Evaluation
-
-Planning evaluation assesses the ability of PDDL planners to generate valid plans from the encoded process models. This evaluation:
-
-- **Tests planner performance** across different search algorithms and heuristics
-- **Measures planning time** and solution quality  
-- **Validates plan feasibility** by checking if generated plans achieve the specified goals
-- **Analyzes scalability** with different log coverage levels
-
-To run a single planning evaluation:
-```bash
-cd src
-python3 eval_planning.py
-```
-
-### 2. Suffix Prediction Evaluation
-
-Suffix prediction evaluation measures how well the planning-based approach predicts future process behavior compared to actual trace suffixes. This evaluation:
-
-- **Compares predicted activity sequences** with actual suffixes from historical data
-- **Uses Damerau-Levenshtein distance** to measure similarity between predicted and actual sequences
-- **Analyzes prediction accuracy** across different process prefixes
-- **Evaluates transparency** of predictions by providing explicit activity sequences
-
-To run suffix prediction evaluation:
-```bash
-cd src
-python3 eval_suffix_prediction.py
-```
-
-### 3. Outcome Prediction Evaluation
-
-Outcome prediction evaluation assesses the framework's ability to predict outcomes (e.g., medical test results, performance metrics) based on process execution context. This evaluation:
-
-- **Predicts discretized numerical values** of target attributes using planning-based approach
-- **Compares predicted outcomes** with actual attribute values from completed traces
-- **Evaluates multiple target attributes** simultaneously or focuses on specific numerical attributes
-- **Measures prediction accuracy** across different discretization levels (low, medium, high, etc.)
-- **Provides transparent explanations** by showing which activities lead to specific outcomes
-
-This type of evaluation is particularly valuable in healthcare and other domains where understanding the causal relationship between process activities and numerical outcomes is critical for decision-making.
-
-To run outcome prediction evaluation:
-```bash
-cd src
-python3 eval_outcome_prediction.py
-```
-
-#### Outcome Evaluation Parameters
-
-You can customize the outcome evaluation with the following parameters:
-
-- `--target_attribute`: Specify a particular numerical attribute to predict (e.g., "leucocytes", "cRP", "lacticAcid", "age"). If not specified, all numerical attributes will be evaluated
-- `--xes_name`: Event log to use (default: "sepsis.xes")
-- `--search`: Planning algorithm (default: "astar_lmcut")
-- `--log_coverage`: Minimum coverage for variant filtering (default: 0.00001)
-
-Example for predicting leucocytes values in sepsis cases:
-```bash
-python3 eval_outcome_prediction.py --target_attribute leucocytes --xes_name sepsis.xes --search astar_lmcut --log_coverage 0.01
-```
-
-Example for predicting CRP levels:
-```bash
-python3 eval_outcome_prediction.py --target_attribute cRP --xes_name sepsis.xes --search lazy_greedy_ff --log_coverage 0.001
-```
-
-Example using different discovery algorithms:
-```bash
-python3 eval_outcome_prediction.py --target_attribute leucocytes --discovery_algorithm inductive --xes_name sepsis.xes
-
-python3 eval_planning.py --discovery_algorithm heuristics --xes_name bpic_2017.xes --search astar_lmcut
-
-python3 eval_suffix_prediction.py --discovery_algorithm ilp --xes_name helpdesk.xes --log_coverage 0.01
-```
-
-The results will be stored in a `.csv` file reporting all the information for the run in the [evaluation](evaluation) folder.
-
-#### Outcome Evaluation Results
-
-The outcome evaluation generates detailed CSV reports with the following information for each prediction:
-
-- **Full Real Trace**: The complete actual trace from the event log
-- **Prefix Length**: Length of the prefix used for prediction
-- **Target Attribute**: The numerical attribute being predicted (e.g., leucocytes, cRP)
-- **Actual Value**: The real numerical value from the completed trace
-- **Actual Discretized**: The discretized version of the actual value (low, medium, high, etc.)
-- **Planning Success**: Whether the planner found a valid plan
-- **Predicted Discretized**: The predicted discretized value from the planning approach
-- **Search Algorithm**: The planning algorithm used for prediction
-
-This enables comprehensive analysis of:
-- **Prediction accuracy** across different attribute discretization levels
-- **Planning success rates** for different process contexts
-- **Comparison between predicted and actual outcomes** for transparency analysis
-
-### 4. Batch Evaluation
-
-For comprehensive evaluation across multiple configurations, the framework includes a batch evaluation script that automates testing with different combinations of:
-
-- **Event logs**: Various XES files from different domains
-- **Search algorithms**: Multiple PDDL planning algorithms and heuristics  
-- **Discovery algorithms**: Different Petri net discovery algorithms (alpha, inductive, heuristics, ilp)
-- **Log coverage**: Different minimum cumulative coverage percentages for variant filtering
-- **Evaluation types**: Planning, suffix prediction, and outcome prediction evaluations
-
-#### Quick Start with Batch Evaluation
-
-**Quick test run (16 evaluations):**
-```bash
-cd src
-python3 batch_evaluation.py --preset single_log
-```
-
-**Full comprehensive evaluation (990 evaluations):**
-```bash
-cd src
-python3 batch_evaluation.py --preset full
-```
-
-**Outcome prediction evaluation only:**
-```bash
-cd src
-python3 batch_evaluation.py --preset outcome --output ../evaluation/outcome_results
-```
-
-**Quick test including all evaluation types:**
-```bash
-cd src
-python3 batch_evaluation.py --preset single_log --output ../evaluation/comprehensive_test
-```
-
-#### Available Predefined Configurations
-
-- **`quick`**: Fast test with 2 logs, 2 algorithms, 2 coverage levels
-- **`full`**: Comprehensive test with all logs, algorithms, and discovery methods
-- **`planning_only`**: Focus on planning evaluation only
-- **`suffix_only`**: Focus on suffix prediction evaluation only
-- **`outcome_only`**: Focus on outcome prediction evaluation only
-- **`single_log`**: Comprehensive test on sepsis.xes only
-- **`algorithms_comparison`**: Compare all search algorithms on sepsis.xes
-- **`coverage_analysis`**: Analyze different coverage levels
-- **`quick_with_outcome`**: Fast test including all three evaluation types
-- **`outcome_analysis`**: Focused outcome prediction analysis on sepsis.xes
-- **`discovery_comparison`**: Compare all discovery algorithms on sepsis and helpdesk logs
-
-To see all available presets:
-```bash
-python3 batch_evaluation.py --list-presets
-```
-
-#### Discovery Algorithm Comparison
-
-To specifically compare different discovery algorithms:
-```bash
-cd src
-python3 batch_evaluation.py --preset discovery_comparison --output ../evaluation/discovery_results
-```
-
-This preset tests all four discovery algorithms (alpha, inductive, heuristics, ilp) on sepsis.xes and helpdesk.xes with both planning and suffix prediction evaluations.
-
-#### Available Search Algorithms
-
-The batch evaluation system supports multiple PDDL planning algorithms:
-
-- **`astar_lmcut`**: A* with LM-Cut heuristic (recommended)
-- **`astar_hmax`**: A* with h^max heuristic
-- **`astar_ipdb`**: A* with iPDB heuristic
-- **`lazy_greedy_ff`**: Lazy greedy with FF heuristic
-- **`lazy_wastar_ff`**: Lazy weighted A* with FF heuristic
-- **`eager_greedy_ff_cg`**: Eager greedy FF heuristic with causal graph
-- **`ehc_ff`**: Enforced hill-climbing with FF heuristic
-- **`lazy_greedy_cea`**: Lazy greedy with CEA heuristic
-- **`lazy_greedy_goalcount`**: Lazy greedy with goal count
-
-#### Log Coverage Levels
-
-Control the complexity of the encoded model by selecting different minimum coverage percentages. The filter keeps the most frequent trace variants until their cumulative frequency reaches or exceeds the specified percentage:
-
-- **`0.0001`**: Keep only the most frequent variants covering at least 0.01% of cases (simplest model)
-- **`0.001`**: Keep variants covering at least 0.1% of cases cumulatively
-- **`0.01`**: Keep variants covering at least 1% of cases cumulatively  
-- **`0.1`**: Keep variants covering at least 10% of cases cumulatively
-- **`0.5`**: Keep variants covering at least 50% of cases cumulatively
-- **`1.0`**: All variants (most complex model - 100% coverage)
-
-#### Results Analysis
-
-After running batch evaluations, analyze results with the built-in analysis tool:
+### Web interface
 
 ```bash
-cd src
-python3 analyze_results.py ../evaluation/batch_results
+PYTHONPATH=src python -m web.app            # --port 5000 --no-browser --data-dir DIR --debug
 ```
 
-This generates:
-- **Console output**: Success rates and performance statistics
-- **Visualizations**: Success rate charts, duration distributions, heatmaps
-- **Comprehensive report**: Detailed analysis of all evaluations
+The interface lists the available configurations (one per log) and lets you:
 
-#### Example Custom Configuration
+- upload a log (XES or CSV, with column mapping) and validate it;
+- choose the analysis parameters and run the pipeline as a background job with progress;
+- open the discovered Petri net, inspect transitions, XOR splits, guards, effects and durations, edit them,
+  reset to the automatic version, import and export the model;
+- pose a query from a trace prefix: replay the prefix, build the PDDL problem (with target and deadline),
+  run OPTIC or Fast Downward and read the plan.
 
-Create a JSON configuration file for targeted evaluation:
+### Python API
 
-```json
-{
-  "event_logs": ["sepsis.xes", "helpdesk.xes"],
-  "search_algorithms": ["astar_lmcut", "lazy_greedy_ff"],
-  "log_coverages": [0.001, 0.01],
-  "evaluations": ["planning", "suffix_prediction", "outcome_prediction"],
-  "timeout": 300
-}
+```python
+from evaluation.eval_api import EvalAPI
+
+api = EvalAPI()
+
+# 1. Discover the model and encode the domain (add search=True to tune the parameters with TPE)
+built = api.build_network("path/to/log.xes", domain_name="process",
+                          use_durative=True, use_costs=True, discovery_algorithm="powl")
+serialized = api.serialize(built.prepared, built.parse_result)    # same shape as the web UI's current.json
+start = serialized["metadata"]["start_place"]
+
+# 2. Pose a query: complete the case from an initial marking (add deadline=... for a deadline;
+#    divide it by built.domain.duration_scale_factor, the domain may rescale durations)
+problem = api.build_problem(serialized, init_places=[start], goal_sop=[[]], require_completion=True,
+                            temporal=True, metric="minimize_cost", domain_name="process")
+
+# 3. Plan
+plan = api.run_planner(str(built.domain), problem, planner="optic",
+                       timeout=60, memory_mb=4000, stop_at_first=True)
+print(plan.solvability, plan.plan_steps, plan.duration_s)
 ```
 
-#### Output Structure
+## Planners
 
-Each batch run creates a structured output directory:
+| Planner | Kind | Use |
+|---|---|---|
+| **OPTIC** (`optic/`) | temporal, forward-chaining partial-order | the prescription: durative actions, timed initial literals, metrics `total-cost` / `total-time` |
+| **Fast Downward** (`vendor/downward`) | classical | totally ordered plans; the search configurations available are listed in `planning/fast_downward.py` |
+
+`planning.planner_runner.run_planner` dispatches to either. OPTIC runs in its own process group under a
+wall-clock timeout and an address-space limit (`ulimit -v`), so that a timeout stops the whole process
+chain; Fast Downward gets a timeout and its own `--overall-memory-limit`. Per-configuration planner
+settings are kept in `planner_config.json` (`planning/planner_config.py`) and are editable from the web
+interface.
+`planning.optic.run_timed` additionally reads OPTIC's output as a stream and timestamps it, which gives the
+*grounding time* (until the initial heuristic is evaluated) and the *planning time* (until the first plan)
+separately.
+
+## Evaluation of the paper (`paper_eval`)
+
+`src/paper_eval/` implements the evaluation protocol of the paper as resumable phases, one command each.
+
+**Protocol.** Each log is split chronologically (first 70% of the cases for discovery, last 30% for testing;
+training cases still running when the test period starts are removed). Model selection uses only the discovery
+portion, whose last 20% is the validation split. Every test trace of length `n` contributes the prefixes of
+length 2 to `n-1`; results are reported per prefix-length bucket, with timeouts and out-of-memory errors
+reported separately. Identical inputs (same prefix, same initial state, same goal) are evaluated once.
+
+Eight public logs are registered in `paper_eval/config.py` (Sepsis, Road Traffic Fines, BPIC 2012 A and W,
+BPIC 2013 closed problems and incidents, BPIC 2017, Helpdesk), downloaded from a pinned commit of a public
+repository and checked against a SHA-256 checksum.
+
+```bash
+PYTHONPATH=src python -m paper_eval.run --log sepsis --phase all     # prepare + split + model + prefixes
+PYTHONPATH=src python -m paper_eval.run --log sepsis --phase plan    # OPTIC on every instance (not in "all")
 ```
-evaluation/batch_results/
-├── batch_summary.csv           # Summary of all runs
-├── complete_results.json       # Detailed results
-└── individual_runs/
-    ├── planning_sepsis_astar_lmcut_cov0.001_[timestamp]/
-    │   ├── config.json          # Configuration for this run
-    │   ├── result.json          # Results and metrics
-    │   ├── stdout.txt           # Standard output
-    │   └── stderr.txt           # Error output
-    └── ...
+
+| Phase | What it does | Main output (`results/paper_eval/<log>/<split_hash>/` unless noted) |
+|---|---|---|
+| `prepare` | downloads the log, normalises it (UTC, sorted events, `start`/`complete` only, traces with fewer than 3 events dropped) | `data/paper_eval/<log>.xes`, `<log>.stats.json` |
+| `split` | chronological split, removal of cases spanning the split point, validation set | `results/paper_eval/<log>/split.json` |
+| `model` | TPE search on the training part, final net, PDDL domain | `current.json`, `domain.pddl`, `analysis_config.json`, `model_meta.json`, `search_trials.json`, `attribute_filter.json`, `attributes.jsonl`, `transition_durations.jsonl` |
+| `prefixes` | every prefix of every test trace, replay on the model, ground truth, goals, deduplicated instances | `prefixes.jsonl`, `instances.jsonl`, `prefix_stats.json` |
+| `volume` | number of prefixes per bucket, without building a model | `results/paper_eval/<log>/volume.json` |
+| `plan` | OPTIC on every instance, one at a time, resumable, with time and memory limits | `plan_results.jsonl`, `plan_meta.json` |
+| `stats` | descriptive statistics of the model (places, transitions, attributes, durations) | `model_stats.json` |
+| `report` | RQ1 summary (grounding and planning time per bucket, by status) | `rq1_summary.json`, `rq1_summary.md` |
+| `query` | SQL over all results with DuckDB | printed table |
+
+Useful options: `--force` recomputes a phase; `--limit N`, `--timeout S`, `--memory-mb M` and
+`--goal completion|deadline|all` control `plan`; `--noise-filter` / `--unused-filter` switch the two
+automatic attribute filters.
+
+**Querying the results.** Every result is a table in an in-memory DuckDB database (`paper_eval/query.py`):
+`runs`, `logs`, `case_split`, `models`, `search_trials`, `attributes`, `transition_durations`, `prefixes`,
+`instances`, `plan_meta`, `plan_results`, plus the views `cases` (one row per case, prefix and goal, with the
+planner outcome of its instance) and `instances_view`. Nested columns are read with a dot:
+
+```bash
+PYTHONPATH=src python -m paper_eval.run --log sepsis --phase query \
+    --sql "SELECT status, count(*), avg(planning_s) FROM plan_results GROUP BY status"
+
+PYTHONPATH=src python -m paper_eval.run --log sepsis --phase query --all-logs \
+    --sql "SELECT log, petri_net.places, petri_net.transitions, pddl.actions FROM models"
 ```
 
+The schema, with a note on every table and column, is in [`docs/PAPER_EVAL_FLOW.md`](docs/PAPER_EVAL_FLOW.md)
+and, as an interactive diagram, in [`docs/paper_eval_er.html`](docs/paper_eval_er.html).
 
-## License
-Distributed under the GNU GPL License. See [LICENSE](LICENSE) for more information.
+**Reproducibility.** The launcher fixes `PYTHONHASHSEED`, the TPE is seeded, and two runs of `model` produce
+identical files; `plan` writes a line per instance as soon as it is done and resumes where it stopped, and it
+refuses to mix results made with different settings (use `--force` to start over).
+
+**Status.** The phases up to RQ1 (grounding and planning time) are in place. The comparison of the fastest
+plan with the fastest observed completion (RQ2) and the learning-factory log are still in preparation, and the
+final results are not part of the repository yet.
+
+## First evaluation harness (`evaluation/`)
+
+`src/evaluation/` is an earlier harness that evaluates the pipeline on logs of a public collection of 98
+event logs (Zenodo). For one log (`--log-id`) it downloads the log, makes a stratified train/test split,
+samples one prefix per test trace and builds three kinds of query: **Q1** (complete the case), **Q2**
+(complete it within the remaining time) and **Q3** (reach the end with the data values observed in the real
+final event). Each query is solved with OPTIC under retries and timeouts, the plan is replayed to validate it,
+and per-query metrics and a per-log summary are written under `src/evaluation/results/`.
+
+```bash
+PYTHONPATH=src python -m evaluation.run_evaluation --log-id 55 --planner-timeout 60
+```
+
+## Tests
+
+```bash
+PYTHONPATH=src python -m pytest tests -q -p no:warnings                  # unit tests
+PYTHONPATH=src python -m pytest tests -q -p no:warnings -m integration   # also builds real networks and runs planners
+PYTHONPATH=src python -m pytest tests/paper_eval -q -p no:warnings       # one component
+```
+
+Tests that build real networks or call a planner are marked `integration` and are skipped unless `-m
+integration` is given (OPTIC-dependent ones also skip if the binary is not built).
+
+| Folder | What it checks |
+|---|---|
+| `tests/parsing/` | log loading and validation, preprocessing, discovery (including canonical net form), replay, decision mining, discretisation, effect analysis, probabilities, durations, attribute filter, the parser facade |
+| `tests/encoding/` | PDDL model rendering, guard and effect encoders, prepared input, domain and problem builders |
+| `tests/network_search/` | search space, score composition, exact early stopping, metrics, the search runner |
+| `tests/replay/` | trace replayer (alignment and walk) and plan replayer |
+| `tests/planning/` | OPTIC wrapper (output parsing, timeouts, timed runs with a fake planner, duration semantics), planner configuration and dispatcher |
+| `tests/evaluation/` | evaluation API, log downloader, query builder, metrics, retry runner, report generator, test-case selector, trace sampler |
+| `tests/paper_eval/` | configuration, preparation, splits (including spanning cases), prefixes and deduplication, model tables and statistics, the plan phase with a fake OPTIC, the report, the DuckDB tables, and an end-to-end run on a small synthetic log |
+| `tests/web/` | REST API, partial-trace replay endpoint, job tracker, problem builder |
+| `tests/*.py` | analysis configuration, core utilities and splitting, guard model, pipeline with model search |
+
+## Documentation
+
+- [`docs/parsing_module_reference.md`](docs/parsing_module_reference.md): technical reference of the parsing package.
+- [`docs/PAPER_EVAL_FLOW.md`](docs/PAPER_EVAL_FLOW.md): the evaluation flow phase by phase, the tables each phase creates and the ER diagram.
+- [`docs/paper_eval_er.html`](docs/paper_eval_er.html): the same schema as an interactive page (open it in a browser).
+- Module docstrings under `src/` describe each component; `AnalysisConfig` in `src/models.py` documents every tunable parameter.
+
+## Data and reproducibility notes
+
+- `data/` and `results/` are created at run time and are ignored by git.
+- The public logs of `paper_eval` come from a pinned commit of a public repository and are verified by
+  checksum (`src/paper_eval/config.py`).
+- Seeds: the model search takes a seed (`PaperEvalConfig.seed`, default 42); results do not depend on hash
+  ordering because the launcher of `paper_eval` re-executes itself with a fixed `PYTHONHASHSEED`.
+
+## License and third-party components
+
+The code of this repository is released under the **GNU General Public License v3.0** (see [`LICENSE`](LICENSE)).
+Bundled and external components keep their own licences:
+
+- **OPTIC** (`optic/`): GNU General Public License v2 (see [`optic/LICENCE`](optic/LICENCE)); it is a separate
+  program, invoked as an external process.
+- **Fast Downward** (`vendor/downward`, git submodule): its own licence (GPL).
+- Python dependencies (PM4Py, Optuna, scikit-learn, DuckDB, Flask, ...) under their respective licences.
+
+## Citation and acknowledgements
+
+Citation details will be added after the review of the accompanying paper.
+
+This work builds on an earlier XES2Plan prototype that framed predictive process monitoring as classical
+planning over a data-aware Petri net; the timed model, the temporal encoding, the model selection and the
+evaluation in this repository are new.
