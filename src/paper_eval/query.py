@@ -1,25 +1,38 @@
 """Query every result of the paper evaluation with SQL (DuckDB, in memory, no server).
 
-The files of the run stay the only source of truth; nothing is written. A
-model run is identified by (log, split_hash), and every table carries those two
-columns, so several logs can live in the same database (`connect_all`).
+Nothing is converted here. Each phase writes its output in a shape DuckDB reads
+as it is (one row per entity, see paper_eval.model_tables), and this module only
+declares views over those files. The files stay the only source of truth and
+nothing is written. A model run is (log, split_hash) = the folder
+results/<log>/<split_hash>/; every table carries those two columns, so several
+logs can live in the same database (`connect_all`).
 
-Tables (T = built from a small JSON document in Python, J = DuckDB reads the
-JSONL file in place):
+Tables (the file each one reads, inside the run folder unless noted):
 
-  runs                  one row per (log, split_hash)                 T split.json, prefixes_meta.json
-  logs                  one row per log                               T <data_dir>/<log>.stats.json
-  case_split            one row per case: part = train_fit/val/test   T split.json
-  models                one row per run: net, attributes, PDDL, ...   T model_stats.json (flattened)
-  search_trials         one row per TPE trial                         T search_trials.json
-  attribute_catalog     one row per attribute and its fate            T current.json + attribute_filter.json
-  transition_durations  one row per transition with a duration        T current.json
-  prefixes              one row per (test case, k, goal)              J prefixes.jsonl
-  instances             one row per deduplicated instance             J instances.jsonl
-  plan_meta             one row per run: OPTIC settings, environment  T plan_meta.json (flattened)
-  plan_results          one row per instance: OPTIC outcome and times J plan_results.jsonl
+  runs                  one row per run                  split.json, prefixes_meta.json
+  logs                  one row per log                  <data_dir>/<log>.stats.json
+  case_split            one row per case; part =         split.json (the three id lists)
+                        train_fit / val / test
+  models                one row per run: net, attributes,   model_stats.json
+                        effect groups, PDDL, durations
+  search_trials         one row per TPE trial            search_trials.json
+  attributes            one row per attribute of the log    attributes.jsonl
+                        and its fate: status = kept /
+                        removed_unused / removed_noise /
+                        removed_cascade / ignored_by_user
+  transition_durations  one row per transition           transition_durations.jsonl
+  prefixes              one row per (test case, k, goal) prefixes.jsonl
+  instances             one row per deduplicated instance   instances.jsonl
+  plan_meta             one row per run: OPTIC settings     plan_meta.json
+                        and environment
+  plan_results          one row per instance: OPTIC         plan_results.jsonl
+                        outcome and times
 
-Views:
+`logs`, `models` and `plan_meta` keep the nesting of their files as STRUCT
+columns: `SELECT petri_net.places, pddl.actions FROM models`,
+`SELECT trace_length.max FROM logs`.
+
+Views derived from them:
 
   cases           prefixes LEFT JOIN plan_results on (log, split_hash, group_id):
                   one row per (case, k, goal) with the outcome of its instance
@@ -30,6 +43,15 @@ Views:
 
 Keys: runs(log, split_hash) is the hub. prefixes, instances and plan_results
 join on group_id inside a run; prefixes.case_id points to case_split.
+
+A file that does not exist (a phase not run yet) gives an empty table with the
+right columns, except prefixes.jsonl, without which there is nothing to query.
+
+Attributes. `n_values` is the number of distinct labels in `possible_values`,
+the values that appear in the effects and guards of the model (not every value
+of the log); numerical attributes have the interval labels of the discretization
+plus "none". `bin_boundaries` are the cut points of the Discretizer (KDE and
+Ckmeans clustering); a numerical attribute with n cut points has n + 1 intervals.
 
 Weighting. Several cases share one instance and so one OPTIC run. Averaging a
 time over `cases` counts that run once per case; averaging over `instances_view`
@@ -43,13 +65,11 @@ duration inside [min, max], so the best case is the one that decides feasibility
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import duckdb
-import pandas as pd
 
 PLAN_COLUMNS = (
     "status", "grounding_s", "planning_s", "first_plan_s", "wall_s", "cpu_s",
@@ -58,33 +78,41 @@ PLAN_COLUMNS = (
 TIME_FIELDS = ("grounding_s", "planning_s", "wall_s")
 _PLAN_TEXT_COLUMNS = {"status", "message"}
 
-# Column -> pandas dtype of the tables built in Python, so an empty table (file
-# missing) still has the right types.
-_SCHEMAS: Dict[str, Dict[str, str]] = {
-    "runs": {
-        "log": "object", "split_hash": "object", "model_dir": "object", "log_sha256": "object",
-        "test_pct": "float64", "val_pct": "float64", "n_train_fit": "Int64", "n_val": "Int64",
-        "n_test": "Int64", "deadline_variant_only": "boolean",
-    },
-    "case_split": {"log": "object", "split_hash": "object", "case_id": "object", "part": "object"},
-    "search_trials": {
-        "log": "object", "split_hash": "object", "trial_number": "Int64", "score": "float64",
-        "rejected_reason": "object", "max_effect_groups": "Int64",
-    },
-    "attribute_catalog": {
-        "log": "object", "split_hash": "object", "attribute": "object", "type": "object",
-        "n_values": "Int64", "n_bin_boundaries": "Int64", "status": "object", "reason": "object",
-        "kept_by_user": "boolean",
-    },
-    "transition_durations": {
-        "log": "object", "split_hash": "object", "transition": "object", "activity_name": "object",
-        "effective_min": "float64", "effective_max": "float64", "mean": "float64",
-        "std_dev": "float64", "observed_min": "float64", "observed_max": "float64",
-        "count": "Int64", "source": "object",
-    },
-    "models": {"log": "object", "split_hash": "object"},
-    "plan_meta": {"log": "object", "split_hash": "object"},
-    "logs": {"log": "object"},
+RUN_KEYS = ("log", "split_hash")
+LOG_KEYS = ("log",)
+
+# (column, SQL type) of the files a run may not have yet: the empty table that
+# stands in for a missing file. Files not listed (models, plan_meta, logs) are
+# empty with only their key columns.
+_Columns = Tuple[Tuple[str, str], ...]
+_EMPTY: Dict[str, _Columns] = {
+    "split.json": (
+        ("log_sha256", "VARCHAR"),
+        ("params", "STRUCT(test_pct DOUBLE, val_pct DOUBLE)"),
+        ("train_fit_ids", "VARCHAR[]"), ("val_ids", "VARCHAR[]"), ("test_ids", "VARCHAR[]"),
+    ),
+    "prefixes_meta.json": (("deadline_variant_only", "BOOLEAN"),),
+    "search_trials.json": (
+        ("trial_number", "BIGINT"), ("score", "DOUBLE"),
+        ("rejected_reason", "VARCHAR"), ("max_effect_groups", "BIGINT"),
+    ),
+    "attributes.jsonl": (
+        ("attribute", "VARCHAR"), ("type", "VARCHAR"), ("status", "VARCHAR"), ("reason", "VARCHAR"),
+        ("kept_by_user", "BOOLEAN"), ("n_values", "BIGINT"), ("possible_values", "VARCHAR[]"),
+        ("n_bin_boundaries", "BIGINT"), ("bin_boundaries", "DOUBLE[]"), ("n_distinct_observed", "BIGINT"),
+    ),
+    "transition_durations.jsonl": (
+        ("transition", "VARCHAR"), ("activity_name", "VARCHAR"), ("n_effect_groups", "BIGINT"),
+        ("cost", "DOUBLE"), ("has_duration", "BOOLEAN"), ("effective_min", "DOUBLE"),
+        ("effective_max", "DOUBLE"), ("mean", "DOUBLE"), ("std_dev", "DOUBLE"),
+        ("observed_min", "DOUBLE"), ("observed_max", "DOUBLE"), ("count", "BIGINT"), ("source", "VARCHAR"),
+    ),
+    "instances.jsonl": (
+        ("group_id", "BIGINT"), ("goal", "VARCHAR"), ("k", "BIGINT"), ("bucket", "VARCHAR"),
+    ),
+    "plan_results.jsonl": (("group_id", "BIGINT"),) + tuple(
+        (c, "VARCHAR" if c in _PLAN_TEXT_COLUMNS else "DOUBLE") for c in PLAN_COLUMNS
+    ),
 }
 
 
@@ -96,221 +124,69 @@ class Run:
     split_hash: str
     model_dir: Path
 
-    @property
-    def log_dir(self) -> Path:
-        return self.model_dir.parent
+
+# One file and the values of the key columns it belongs to, e.g.
+# ({"log": "sepsis", "split_hash": "87d8..."}, Path(".../search_trials.json")).
+Entry = Tuple[Dict[str, str], Path]
 
 
 # ---------------------------------------------------------------------------
-# Reading the small JSON documents
+# Reading files with DuckDB
 # ---------------------------------------------------------------------------
 
-def _read_json(path: Path) -> Optional[Any]:
-    path = Path(path)
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+def _quote(text: Any) -> str:
+    """SQL string literal: apostrophes are doubled."""
+    return "'" + str(text).replace("'", "''") + "'"
 
 
-def _flatten(data: Dict[str, Any], skip: Iterable[str] = (), prefix: str = "") -> Dict[str, Any]:
-    """Nested dicts become one level: {"a": {"b": 1}} -> {"a_b": 1}. Lists are
-    kept as JSON text, so a row never holds a Python list."""
-    out: Dict[str, Any] = {}
-    for key, value in data.items():
-        if not prefix and key in skip:
-            continue
-        name = f"{prefix}{key}"
-        if isinstance(value, dict):
-            out.update(_flatten(value, prefix=f"{name}_"))
-        elif isinstance(value, (list, tuple)):
-            out[name] = json.dumps(value)
-        else:
-            out[name] = value
-    return out
+def _usable(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
 
 
-def _frame(name: str, rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    """DataFrame of `rows` typed by _SCHEMAS[name]. Columns the schema does not
-    list (the flattened tables) are kept as they are."""
-    schema = _SCHEMAS[name]
-    columns = list(schema) + sorted({c for r in rows for c in r} - set(schema))
-    df = pd.DataFrame(rows, columns=columns)
-    for column, dtype in schema.items():
-        df[column] = df[column].astype(dtype)
-    return df
+def _source(
+    con: "duckdb.DuckDBPyConnection", entries: Sequence[Entry], keys: Sequence[str],
+    empty: _Columns = (), hide: Iterable[str] = (), tolerate_partial_line: bool = False,
+    where: str = "",
+) -> str:
+    """The text of a SELECT with the rows of all the files in `entries`, each row
+    in front of the key columns of the file it came from.
 
+    DuckDB reads the files itself (`read_json_auto`), all in one call:
+      union_by_name  files of different runs may differ in columns: merge by name;
+      filename       adds each row's source file, to look up its keys;
+      sample_size=-1 infer types from every row, not from the first few (a column
+                     that starts with NULLs would be typed wrongly).
+    The keys come from a VALUES list of (file, key...) joined on that filename.
+    When no file exists, a SELECT of the same shape with zero rows (`empty`).
 
-def _runs_table(runs: List[Run]) -> pd.DataFrame:
-    rows = []
-    for run in runs:
-        split = _read_json(run.log_dir / "split.json") or {}
-        params = split.get("params") or {}
-        meta = _read_json(run.model_dir / "prefixes_meta.json") or {}
-        rows.append({
-            "log": run.log, "split_hash": run.split_hash, "model_dir": str(run.model_dir),
-            "log_sha256": split.get("log_sha256"),
-            "test_pct": params.get("test_pct"), "val_pct": params.get("val_pct"),
-            "n_train_fit": len(split["train_fit_ids"]) if split else None,
-            "n_val": len(split["val_ids"]) if split else None,
-            "n_test": len(split["test_ids"]) if split else None,
-            # A run made before the option existed used the min rule.
-            "deadline_variant_only": bool(meta.get("deadline_variant_only", False)),
-        })
-    return _frame("runs", rows)
-
-
-def _case_split_table(runs: List[Run]) -> pd.DataFrame:
-    rows = []
-    for run in runs:
-        split = _read_json(run.log_dir / "split.json")
-        if not split:
-            continue
-        for part, key in (("train_fit", "train_fit_ids"), ("val", "val_ids"), ("test", "test_ids")):
-            rows += [{"log": run.log, "split_hash": run.split_hash, "case_id": str(c), "part": part}
-                     for c in split.get(key, [])]
-    return _frame("case_split", rows)
-
-
-def _search_trials_table(runs: List[Run]) -> pd.DataFrame:
-    rows = []
-    for run in runs:
-        for trial in _read_json(run.model_dir / "search_trials.json") or []:
-            rows.append({"log": run.log, "split_hash": run.split_hash, **trial})
-    return _frame("search_trials", rows)
-
-
-def _attribute_catalog_table(runs: List[Run]) -> pd.DataFrame:
-    """The final catalog (current.json) plus the attributes the filters removed
-    before it (attribute_filter.json), each with its status:
-    kept / removed_noise / removed_unused / ignored_by_user."""
-    rows = []
-    for run in runs:
-        current = _read_json(run.model_dir / "current.json") or {}
-        report = _read_json(run.model_dir / "attribute_filter.json") or {}
-        kept_by_user = set(report.get("kept_by_user", []))
-        base = {"log": run.log, "split_hash": run.split_hash}
-        seen = set()
-        for name, entry in (current.get("attribute_catalog") or {}).items():
-            seen.add(name)
-            rows.append({
-                **base, "attribute": name, "type": entry.get("type"),
-                "n_values": len(entry.get("possible_values") or []),
-                "n_bin_boundaries": len(entry.get("bin_boundaries") or []),
-                "status": "kept", "reason": None, "kept_by_user": name in kept_by_user,
-            })
-        removed = []  # (attribute, status, reason)
-        noise = report.get("noise_filter") or {}
-        if isinstance(noise, dict):
-            removed += [(a, "removed_noise", str(why)) for a, why in noise.items()]
-        else:
-            removed += [(a, "removed_noise", None) for a in noise]
-        removed += [(a, "removed_unused", None) for a in report.get("unused_attribute_filter", [])]
-        removed += [(a, "ignored_by_user", None) for a in report.get("ignored_by_user", [])]
-        for name, status, reason in removed:
-            if name in seen:
-                continue
-            seen.add(name)
-            rows.append({
-                **base, "attribute": name, "type": None, "n_values": None, "n_bin_boundaries": None,
-                "status": status, "reason": reason, "kept_by_user": name in kept_by_user,
-            })
-    return _frame("attribute_catalog", rows)
-
-
-def _transition_durations_table(runs: List[Run]) -> pd.DataFrame:
-    rows = []
-    for run in runs:
-        current = _read_json(run.model_dir / "current.json") or {}
-        for name, transition in (current.get("transitions") or {}).items():
-            duration = transition.get("duration") or {}  # None: transition without a duration
-            rows.append({
-                "log": run.log, "split_hash": run.split_hash, "transition": name,
-                "activity_name": transition.get("activity_name"),
-                **{k: duration.get(k) for k in (
-                    "effective_min", "effective_max", "mean", "std_dev",
-                    "observed_min", "observed_max", "count", "source")},
-            })
-    return _frame("transition_durations", rows)
-
-
-def _flattened_table(name: str, runs: List[Run], filename: str, skip: Iterable[str] = ()) -> pd.DataFrame:
-    """One row per run from a single-object JSON document, flattened."""
-    rows = []
-    for run in runs:
-        document = _read_json(run.model_dir / filename)
-        if document:
-            rows.append({"log": run.log, "split_hash": run.split_hash, **_flatten(document, skip)})
-    return _frame(name, rows)
-
-
-def _logs_table(runs: List[Run], data_dir: Optional[Path]) -> pd.DataFrame:
-    rows, done = [], set()
-    for run in runs:
-        if run.log in done or data_dir is None:
-            continue
-        done.add(run.log)
-        document = _read_json(Path(data_dir) / f"{run.log}.stats.json")
-        if document:
-            rows.append({"log": run.log, **_flatten(document)})
-    return _frame("logs", rows)
-
-
-# ---------------------------------------------------------------------------
-# The JSONL files: DuckDB reads them in place
-# ---------------------------------------------------------------------------
-
-def _sql_list(paths: List[Path]) -> str:
-    return "[" + ", ".join("'" + str(p).replace("'", "''") + "'" for p in paths) + "]"
-
-
-def _jsonl_view(
-    con: "duckdb.DuckDBPyConnection", name: str, runs: List[Run], filename: str,
-    drop: Iterable[str] = (), tolerate_partial_line: bool = False,
-) -> bool:
-    """View `name` over `filename` of every run that has it, with the columns
-    log and split_hash in front. Returns False (no view) when no run has the file."""
-    files = [(r, r.model_dir / filename) for r in runs]
-    files = [(r, f) for r, f in files if f.is_file() and f.stat().st_size > 0]
+    Args:
+        keys: names of the key columns, in the order of each entry's dict.
+        hide: columns of the files not to expose.
+        tolerate_partial_line: skip lines that are not valid JSON (a line cut
+            short by a killed run); DuckDB turns such a line into an all-NULL
+            row, which `where` must then drop.
+        where: condition added to the SELECT (alias `j` is the file).
+    """
+    files = [(k, p) for k, p in entries if _usable(p)]
     if not files:
-        return False
-    owners = pd.DataFrame(
-        [{"file": str(f), "log": r.log, "split_hash": r.split_hash} for r, f in files]
-    )
-    con.register(f"_owners_{name}", owners)
+        columns = [f"NULL::VARCHAR AS {k}" for k in keys] + [f"NULL::{t} AS {c}" for c, t in empty]
+        return f"SELECT {', '.join(columns)} WHERE false"
     options = "union_by_name=true, filename=true, sample_size=-1"
     if tolerate_partial_line:
-        # plan_results.jsonl may end in a half-written line while the plan phase runs.
         options += ", ignore_errors=true"
-    source = f"read_json_auto({_sql_list([f for _, f in files])}, {options})"
-    # Our own log/split_hash come first; a column of the file with the same name
-    # (plan_results.jsonl has "log") and the join helpers are left out. The list
-    # is built here instead of with SQL lambdas, whose syntax changes between versions.
-    hidden = {"filename", "file", "log", "split_hash", *drop}
+    source = f"read_json_auto([{', '.join(_quote(p) for _, p in files)}], {options})"
+    # Column list built here, not with SQL lambdas (their syntax changes between versions).
+    hidden = {"filename", "file", *keys, *hide}
     names = [row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()]
-    columns = ", ".join('j."' + c.replace('"', '""') + '"' for c in names if c not in hidden)
-    con.execute(
-        f"CREATE VIEW {name} AS SELECT o.log, o.split_hash, {columns} "
-        f"FROM {source} j JOIN _owners_{name} o ON j.filename = o.file"
-        # ignore_errors turns a broken line into an all-NULL row; every real row has a group_id.
-        + (" WHERE j.group_id IS NOT NULL" if tolerate_partial_line else "")
+    columns = ", ".join(f'j."{c}"' for c in names if c not in hidden)
+    owners = ", ".join(
+        "(" + ", ".join(_quote(v) for v in [p, *(k[name] for name in keys)]) + ")" for k, p in files
     )
-    return True
-
-
-def _empty_plan_results(con: "duckdb.DuckDBPyConnection") -> None:
-    """Same columns as plan_results.jsonl's measures, no rows."""
-    cols = ", ".join(
-        f"NULL::{'VARCHAR' if c in _PLAN_TEXT_COLUMNS else 'DOUBLE'} AS {c}" for c in PLAN_COLUMNS
-    )
-    con.execute(
-        "CREATE VIEW plan_results AS SELECT NULL::VARCHAR AS log, NULL::VARCHAR AS split_hash, "
-        f"NULL::BIGINT AS group_id, {cols} WHERE false"
-    )
-
-
-def _empty_instances(con: "duckdb.DuckDBPyConnection") -> None:
-    con.execute(
-        "CREATE VIEW instances AS SELECT NULL::VARCHAR AS log, NULL::VARCHAR AS split_hash, "
-        "NULL::BIGINT AS group_id, NULL::VARCHAR AS goal, NULL::BIGINT AS k, "
-        "NULL::VARCHAR AS bucket WHERE false"
+    select = ", ".join(f"o.{k}" for k in keys) + (f", {columns}" if columns else "")
+    return (
+        f"SELECT {select} FROM {source} j "
+        f"JOIN (VALUES {owners}) AS o(file, {', '.join(keys)}) ON j.filename = o.file"
+        + (f" WHERE {where}" if where else "")
     )
 
 
@@ -318,34 +194,59 @@ def _empty_instances(con: "duckdb.DuckDBPyConnection") -> None:
 # Connections
 # ---------------------------------------------------------------------------
 
-def _build(
-    runs: List[Run], data_dir: Optional[Path] = None,
-) -> "duckdb.DuckDBPyConnection":
-    if not _has_prefixes(runs):
+def _build(runs: List[Run], data_dir: Optional[Path] = None) -> "duckdb.DuckDBPyConnection":
+    if not any(_usable(r.model_dir / "prefixes.jsonl") for r in runs):
         where = runs[0].model_dir if len(runs) == 1 else "any run"
-        raise FileNotFoundError(f"{where}/prefixes.jsonl not found: run the 'prefixes' phase first")
+        raise FileNotFoundError(f"{where}/prefixes.jsonl not found or empty: run the 'prefixes' phase first")
     con = duckdb.connect()
-    tables = {
-        "runs": _runs_table(runs),
-        "case_split": _case_split_table(runs),
-        "search_trials": _search_trials_table(runs),
-        "attribute_catalog": _attribute_catalog_table(runs),
-        "transition_durations": _transition_durations_table(runs),
-        "models": _flattened_table(
-            "models", runs, "model_stats.json", skip=("model_dir", "split", "attribute_filter", "log")),
-        "plan_meta": _flattened_table("plan_meta", runs, "plan_meta.json"),
-        "logs": _logs_table(runs, data_dir),
-    }
-    for name, frame in tables.items():
-        con.register(name, frame)
 
-    _jsonl_view(con, "prefixes", runs, "prefixes.jsonl")
-    if not _jsonl_view(con, "instances", runs, "instances.jsonl"):
-        _empty_instances(con)
-    if not _jsonl_view(con, "plan_results", runs, "plan_results.jsonl",
-                       drop=("log",), tolerate_partial_line=True):
-        _empty_plan_results(con)
+    def run_source(filename: str, **options: Any) -> str:
+        entries = [({"log": r.log, "split_hash": r.split_hash}, r.model_dir / filename) for r in runs]
+        return _source(con, entries, RUN_KEYS, _EMPTY.get(filename, ()), **options)
 
+    def run_view(name: str, filename: str, **options: Any) -> None:
+        con.execute(f"CREATE VIEW {name} AS {run_source(filename, **options)}")
+
+    # --- tables that are a file as it is --------------------------------------
+    run_view("models", "model_stats.json", hide=("model_dir", "split", "attribute_filter"))
+    run_view("search_trials", "search_trials.json")
+    run_view("attributes", "attributes.jsonl")
+    run_view("transition_durations", "transition_durations.jsonl")
+    run_view("prefixes", "prefixes.jsonl")
+    run_view("instances", "instances.jsonl")
+    run_view("plan_meta", "plan_meta.json")
+    # A run killed while writing leaves a half line: skipped, as plan.read_results
+    # does. Every real row has a group_id; the all-NULL row DuckDB makes of a
+    # broken line does not.
+    run_view("plan_results", "plan_results.jsonl", tolerate_partial_line=True,
+             where="j.group_id IS NOT NULL")
+
+    logs = sorted({r.log for r in runs}) if data_dir is not None else []
+    log_entries = [({"log": log}, Path(data_dir) / f"{log}.stats.json") for log in logs]
+    con.execute(f"CREATE VIEW logs AS {_source(con, log_entries, LOG_KEYS)}")
+
+    # --- runs and case_split: SQL over each run's own split.json ---------------
+    con.execute(f"CREATE VIEW _split AS {run_source('split.json')}")
+    con.execute(f"CREATE VIEW _prefixes_meta AS {run_source('prefixes_meta.json')}")
+    run_rows = ", ".join(f"({_quote(r.log)}, {_quote(r.split_hash)}, {_quote(r.model_dir)})" for r in runs)
+    con.execute(
+        "CREATE VIEW runs AS SELECT o.log, o.split_hash, o.model_dir, s.log_sha256, "
+        "s.params.test_pct AS test_pct, s.params.val_pct AS val_pct, "
+        "len(s.train_fit_ids) AS n_train_fit, len(s.val_ids) AS n_val, len(s.test_ids) AS n_test, "
+        # A run made before the option existed used the min rule.
+        "coalesce(m.deadline_variant_only, false) AS deadline_variant_only "
+        f"FROM (VALUES {run_rows}) AS o(log, split_hash, model_dir) "
+        "LEFT JOIN _split s ON s.log = o.log AND s.split_hash = o.split_hash "
+        "LEFT JOIN _prefixes_meta m ON m.log = o.log AND m.split_hash = o.split_hash"
+    )
+    # One SELECT per part: unnest turns each list of case ids into one row per id.
+    case_split = " UNION ALL ".join(
+        f"SELECT log, split_hash, CAST(unnest({ids}) AS VARCHAR) AS case_id, '{part}' AS part FROM _split"
+        for part, ids in (("train_fit", "train_fit_ids"), ("val", "val_ids"), ("test", "test_ids"))
+    )
+    con.execute(f"CREATE VIEW case_split AS {case_split}")
+
+    # --- views derived from prefixes and plan_results ---------------------------
     # A column plan_results.jsonl does not have (an older run, a hand-made file) is NULL.
     in_plan = {row[0] for row in con.execute("DESCRIBE plan_results").fetchall()}
     plan_cols = ", ".join(f"r.{c}" if c in in_plan else f"NULL AS {c}" for c in PLAN_COLUMNS)
@@ -379,22 +280,18 @@ def _build(
     return con
 
 
-def _has_prefixes(runs: List[Run]) -> bool:
-    return any((r.model_dir / "prefixes.jsonl").is_file() for r in runs)
-
-
 def connect(model_dir: Path, data_dir: Optional[Path] = None) -> "duckdb.DuckDBPyConnection":
     """In-memory connection over ONE run (results/<log>/<split_hash>/).
     data_dir (the folder with <log>.stats.json) fills the `logs` table."""
-    model_dir = Path(model_dir)
+    model_dir = Path(model_dir).resolve()
     return _build([Run(model_dir.parent.name, model_dir.name, model_dir)], data_dir)
 
 
 def discover_runs(results_dir: Path) -> List[Run]:
     """Every results/<log>/<split_hash>/ that holds a built model."""
     runs: List[Run] = []
-    for log_dir in sorted(Path(results_dir).iterdir()):
-        if not (log_dir / "split.json").is_file():
+    for log_dir in sorted(Path(results_dir).resolve().iterdir()):
+        if not log_dir.is_dir():
             continue
         for model_dir in sorted(p for p in log_dir.iterdir() if p.is_dir()):
             if (model_dir / "current.json").is_file():
