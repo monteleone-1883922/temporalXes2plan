@@ -16,8 +16,12 @@ Phases that are NOT part of "all" (they run OPTIC or read its results):
   plan      OPTIC on every instance -> <split_hash>/plan_results.jsonl, plan_meta.json
             (resumable; one OPTIC at a time; --goal, --limit, --timeout, --memory-mb;
             --force discards the previous results)
+  rq2       OPTIC optimising total-time (no costs, no deadline) on the completion instances,
+            every plan saved -> <split_hash>/rq2_{results,plans,plan_steps}.jsonl, rq2_meta.json
+            (resumable; --limit, --timeout, --memory-mb, --force; meant for the factory log)
   stats     descriptive statistics of the model -> <split_hash>/model_stats.json
-  report    RQ1 table from plan_results.jsonl -> <split_hash>/rq1_summary.{json,md}
+  report    RQ1 table from plan_results.jsonl -> <split_hash>/rq1_summary.{json,md};
+            RQ2 table from rq2_results.jsonl -> <split_hash>/rq2_summary.{json,md}
   query     --sql "SELECT ..." on the DuckDB tables of the run (--all-logs: every log; see paper_eval/query.py)
 """
 
@@ -39,7 +43,8 @@ from paper_eval.config import LOGS, PaperEvalConfig, bucket_label
 from paper_eval.model_stats import run_stats
 from paper_eval.plan import GOAL_CHOICES, PREFIXES_META, prefixes_deadline_variant_only, run_plan
 from paper_eval.prepare import prepare_log
-from paper_eval.report import run_report
+from paper_eval.report import run_report, run_report_rq2
+from paper_eval.rq2 import run_rq2
 from paper_eval.split import (
     case_id, chronological_case_ids, control_flow_view, make_split, read_split, variant_mean_durations,
     write_split,
@@ -48,7 +53,7 @@ from replay.trace_replayer import TraceReplayer
 
 logger = logging.getLogger("paper_eval")
 
-PHASES = ("prepare", "split", "model", "prefixes", "volume", "plan", "stats", "report", "query", "all")
+PHASES = ("prepare", "split", "model", "prefixes", "volume", "plan", "rq2", "stats", "report", "query", "all")
 
 
 class Paths:
@@ -182,11 +187,11 @@ def main(argv=None) -> None:
     parser.add_argument("--goal", default="all", choices=GOAL_CHOICES,
                         help="plan: which instances to run (default: all)")
     parser.add_argument("--limit", type=int, default=None,
-                        help="plan: handle at most this many instances not done yet (to try the run)")
+                        help="plan, rq2: handle at most this many instances not done yet (to try the run)")
     parser.add_argument("--timeout", type=int, default=None,
-                        help="plan: OPTIC wall-clock limit in seconds (default: per-log value of the config)")
+                        help="plan, rq2: OPTIC wall-clock limit in seconds (default: per-log value of the config; rq2: rq2_timeout_s)")
     parser.add_argument("--memory-mb", type=int, default=None,
-                        help="plan: OPTIC virtual memory limit in MB (default: per-log value of the config)")
+                        help="plan, rq2: OPTIC virtual memory limit in MB (default: per-log value of the config; rq2: rq2_memory_mb)")
     parser.add_argument("--sql", default=None,
                         help="query: SELECT to run on the tables (see paper_eval/query.py: runs, prefixes, "
                              "plan_results, cases, instances_view, models, ...)")
@@ -240,12 +245,25 @@ def main(argv=None) -> None:
                 timeout_s=args.timeout, memory_mb=args.memory_mb, force=args.force,
             )
             logger.info("[%s] plan: handled %d instances: %s", args.log, sum(counts.values()), dict(counts))
+        elif phase == "rq2":
+            counts = run_rq2(
+                args.log, cfg, paths, limit=args.limit,
+                timeout_s=args.timeout, memory_mb=args.memory_mb, force=args.force,
+            )
+            logger.info("[%s] rq2: handled %d instances: %s", args.log, sum(counts.values()), dict(counts))
         elif phase == "stats":
             split = read_split(paths.split_json)
             run_stats(paths.model_dir(split.split_hash), cfg.data_dir / f"{args.log}.stats.json")
         elif phase == "report":
             split = read_split(paths.split_json)
-            run_report(paths.model_dir(split.split_hash))
+            model_dir = paths.model_dir(split.split_hash)
+            # RQ1 table from plan_results.jsonl; RQ2 table from rq2_results.jsonl. Each one
+            # only when its phase has run (the other is not an error).
+            has_rq2 = (model_dir / "rq2_results.jsonl").exists()
+            if (model_dir / "plan_results.jsonl").exists() or not has_rq2:
+                run_report(model_dir)  # with neither file it says to run the plan phase
+            if has_rq2:
+                run_report_rq2(model_dir)
         elif phase == "query":
             if not args.sql:
                 parser.error("--phase query needs --sql")

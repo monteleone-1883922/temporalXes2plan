@@ -29,6 +29,12 @@ Tables (the file each one reads, inside the run folder unless noted):
                         and environment
   plan_results          one row per instance: OPTIC         plan_results.jsonl
                         outcome and times
+  rq2_meta              one row per run: RQ2 settings       rq2_meta.json
+  rq2_results           one row per completion instance:    rq2_results.jsonl
+                        RQ2 outcome, search_completed
+                        (OPTIC ended by itself), best makespan
+  rq2_plans             one row per plan OPTIC printed      rq2_plans.jsonl
+  rq2_plan_steps        one row per step of every plan      rq2_plan_steps.jsonl
 
 `logs`, `models` and `plan_meta` keep the nesting of their files as STRUCT
 columns: `SELECT petri_net.places, pddl.actions FROM models`,
@@ -42,6 +48,14 @@ Views derived from them:
                   fits_deadline_worst_case (deadline goal only, see below).
   instances_view  one row per instance: n_cases, n_cases_replayable,
                   replayability ('all' / 'mixed' / 'none') plus the plan columns.
+
+  rq2_reference   one row per instance with a best plan: its activities in the order of
+                  their start time (silent steps left out, same-start steps in print order),
+                  the test cases that start with the same prefix, how many continue with
+                  exactly that sequence (n_matching) and the one with the shortest remaining
+                  time (reference_case_id, reference_rt_s, NULL when none matches). Times in
+                  seconds; differences and ratios are left to the query:
+                  `SELECT best_makespan_s - reference_rt_s FROM rq2_reference`.
 
 Keys: runs(log, split_hash) is the hub. prefixes, instances and plan_results
 join on group_id inside a run; prefixes.case_id points to case_split.
@@ -117,7 +131,71 @@ _EMPTY: Dict[str, _Columns] = {
     "plan_results.jsonl": (("group_id", "BIGINT"),) + tuple(
         (c, "VARCHAR" if c in _PLAN_TEXT_COLUMNS else "DOUBLE") for c in PLAN_COLUMNS
     ),
+    "rq2_results.jsonl": (
+        ("group_id", "BIGINT"), ("k", "BIGINT"), ("bucket", "VARCHAR"), ("prefix_acts", "VARCHAR[]"),
+        ("n_cases", "BIGINT"), ("timeout_s", "BIGINT"), ("memory_mb", "BIGINT"), ("status", "VARCHAR"),
+        ("search_completed", "BOOLEAN"), ("n_plans", "BIGINT"), ("plan_length", "BIGINT"),
+        ("grounding_s", "DOUBLE"), ("first_plan_s", "DOUBLE"), ("last_plan_s", "DOUBLE"),
+        ("wall_s", "DOUBLE"), ("cpu_s", "DOUBLE"), ("best_makespan_s", "DOUBLE"), ("message", "VARCHAR"),
+    ),
+    "rq2_plans.jsonl": (
+        ("group_id", "BIGINT"), ("plan_index", "BIGINT"), ("found_s", "DOUBLE"),
+        ("makespan_s", "DOUBLE"), ("is_final", "BOOLEAN"), ("is_best", "BOOLEAN"),
+    ),
+    "rq2_plan_steps.jsonl": (
+        ("group_id", "BIGINT"), ("plan_index", "BIGINT"), ("step_index", "BIGINT"),
+        ("action", "VARCHAR"), ("activity", "VARCHAR"), ("is_tau", "BOOLEAN"),
+        ("start_s", "DOUBLE"), ("duration_s", "DOUBLE"),
+    ),
 }
+
+# What rq2_reference needs from the prefixes view (a hand-made prefixes file may lack them).
+_RQ2_PREFIX_COLUMNS = {"case_id", "goal", "prefix_acts", "true_suffix_acts", "true_rt_s"}
+
+_RQ2_REFERENCE_COLUMNS = (
+    "log VARCHAR, split_hash VARCHAR, group_id BIGINT, k BIGINT, bucket VARCHAR, "
+    "prefix_acts VARCHAR[], status VARCHAR, search_completed BOOLEAN, best_makespan_s DOUBLE, "
+    "plan_activities VARCHAR[], n_test_cases_same_prefix BIGINT, n_matching BIGINT, "
+    "reference_case_id VARCHAR, reference_rt_s DOUBLE"
+)
+
+_RQ2_REFERENCE_SQL = """
+CREATE VIEW rq2_reference AS
+WITH sequences AS (
+    SELECT log, split_hash, group_id, plan_index,
+           list(activity ORDER BY start_s, step_index) FILTER (WHERE NOT is_tau) AS activities
+    FROM rq2_plan_steps GROUP BY log, split_hash, group_id, plan_index
+), best AS (
+    SELECT r.log, r.split_hash, r.group_id, r.k, r.bucket, r.prefix_acts, r.status,
+           r.search_completed, r.best_makespan_s,
+           coalesce(s.activities, []::VARCHAR[]) AS plan_activities
+    FROM rq2_results r
+    JOIN rq2_plans p ON p.log = r.log AND p.split_hash = r.split_hash
+                    AND p.group_id = r.group_id AND p.is_best
+    LEFT JOIN sequences s ON s.log = p.log AND s.split_hash = p.split_hash
+                         AND s.group_id = p.group_id AND s.plan_index = p.plan_index
+), same_prefix AS (
+    SELECT b.log, b.split_hash, b.group_id, c.case_id, c.true_rt_s,
+           (c.true_suffix_acts = b.plan_activities) AS matches
+    FROM best b
+    JOIN prefixes c ON c.log = b.log AND c.split_hash = b.split_hash
+                   AND c.goal = 'completion' AND c.prefix_acts = b.prefix_acts
+), summary AS (
+    SELECT log, split_hash, group_id,
+           count(*) AS n_test_cases_same_prefix,
+           count(*) FILTER (WHERE matches) AS n_matching,
+           arg_min(case_id, true_rt_s) FILTER (WHERE matches) AS reference_case_id,
+           min(true_rt_s) FILTER (WHERE matches) AS reference_rt_s
+    FROM same_prefix GROUP BY log, split_hash, group_id
+)
+SELECT b.log, b.split_hash, b.group_id, b.k, b.bucket, b.prefix_acts, b.status, b.search_completed,
+       b.best_makespan_s, b.plan_activities,
+       coalesce(s.n_test_cases_same_prefix, 0) AS n_test_cases_same_prefix,
+       coalesce(s.n_matching, 0) AS n_matching,
+       s.reference_case_id, s.reference_rt_s
+FROM best b LEFT JOIN summary s
+  ON s.log = b.log AND s.split_hash = b.split_hash AND s.group_id = b.group_id
+"""
 
 
 @dataclass(frozen=True)
@@ -224,6 +302,10 @@ def _build(runs: List[Run], data_dir: Optional[Path] = None) -> "duckdb.DuckDBPy
     # broken line does not.
     run_view("plan_results", "plan_results.jsonl", tolerate_partial_line=True,
              where="j.group_id IS NOT NULL")
+    # The RQ2 files, written the same way (and read the same way after a killed run).
+    run_view("rq2_meta", "rq2_meta.json")
+    for name in ("rq2_results", "rq2_plans", "rq2_plan_steps"):
+        run_view(name, f"{name}.jsonl", tolerate_partial_line=True, where="j.group_id IS NOT NULL")
 
     logs = sorted({r.log for r in runs}) if data_dir is not None else []
     log_entries = [({"log": log}, Path(data_dir) / f"{log}.stats.json") for log in logs]
@@ -284,6 +366,14 @@ def _build(runs: List[Run], data_dir: Optional[Path] = None) -> "duckdb.DuckDBPy
     # Rows of `cases` collapse to one per instance: the plan columns are the same
     # for every case of an instance, the counts come from the cases.
     replayable = "count(*) FILTER (WHERE coalesce(is_replayable, false))"
+    if _RQ2_PREFIX_COLUMNS <= have:
+        con.execute(_RQ2_REFERENCE_SQL)
+    else:
+        columns = ", ".join(
+            f"NULL::{definition.split(' ', 1)[1]} AS {definition.split(' ', 1)[0]}"
+            for definition in _RQ2_REFERENCE_COLUMNS.split(", ")
+        )
+        con.execute(f"CREATE VIEW rq2_reference AS SELECT {columns} WHERE false")
     con.execute(
         "CREATE VIEW instances_view AS SELECT "
         "log, split_hash, group_id, any_value(goal) AS goal, any_value(k) AS k, "

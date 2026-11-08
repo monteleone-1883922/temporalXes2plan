@@ -357,3 +357,100 @@ class TestSeveralLogs:
         con = q.connect_all(tmp_path / "results")
         df = q.rq1_times(con, "deadline", log="other")
         assert df["planning_s_mean"].iloc[0] == pytest.approx(9.0)
+
+
+class TestRq2Reference:
+    """rq2_reference: the best plan of an instance against the test cases with the same prefix."""
+
+    @staticmethod
+    def _prefix(case_id, group_id, prefix, suffix, rt, goal="completion"):
+        return {"case_id": case_id, "group_id": group_id, "goal": goal, "k": len(prefix),
+                "bucket": str(len(prefix)), "prefix_acts": prefix, "true_suffix_acts": suffix,
+                "true_rt_s": rt, "is_replayable": True, "reached_end": True}
+
+    @staticmethod
+    def _result(group_id, prefix, makespan, status="solved", completed=True):
+        return {"group_id": group_id, "k": len(prefix), "bucket": str(len(prefix)), "prefix_acts": prefix,
+                "status": status, "search_completed": completed, "n_plans": 1, "best_makespan_s": makespan}
+
+    @staticmethod
+    def _steps(group_id, *items, plan_index=0):
+        # items: (activity or None, start_s)
+        return [{"group_id": group_id, "plan_index": plan_index, "step_index": n, "action": f"execute_{a}",
+                 "activity": a, "is_tau": a is None, "start_s": start, "duration_s": 1.0}
+                for n, (a, start) in enumerate(items)]
+
+    @pytest.fixture
+    def rq2_dir(self, tmp_path):
+        P = self._prefix
+        px.write_jsonl([
+            # group 0: prefix [A, B]; the plan is C, D
+            P("c1", 0, ["A", "B"], ["C", "D"], 50.0),
+            P("c2", 0, ["A", "B"], ["C", "D"], 30.0),            # same sequence, shorter: the reference
+            P("c3", 0, ["A", "B"], ["D", "C"], 10.0),            # same activities, other order: not a match
+            P("c4", 0, ["A", "B"], ["C", "D", "E"], 5.0),        # an extra activity: not a match
+            # another instance with the same prefix (other initial state): its cases count too
+            P("c5", 7, ["A", "B"], ["C", "D"], 20.0),
+            P("c6", 7, ["A", "B"], ["C", "D"], 99.0, goal="deadline"),  # not a completion record
+            # group 1: prefix [A, X]; nothing observed continues like the plan
+            P("c7", 1, ["A", "X"], ["Y"], 8.0),
+            # group 2: prefix [A, Z]; the plan is empty
+            P("c8", 2, ["A", "Z"], ["W"], 4.0),
+        ], tmp_path / "prefixes.jsonl")
+        px.write_jsonl([
+            self._result(0, ["A", "B"], 12.0), self._result(1, ["A", "X"], 7.0, completed=False),
+            self._result(2, ["A", "Z"], 0.0),
+            self._result(3, ["A", "T"], None, status="timeout", completed=False),  # no plan at all
+        ], tmp_path / "rq2_results.jsonl")
+        px.write_jsonl([
+            {"group_id": 0, "plan_index": 0, "found_s": 1.0, "makespan_s": 20.0, "is_final": False, "is_best": False},
+            {"group_id": 0, "plan_index": 1, "found_s": 2.0, "makespan_s": 12.0, "is_final": True, "is_best": True},
+            {"group_id": 1, "plan_index": 0, "found_s": 1.0, "makespan_s": 7.0, "is_final": False, "is_best": True},
+            {"group_id": 2, "plan_index": 0, "found_s": 1.0, "makespan_s": 0.0, "is_final": True, "is_best": True},
+        ], tmp_path / "rq2_plans.jsonl")
+        px.write_jsonl(
+            # plan 0 of group 0 is not the best: its D, C order must not be used
+            self._steps(0, ("D", 0.0), ("C", 5.0), plan_index=0)
+            # the best plan: step order in the file differs from the start order, and a tau sits between
+            + [dict(s, step_index=n) for n, s in enumerate(
+                self._steps(0, ("D", 6.0), (None, 3.0), ("C", 0.0), plan_index=1))]
+            + self._steps(1, ("Q", 0.0)),
+            tmp_path / "rq2_plan_steps.jsonl")
+        return tmp_path
+
+    def test_plan_activities_are_in_start_order_without_silent_steps(self, rq2_dir):
+        con = q.connect(rq2_dir)
+        rows = dict(con.execute("SELECT group_id, plan_activities FROM rq2_reference").fetchall())
+        assert rows[0] == ["C", "D"]          # sorted by start time, tau left out, best plan only
+        assert rows[1] == ["Q"] and rows[2] == []
+
+    def test_the_reference_is_the_matching_case_with_the_shortest_remaining_time(self, rq2_dir):
+        con = q.connect(rq2_dir)
+        row = con.execute(
+            "SELECT n_test_cases_same_prefix, n_matching, reference_case_id, reference_rt_s, best_makespan_s "
+            "FROM rq2_reference WHERE group_id = 0").fetchone()
+        # c1..c4 and c5 share the prefix (c6 is a deadline record); c1, c2, c5 continue with C, D
+        assert row == (5, 3, "c5", 20.0, 12.0)
+
+    def test_no_matching_case_gives_a_null_reference(self, rq2_dir):
+        con = q.connect(rq2_dir)
+        row = con.execute(
+            "SELECT n_test_cases_same_prefix, n_matching, reference_case_id, reference_rt_s "
+            "FROM rq2_reference WHERE group_id = 1").fetchone()
+        assert row == (1, 0, None, None)
+
+    def test_an_instance_without_a_plan_is_not_in_the_view(self, rq2_dir):
+        con = q.connect(rq2_dir)
+        assert sorted(r[0] for r in con.execute("SELECT group_id FROM rq2_reference").fetchall()) == [0, 1, 2]
+
+    def test_the_difference_is_left_to_the_query(self, rq2_dir):
+        con = q.connect(rq2_dir)
+        got = con.execute(
+            "SELECT best_makespan_s - reference_rt_s FROM rq2_reference WHERE group_id = 0").fetchone()[0]
+        assert got == pytest.approx(-8.0)  # the plan is 8 s faster than the fastest observed completion
+
+    def test_the_rq2_tables_exist_and_are_empty_without_their_files(self, model_dir):
+        con = q.connect(model_dir)
+        for table in ("rq2_results", "rq2_plans", "rq2_plan_steps", "rq2_reference"):
+            assert con.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,)
+        assert con.execute("SELECT search_completed, best_makespan_s FROM rq2_results").fetchall() == []

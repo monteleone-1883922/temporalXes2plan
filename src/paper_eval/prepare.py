@@ -55,7 +55,7 @@ def download_log(spec: LogSpec, data_dir: Path, force: bool = False) -> Path:
 
     Returns the path of the raw (unprocessed) XES file,
     data_dir/raw/<file_name>. Skips the download when that file already
-    exists, unless force.
+    exists, unless force. A local spec (see LogSpec.local) is only checked.
 
     Raises:
         ValueError: if the downloaded archive does not match spec.sha256.
@@ -63,6 +63,18 @@ def download_log(spec: LogSpec, data_dir: Path, force: bool = False) -> Path:
     raw_dir = Path(data_dir) / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     xes_path = raw_dir / spec.file_name
+    if spec.local:
+        # Provided by hand: never downloaded, never replaced by force.
+        if not xes_path.exists():
+            raise FileNotFoundError(
+                f"{spec.name} is not downloaded: copy the log to {xes_path} first."
+            )
+        actual = sha256_of(xes_path)
+        if actual != spec.sha256:
+            raise ValueError(
+                f"Checksum mismatch for {spec.name}: expected {spec.sha256}, got {actual}"
+            )
+        return xes_path
     if xes_path.exists() and not force:
         return xes_path
 

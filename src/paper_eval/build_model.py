@@ -276,10 +276,13 @@ def _read_prepared(model_dir: Path):
     return serialized, prepared, petri_net_model
 
 
-def load_model(model_dir: Path) -> LoadedModel:
+def load_model(model_dir: Path, use_costs: bool = True) -> LoadedModel:
     """Rebuild prepared input, Petri net model and PDDL domain from
     model_dir/current.json — the same reconstruction the thesis runner uses
-    for its cache (evaluation/run_evaluation.py)."""
+    for its cache (evaluation/run_evaluation.py).
+
+    use_costs=False rebuilds the domain without action costs (no total-cost): what RQ2
+    uses, since it minimises total-time only. The model itself does not depend on it."""
     model_dir = Path(model_dir)
     # 1-2. read what build_model persisted: JSON -> prepared input -> Petri net
     serialized, prepared, petri_net_model = _read_prepared(model_dir)
@@ -292,7 +295,7 @@ def load_model(model_dir: Path) -> LoadedModel:
     # rebuilding the domain.
     domain, variant_map = build_domain_with_variant_map(
         prepared, config=config, domain_name=DOMAIN_NAME,
-        use_durative=True, use_costs=True, has_deadline=True,
-        unit_costs=read_unit_costs(model_dir),
+        use_durative=True, use_costs=use_costs, has_deadline=True,
+        unit_costs=use_costs and read_unit_costs(model_dir),
     )
     return LoadedModel(serialized, prepared, petri_net_model, domain, variant_map, config)

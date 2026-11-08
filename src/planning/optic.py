@@ -244,6 +244,52 @@ _INITIAL_HEURISTIC_MARK = "Initial heuristic"
 # progress ("b (1.000 | 0.000)(G);;;; Solution Found"), so it is looked for
 # anywhere in a line, not at its start (same substring _parse_optic_stdout uses).
 _SOLUTION_FOUND_MARK = ";;; Solution Found"
+# Without -N OPTIC keeps improving: every better plan is announced by this line, printed
+# right before the plan (the final ";;;; Solution Found" block repeats the best one).
+_PLAN_FOUND_MARK = "; Plan found with metric"
+_PLAN_LINE_RE = re.compile(r"^\s*([\d.]+)\s*:\s*\(([^)]+)\)\s*\[([\d.]+)\]")
+
+
+def _parse_optic_plans(lines: List[tuple]) -> List[Dict[str, Any]]:
+    """Every plan OPTIC printed, in order.
+
+    lines: (seconds since the process started, line) pairs, as run_timed collects them.
+    A plan starts at a "; Plan found with metric X" line (an improving plan) or at the
+    ";;;; Solution Found" line (the final one, printed also with -N) and goes on
+    until the next such line. The final block repeats the last improving plan; then it
+    is not a new plan: the last one is only marked final.
+
+    Returns one dict per plan: found_s, metric (None when the block does not say),
+    steps = [(start, action, duration)] in print order, with the raw action names
+    (silent ones included), makespan (max start + duration, None for an empty plan)
+    and final.
+    """
+    plans: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    for seconds, text in lines:
+        if _SOLUTION_FOUND_MARK in text or _PLAN_FOUND_MARK in text:
+            final = _SOLUTION_FOUND_MARK in text
+            metric = None
+            if not final:
+                found = re.search(r"metric\s+(-?[\d.eE+-]+)", text)
+                metric = float(found.group(1)) if found else None
+            current = {"found_s": seconds, "metric": metric, "steps": [], "final": final}
+            plans.append(current)
+            continue
+        if current is None:
+            continue
+        m = _PLAN_LINE_RE.match(text)
+        if m:
+            current["steps"].append((float(m.group(1)), m.group(2).split()[0], float(m.group(3))))
+
+    for plan in plans:
+        ends = [start + duration for start, _, duration in plan["steps"]]
+        plan["makespan"] = max(ends) if ends else None
+    # The final block repeats the best improving plan: keep one entry, marked final.
+    if len(plans) >= 2 and plans[-1]["final"] and plans[-2]["steps"] == plans[-1]["steps"]:
+        plans[-2]["final"] = True
+        plans.pop()
+    return plans
 
 
 def run_timed(
@@ -287,11 +333,16 @@ def run_timed(
           planning_s    first_plan_s - grounding_s, or, for a problem OPTIC proved
                         unsolvable, the end of the run minus grounding_s (None otherwise);
           wall_s        seconds from start to the end of the process (or to the kill);
-          cpu_s         the "; Time" line OPTIC prints (CPU time, 10 ms resolution).
+          cpu_s         the "; Time" line OPTIC prints (CPU time, 10 ms resolution);
+        plus ``plans`` (every plan printed, see _parse_optic_plans) and
+        ``search_completed`` (OPTIC finished on its own). When it is killed after improving
+        plans were printed, the best one is the plan returned and the status is "solved".
     """
     result = _empty_result()
     result["timings"] = {"grounding_s": None, "first_plan_s": None, "planning_s": None,
                          "wall_s": None, "cpu_s": None}
+    result["plans"] = []
+    result["search_completed"] = False
 
     if shutil.which("stdbuf") is None:
         # Without line buffering the timestamps would all be the end of the run.
@@ -349,9 +400,21 @@ def run_timed(
 
     out = "".join(text for _, text in lines)
     grounding_s = next((t for t, text in lines if _INITIAL_HEURISTIC_MARK in text), None)
-    first_plan_s = next((t for t, text in lines if _SOLUTION_FOUND_MARK in text), None)
+    first_plan_s = next(
+        (t for t, text in lines if _SOLUTION_FOUND_MARK in text or _PLAN_FOUND_MARK in text), None,
+    )
 
     plan_lines, plan_actions, makespan = _parse_optic_stdout(out)
+    plans = _parse_optic_plans(lines)
+    # Optimising and killed before the end: no ";;;; Solution Found" block, but the
+    # improving plans printed so far are plans; the best (last) one is the result.
+    if not plan_lines and plans and plans[-1]["steps"]:
+        best = plans[-1]
+        plan_lines = [f"{start:.3f}: ({name})  [{duration:.3f}]" for start, name, duration in best["steps"]]
+        plan_actions = [
+            n for n in (_normalise(name) for _, name, _ in best["steps"]) if n and not n.startswith("tau_")
+        ]
+        makespan = best["makespan"]
     plan_text = "\n".join(plan_lines) if plan_lines else None
     metrics = _parse_optic_metrics(out, "", makespan)
     metrics["solution_length"] = len(plan_actions) if plan_actions else None
@@ -383,6 +446,12 @@ def run_timed(
         "plan_text": plan_text,
         "plan_actions": plan_actions,
         "metrics": metrics,
+        "plans": plans,
+        # OPTIC ended by itself with its final block: it searched everything it could (a
+        # kill for time or memory leaves no final block). With -N this is just "a plan".
+        "search_completed": bool(
+            not timed_out and proc.returncode == 0 and any(p["final"] for p in plans)
+        ),
         "stdout": out,
         "message": message,
         "timings": {

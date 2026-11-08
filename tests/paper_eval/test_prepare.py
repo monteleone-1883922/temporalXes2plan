@@ -141,6 +141,34 @@ class TestDownloadLog:
             path = prep.download_log(self._spec(sha), tmp_path)
         assert path.read_bytes() == b"<log/>"
 
+    def _local_spec(self, sha):
+        return LogSpec("toy", "toy.xes", sha, False, local=True)
+
+    def test_local_log_is_checked_and_never_downloaded(self, tmp_path):
+        import hashlib
+        (tmp_path / "raw").mkdir()
+        target = tmp_path / "raw" / "toy.xes"
+        target.write_bytes(b"<log/>")
+        sha = hashlib.sha256(b"<log/>").hexdigest()
+        with patch.object(prep.requests, "get") as get:
+            assert prep.download_log(self._local_spec(sha), tmp_path) == target
+            # force does not replace a log provided by hand
+            assert prep.download_log(self._local_spec(sha), tmp_path, force=True) == target
+        get.assert_not_called()
+        assert target.read_bytes() == b"<log/>"
+
+    def test_local_log_missing_says_where_to_copy_it(self, tmp_path):
+        with patch.object(prep.requests, "get") as get:
+            with pytest.raises(FileNotFoundError, match="copy the log to"):
+                prep.download_log(self._local_spec("0" * 64), tmp_path)
+        get.assert_not_called()
+
+    def test_local_log_with_wrong_checksum_raises(self, tmp_path):
+        (tmp_path / "raw").mkdir()
+        (tmp_path / "raw" / "toy.xes").write_bytes(b"<log/>")
+        with pytest.raises(ValueError, match="Checksum mismatch"):
+            prep.download_log(self._local_spec("0" * 64), tmp_path)
+
     def test_existing_file_not_downloaded_again(self, tmp_path):
         (tmp_path / "raw").mkdir()
         (tmp_path / "raw" / "toy.xes").write_text("cached")

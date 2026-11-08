@@ -259,8 +259,9 @@ PYTHONPATH=src python -m paper_eval.run --log sepsis --phase plan    # OPTIC on 
 | `prefixes` | every prefix of every test trace, replay on the model, ground truth, goals, deduplicated instances | `prefixes.jsonl`, `instances.jsonl`, `prefix_stats.json` |
 | `volume` | number of prefixes per bucket, without building a model | `results/paper_eval/<log>/volume.json` |
 | `plan` | OPTIC on every instance, one at a time, resumable, with time and memory limits | `plan_results.jsonl`, `plan_meta.json` |
+| `rq2` | OPTIC optimising total-time (no costs, no deadline) on the completion instances, every plan saved; meant for the factory log | `rq2_results.jsonl`, `rq2_plans.jsonl`, `rq2_plan_steps.jsonl`, `rq2_domain.pddl`, `rq2_meta.json` |
 | `stats` | descriptive statistics of the model (places, transitions, attributes, durations) | `model_stats.json` |
-| `report` | RQ1 summary (grounding and planning time per bucket, by status) | `rq1_summary.json`, `rq1_summary.md` |
+| `report` | RQ1 summary (grounding and planning time per bucket, by status); RQ2 summary when the `rq2` phase has run | `rq1_summary.json`, `rq1_summary.md`, `rq2_summary.json`, `rq2_summary.md` |
 | `query` | SQL over all results with DuckDB | printed table |
 
 Useful options: `--force` recomputes a phase; `--unit-costs` / `--no-unit-costs` (model phase) gives every PDDL action cost 1 instead of the −log(probability) costs (default: `PaperEvalConfig.unit_costs`); `--limit N`, `--timeout S`, `--memory-mb M` and
@@ -269,8 +270,8 @@ automatic attribute filters.
 
 **Querying the results.** Every result is a table in an in-memory DuckDB database (`paper_eval/query.py`):
 `runs`, `logs`, `case_split`, `models`, `search_trials`, `attributes`, `transition_durations`, `prefixes`,
-`instances`, `plan_meta`, `plan_results`, plus the views `cases` (one row per case, prefix and goal, with the
-planner outcome of its instance) and `instances_view`. Nested columns are read with a dot:
+`instances`, `plan_meta`, `plan_results`, `rq2_meta`, `rq2_results`, `rq2_plans`, `rq2_plan_steps`, plus the views `cases` (one row per case, prefix and goal, with the
+planner outcome of its instance), `instances_view` and `rq2_reference` (the best RQ2 plan against the test cases with the same prefix). Nested columns are read with a dot:
 
 ```bash
 PYTHONPATH=src python -m paper_eval.run --log sepsis --phase query \
@@ -287,9 +288,16 @@ and, as an interactive diagram, in [`docs/paper_eval_er.html`](docs/paper_eval_e
 identical files; `plan` writes a line per instance as soon as it is done and resumes where it stopped, and it
 refuses to mix results made with different settings (use `--force` to start over).
 
-**Status.** The phases up to RQ1 (grounding and planning time) are in place. The comparison of the fastest
-plan with the fastest observed completion (RQ2) and the learning-factory log are still in preparation, and the
-final results are not part of the repository yet.
+**RQ2.** The `rq2` phase runs OPTIC without `-N`, on a domain without action costs, with the metric
+`total-time` and no deadline, so that the plan is the fastest completion OPTIC finds. Every plan OPTIC prints is
+saved, with the activities of the log, and `search_completed` says whether OPTIC ended by itself or was stopped by
+the time limit. Nothing is compared while running: the reference trace (a test trace with the same prefix whose
+continuation is the sequence of activities of the plan, in order of start time) and the differences are computed
+afterwards from the `rq2_reference` view and by `--phase report`. It is meant for the learning-factory log, which
+is registered as `factory` and must be copied by hand to `data/paper_eval/raw/fabbrica_2vgr_normalizzato.xes`.
+
+**Status.** The phases up to RQ1 (grounding and planning time) and the RQ2 phase are in place; the final results
+are not part of the repository yet.
 
 ## First evaluation harness (`evaluation/`)
 

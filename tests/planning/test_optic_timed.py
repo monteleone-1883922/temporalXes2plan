@@ -72,6 +72,72 @@ class TestTimings:
         assert "'-N'" in with_flag and "'-N'" not in without
 
 
+# What OPTIC prints without -N (copied from a real run): an improving plan with its
+# "; Plan found with metric" header, then the final block that repeats the best plan.
+IMPROVING_BODY = """
+    import time
+    print("Initial heuristic = 2.000", flush=True)
+    time.sleep(0.3)
+    print("b (1.000 | 1.000)(G)", flush=True)
+    print("; Plan found with metric 9.000", flush=True)
+    print("; Time 0.10", flush=True)
+    print("0.000: (slow)  [9.000]", flush=True)
+    time.sleep(0.3)
+    print("; Plan found with metric 3.000", flush=True)
+    print("; Time 0.20", flush=True)
+    print("0.000: (b)  [1.000]", flush=True)
+    print("1.001: (tau_x)  [0.001]", flush=True)
+    print("1.002: (c)  [1.000]", flush=True)
+    {ending}
+"""
+FINAL_BLOCK = (
+    'print("Problem Unsolvable", flush=True); print(";;;; Solution Found", flush=True); '
+    'print("; Cost: 3.0", flush=True); print("0.000: (b)  [1.000]", flush=True); '
+    'print("1.001: (tau_x)  [0.001]", flush=True); print("1.002: (c)  [1.000]", flush=True)'
+)
+
+
+class TestEveryPlanOpticPrints:
+    def test_improving_plans_and_the_final_block_are_one_list(self, tmp_path):
+        body = IMPROVING_BODY.format(ending=FINAL_BLOCK)
+        result = run_timed(_pddl_dir(tmp_path), timeout=30, stop_at_first=False,
+                           optic_cmd=_fake(tmp_path, body))
+        plans = result["plans"]
+        assert [p["metric"] for p in plans] == [9.0, 3.0]  # the final block is not a third plan
+        assert [p["final"] for p in plans] == [False, True]
+        assert plans[0]["steps"] == [(0.0, "slow", 9.0)]
+        assert plans[1]["steps"] == [(0.0, "b", 1.0), (1.001, "tau_x", 0.001), (1.002, "c", 1.0)]
+        assert plans[1]["makespan"] == pytest.approx(2.002)
+        assert 0 < plans[0]["found_s"] < plans[1]["found_s"]
+        assert result["search_completed"] is True and result["solvability"] == "solved"
+        assert result["plan_actions"] == ["b", "c"]  # the best plan, silent steps left out
+        # the first plan is the first improving one, not the final block
+        assert result["timings"]["first_plan_s"] == pytest.approx(plans[0]["found_s"], abs=0.05)
+
+    def test_killed_after_improving_plans_returns_the_best_one_as_not_completed(self, tmp_path):
+        body = IMPROVING_BODY.format(ending="time.sleep(60)")
+        result = run_timed(_pddl_dir(tmp_path), timeout=3, stop_at_first=False,
+                           optic_cmd=_fake(tmp_path, body))
+        assert result["solvability"] == "solved" and result["success"]
+        assert result["search_completed"] is False
+        assert [p["metric"] for p in result["plans"]] == [9.0, 3.0]
+        assert not any(p["final"] for p in result["plans"])
+        assert result["plan_actions"] == ["b", "c"]
+        assert result["metrics"]["duration"] == pytest.approx(2.002)
+
+    def test_killed_before_any_plan_stays_a_timeout(self, tmp_path):
+        body = 'import time; print("Initial heuristic = 2.0", flush=True); time.sleep(60)'
+        result = run_timed(_pddl_dir(tmp_path), timeout=2, stop_at_first=False,
+                           optic_cmd=_fake(tmp_path, body))
+        assert result["solvability"] == "timeout"
+        assert result["plans"] == [] and result["search_completed"] is False
+
+    def test_with_n_there_is_one_final_plan(self, tmp_path):
+        result = run_timed(_pddl_dir(tmp_path), timeout=30, optic_cmd=_fake(tmp_path, SOLVED_BODY))
+        assert len(result["plans"]) == 1 and result["plans"][0]["final"]
+        assert result["plans"][0]["steps"] == [(0.0, "go-b", 0.001), (0.001, "go-c", 0.001)]
+
+
 class TestFailures:
     def test_timeout_after_the_heuristic_keeps_the_grounding_time(self, tmp_path):
         body = """
@@ -146,3 +212,30 @@ class TestWithTheRealPlanner:
     def test_unsolvable_problem_is_not_reported_as_solved(self, tmp_path):
         result = run_timed(self._dir(tmp_path, "simple_problem_unsolvable.pddl"), timeout=60)
         assert not result["success"]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not optic_module.is_available(), reason="OPTIC binary not compiled")
+class TestOptimisingWithTheRealPlanner:
+    """Pins the real output format that _parse_optic_plans reads (OPTIC without -N)."""
+
+    DOMAIN = """(define (domain d)
+      (:requirements :strips :typing :durative-actions :duration-inequalities)
+      (:predicates (p0) (p1) (p3))
+      (:durative-action a :parameters () :duration (and (>= ?duration 4) (<= ?duration 5))
+        :condition (and (at start (p0))) :effect (and (at start (not (p0))) (at end (p3))))
+      (:durative-action b :parameters () :duration (and (>= ?duration 1) (<= ?duration 2))
+        :condition (and (at start (p0))) :effect (and (at start (not (p0))) (at end (p1))))
+      (:durative-action c :parameters () :duration (and (>= ?duration 1) (<= ?duration 2))
+        :condition (and (at start (p1))) :effect (and (at start (not (p1))) (at end (p3))))
+    )"""
+    PROBLEM = "(define (problem p) (:domain d) (:init (p0)) (:goal (p3)) (:metric minimize (total-time)))"
+
+    def test_the_fastest_plan_is_found_and_the_search_ends_by_itself(self, tmp_path):
+        (tmp_path / "domain.pddl").write_text(self.DOMAIN)
+        (tmp_path / "problem.pddl").write_text(self.PROBLEM)
+        result = run_timed(tmp_path, timeout=60, stop_at_first=False)
+        assert result["solvability"] == "solved" and result["search_completed"] is True
+        assert result["plan_actions"] == ["b", "c"]  # 2 time units, faster than a alone (4)
+        assert result["plans"][-1]["final"] and result["plans"][-1]["makespan"] == pytest.approx(2.001)
+        assert result["metrics"]["duration"] == pytest.approx(2.001)

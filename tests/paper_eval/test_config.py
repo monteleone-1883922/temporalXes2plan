@@ -20,6 +20,14 @@ def test_sepsis_keeps_diagnose_from_the_noise_filter():
     assert "Diagnose" in LOGS["sepsis"].keep_attributes
 
 
+def test_factory_is_a_local_log_without_its_event_attributes():
+    spec = LOGS["factory"]
+    assert spec.local and spec.has_lifecycle
+    assert set(spec.ignore_attributes) == {"Activity", "Resource", "elementId", "resourceCost", "resourceId"}
+    # only the factory is provided by hand
+    assert [s.name for s in LOGS.values() if s.local] == ["factory"]
+
+
 class TestPaperDefaults:
     """The defaults follow the paper (§4.1 POWL, §5.1 split without spanning cases)."""
 

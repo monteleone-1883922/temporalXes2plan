@@ -38,6 +38,9 @@ class LogSpec:
             event a complete, so durations are inter-event times (the time spent in a
             status is the time to the next change). The BPIC 2013 closed-problems log
             comes already in this form.
+        local: True for a log that is not downloaded but copied by hand into
+            <data_dir>/raw/<file_name> (the learning-factory log). sha256 is then the
+            checksum of that .xes file itself, not of a .gz archive.
     """
 
     name: str
@@ -47,6 +50,7 @@ class LogSpec:
     ignore_attributes: Tuple[str, ...] = ()
     keep_attributes: Tuple[str, ...] = ()
     status_as_activity: bool = False
+    local: bool = False
 
     @property
     def url(self) -> str:
@@ -76,6 +80,14 @@ LOGS: Dict[str, LogSpec] = {
                 "183c5e5189282779c811c78c33ff936351b3dd201165d612211fc220936f8249", True),
         LogSpec("helpdesk", "Helpdesk.xes",
                 "daa36a75933e4c032a4f21ce6e4f583563f65cb79ce0d3976b8b2c17c98a0a79", False),
+        # The learning-factory log (RQ2 runs only on it). Provided by hand. Its event
+        # attributes are copies of the activity and the resource, the BPMN element id and
+        # simulator ids/costs, none of them a decision of the process: all left out, so
+        # the net is control flow plus durations.
+        LogSpec("factory", "fabbrica_2vgr_normalizzato.xes",
+                "9011045a56c206acbff80a4998cc23239efac2a0bef82eb7699a670f8ba5f856", True,
+                ignore_attributes=("Activity", "Resource", "elementId", "resourceCost", "resourceId"),
+                local=True),
     ]
 }
 
@@ -131,6 +143,10 @@ class PaperEvalConfig:
     plan_memory_mb: int = 4000  # virtual memory limit of one OPTIC run (ulimit -v)
     plan_timeout_by_log: Dict[str, int] = field(default_factory=dict)
     plan_memory_by_log: Dict[str, int] = field(default_factory=dict)
+    # Phase "rq2" (OPTIC optimising total-time, runs only on the factory log). Provisional,
+    # like the plan_* values: the run limit is decided later.
+    rq2_timeout_s: int = 300
+    rq2_memory_mb: int = 4000
     # Every action of the PDDL domain costs exactly 1 (instead of the -log(probability)
     # costs of the paper's §4.3 encoding): what the RQ1 tests use. It changes domain.pddl,
     # so it is recorded in model_meta.json and a model built with the other value is refused.
