@@ -9,6 +9,8 @@ Outputs go to <model_dir> (one per split, keyed by split_hash):
   current.json        serialized domain (same shape as the web UI / thesis runner)
   domain.pddl         PDDL domain
   analysis_config.json the AnalysisConfig actually used
+  model_meta.json     how the model was made: split hash, discovery algorithm, seed,
+                      number of TPE trials, coverage (what analysis_config.json lacks)
   search_trials.json  score of every TPE trial
   attribute_filter.json  what the two attribute filters did (lists and sizes)
   attributes.jsonl    one row per attribute of the log and its fate (kept, removed as
@@ -159,6 +161,15 @@ def build_model(
     (model_dir / "analysis_config.json").write_text(
         json.dumps(config_to_dict(result.config), indent=2), encoding="utf-8",
     )
+    # What analysis_config.json does not say: which split, which discovery algorithm and
+    # which seed made this model. Documentation of the run (it names no folder, keys no table).
+    (model_dir / "model_meta.json").write_text(json.dumps({
+        "split_hash": split.split_hash,
+        "discovery_algorithm": cfg.discovery_algorithm,
+        "seed": cfg.seed,
+        "search_n_trials": cfg.search_n_trials,
+        "coverage_percentage": cfg.coverage_percentage,
+    }, indent=2), encoding="utf-8")
     # What the attribute filters did, for the paper's per-log table and for
     # reproducibility. noise_filter comes from the final build; the unused
     # attributes are recomputed from its ParseResult by the same function the

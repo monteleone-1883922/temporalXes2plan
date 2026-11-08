@@ -122,3 +122,70 @@ class TestVariantMeanDurations:
 
     def test_no_traces_gives_no_variants(self):
         assert sp.variant_mean_durations([]) == {}
+
+
+class TestSpanningCases:
+    """Cases still running when the test period starts are taken out of TRAIN.
+
+    In ten_traces, case cK starts on day K and lasts K + 1 days, so it ends on day 2K + 1.
+    The first TEST case is c7: the split point is day 7."""
+
+    def test_train_cases_ending_after_the_split_point_are_removed(self, ten_traces):
+        ids = sp.temporal_split_ids(ten_traces, 0.3, 0.2, drop_spanning=True)
+        assert ids["removed_spanning"] == ["c4", "c5", "c6"]  # end on days 9, 11, 13
+        assert ids["test"] == ["c7", "c8", "c9"]  # the test cases are never touched
+
+    def test_a_case_ending_exactly_at_the_split_point_is_kept(self, ten_traces):
+        ids = sp.temporal_split_ids(ten_traces, 0.3, 0.2, drop_spanning=True)
+        assert "c3" in ids["train_fit"] + ids["val"]  # c3 ends on day 7
+
+    def test_fit_and_val_are_divided_on_the_cases_that_remain(self, ten_traces):
+        ids = sp.temporal_split_ids(ten_traces, 0.3, 0.2, drop_spanning=True)
+        # 4 cases left: c0..c3, 80% fit (round(3.2) = 3), the newest one is VAL
+        assert ids["train_fit"] == ["c0", "c1", "c2"]
+        assert ids["val"] == ["c3"]
+
+    def test_every_case_is_in_exactly_one_part(self, ten_traces):
+        ids = sp.temporal_split_ids(ten_traces, 0.3, 0.2, drop_spanning=True)
+        everything = ids["train_fit"] + ids["val"] + ids["test"] + ids["removed_spanning"]
+        assert sorted(everything) == sorted(f"c{d}" for d in range(10))
+
+    def test_without_the_option_nothing_is_removed(self, ten_traces):
+        ids = sp.temporal_split_ids(ten_traces, 0.3, 0.2)
+        assert ids["removed_spanning"] == []
+        assert (len(ids["train_fit"]), len(ids["val"]), len(ids["test"])) == (6, 1, 3)
+
+    def test_no_case_spanning_the_split_point_changes_nothing(self):
+        traces = [_trace(f"d{i}", start_day=i * 3, duration_days=1) for i in range(10)]
+        plain = sp.temporal_split_ids(traces, 0.3, 0.2)
+        dropped = sp.temporal_split_ids(traces, 0.3, 0.2, drop_spanning=True)
+        assert dropped == plain
+
+    def test_make_split_records_the_removed_cases_and_the_flag_changes_the_hash(self, ten_traces, tmp_path):
+        log_path = tmp_path / "log.xes"
+        log_path.write_text("x")
+        kept = sp.make_split(make_log(*ten_traces), log_path, 0.3, 0.2, (0.5,))
+        dropped = sp.make_split(make_log(*ten_traces), log_path, 0.3, 0.2, (0.5,), drop_spanning=True)
+        assert kept.removed_spanning_ids == [] and dropped.removed_spanning_ids == ["c4", "c5", "c6"]
+        assert dropped.params["drop_spanning_train"] is True and kept.params["drop_spanning_train"] is False
+        assert dropped.split_hash != kept.split_hash
+        assert dropped.train_ids == ["c0", "c1", "c2", "c3"]  # the removed cases are not in TRAIN
+
+    def test_thresholds_are_computed_on_the_remaining_train(self, ten_traces, tmp_path):
+        log_path = tmp_path / "log.xes"
+        log_path.write_text("x")
+        split = sp.make_split(make_log(*ten_traces), log_path, 0.3, 0.2, (0.5,), drop_spanning=True)
+        # TRAIN = c0..c3 with durations 1, 2, 3, 4 days -> median 2.5 days
+        assert split.deadline_thresholds_s["q50"] == pytest.approx(2.5 * DAY)
+
+    def test_the_removed_ids_survive_write_and_read(self, ten_traces, tmp_path):
+        log_path = tmp_path / "log.xes"
+        log_path.write_text("x")
+        split = sp.make_split(make_log(*ten_traces), log_path, 0.3, 0.2, (0.5,), drop_spanning=True)
+        sp.write_split(split, tmp_path / "split.json")
+        assert sp.read_split(tmp_path / "split.json") == split
+
+    def test_a_split_file_written_before_the_option_still_loads(self):
+        old = {"train_fit_ids": ["a"], "val_ids": ["b"], "test_ids": ["c"], "deadline_thresholds_s": {},
+               "params": {"strategy": "temporal"}, "log_sha256": "x", "split_hash": "h"}
+        assert sp.SplitResult.from_json(old).removed_spanning_ids == []

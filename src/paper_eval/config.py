@@ -86,6 +86,9 @@ class PaperEvalConfig:
 
     test_pct: float = 0.3  # last 30% of cases (by start time) -> TEST
     val_pct: float = 0.2  # last 20% of TRAIN -> VAL, scores the TPE trials
+    # Take the TRAIN cases still running when the test period starts out of TRAIN
+    # (paper §5.1, "after removing cases that span the split point"). Part of the split hash.
+    drop_spanning_train: bool = True
     min_trace_len: int = 3  # traces with fewer control-flow events are dropped
     k_min: int = 2  # shortest prefix generated
     # No longer used for the goals (the deadline is now min(variant mean - elapsed,
@@ -117,7 +120,9 @@ class PaperEvalConfig:
     plan_memory_mb: int = 4000  # virtual memory limit of one OPTIC run (ulimit -v)
     plan_timeout_by_log: Dict[str, int] = field(default_factory=dict)
     plan_memory_by_log: Dict[str, int] = field(default_factory=dict)
-    discovery_algorithm: str = "inductive"
+    # POWL, as in the paper (§4.1): sound models by construction and fewer silent
+    # transitions than the Inductive Miner, which keeps the planning domain small.
+    discovery_algorithm: str = "powl"
     coverage_percentage: float = 0.001  # variant coverage filter, as in Pipeline
     data_dir: Path = _REPO_ROOT / "data" / "paper_eval"  # prepared logs
     results_dir: Path = _REPO_ROOT / "results" / "paper_eval"  # split/model/prefixes

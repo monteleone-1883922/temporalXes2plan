@@ -70,12 +70,16 @@ def run_split(log_name: str, cfg: PaperEvalConfig, paths: Paths, force: bool) ->
         logger.info("[%s] split already at %s — skipped", log_name, paths.split_json)
         return
     log = _load_log(str(paths.log_xes), "xes", None)
-    split = make_split(log, paths.log_xes, cfg.test_pct, cfg.val_pct, cfg.deadline_quantiles)
+    split = make_split(
+        log, paths.log_xes, cfg.test_pct, cfg.val_pct, cfg.deadline_quantiles,
+        drop_spanning=cfg.drop_spanning_train,
+    )
     write_split(split, paths.split_json)
     logger.info(
-        "[%s] split %s: train_fit=%d val=%d test=%d, T_q (days)=%s",
+        "[%s] split %s: train_fit=%d val=%d test=%d removed_spanning=%d, T_q (days)=%s",
         log_name, split.split_hash, len(split.train_fit_ids), len(split.val_ids),
-        len(split.test_ids), {k: round(v / px.DAY_S, 2) for k, v in split.deadline_thresholds_s.items()},
+        len(split.test_ids), len(split.removed_spanning_ids),
+        {k: round(v / px.DAY_S, 2) for k, v in split.deadline_thresholds_s.items()},
     )
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -43,7 +43,10 @@ class SplitResult:
 
     train_fit_ids + val_ids is the training set (TRAIN) the final network is
     built on; val_ids is the TPE search's held-out set; test_ids is never
-    used before the evaluation.
+    used before the evaluation. removed_spanning_ids are the cases that were
+    still running when the test period started and were taken out of TRAIN
+    (empty when the split keeps them, and in files written before the option
+    existed).
     """
 
     train_fit_ids: List[str]
@@ -53,6 +56,7 @@ class SplitResult:
     params: Dict[str, Any]
     log_sha256: str
     split_hash: str
+    removed_spanning_ids: List[str] = field(default_factory=list)
 
     @property
     def train_ids(self) -> List[str]:
@@ -70,6 +74,10 @@ def _start_time(trace: Any) -> datetime:
     return control_flow_view(trace)[0]["time:timestamp"]
 
 
+def _end_time(trace: Any) -> datetime:
+    return control_flow_view(trace)[-1]["time:timestamp"]
+
+
 def chronological_case_ids(traces: Iterable[Any]) -> List[str]:
     """Case ids ordered by the timestamp of their first control-flow event
     (ties broken by case id, so the order is deterministic)."""
@@ -77,18 +85,35 @@ def chronological_case_ids(traces: Iterable[Any]) -> List[str]:
 
 
 def temporal_split_ids(
-    traces: Sequence[Any], test_pct: float, val_pct: float,
+    traces: Sequence[Any], test_pct: float, val_pct: float, drop_spanning: bool = False,
 ) -> Dict[str, List[str]]:
     """First (1 - test_pct) of the cases by start time -> TRAIN, the rest ->
-    TEST; inside TRAIN, the last val_pct -> VAL. Training cases still
-    running when the test period starts are kept (decision D9)."""
-    # E.g. 1000 cases, test_pct=0.3, val_pct=0.2: the 700 oldest are TRAIN
-    # (560 fit + 140 val, val being the newest of them), the 300 newest TEST.
+    TEST; inside TRAIN, the last val_pct -> VAL.
+
+    With drop_spanning, the training cases that are still running when the test
+    period starts are taken out of TRAIN, as the paper's protocol does (Weytjens
+    and De Weerdt, to avoid leaking the test period into discovery): the split
+    point T is the start of the first TEST case, and a TRAIN case whose last
+    event is strictly after T is removed (one ending exactly at T is kept). The
+    fit/val division is then done on the cases that remain. The removed ids are
+    returned under "removed_spanning" (empty without the option). The function
+    default is False, i.e. the plain temporal split; PaperEvalConfig asks for True.
+    """
+    # E.g. 1000 cases, test_pct=0.3, val_pct=0.2, no case spanning the split: the 700
+    # oldest are TRAIN (560 fit + 140 val, val being the newest of them), the 300 newest TEST.
     ordered = chronological_case_ids(traces)
     n_train = round(len(ordered) * (1 - test_pct))
     train, test = ordered[:n_train], ordered[n_train:]
+    removed: List[str] = []
+    if drop_spanning and test:
+        by_id = {case_id(t): t for t in traces}
+        split_point = _start_time(by_id[test[0]])
+        kept: List[str] = []
+        for cid in train:
+            (removed if _end_time(by_id[cid]) > split_point else kept).append(cid)
+        train = kept
     n_fit = round(len(train) * (1 - val_pct))
-    return {"train_fit": train[:n_fit], "val": train[n_fit:], "test": test}
+    return {"train_fit": train[:n_fit], "val": train[n_fit:], "test": test, "removed_spanning": removed}
 
 
 def deadline_thresholds(train_traces: Iterable[Any], quantiles: Sequence[float]) -> Dict[str, float]:
@@ -128,15 +153,17 @@ def compute_split_hash(log_sha256: str, params: Dict[str, Any]) -> str:
 
 def make_split(
     log: Any, log_path: Path, test_pct: float, val_pct: float, quantiles: Sequence[float],
+    drop_spanning: bool = False,
 ) -> SplitResult:
     traces = list(log)
-    ids = temporal_split_ids(traces, test_pct, val_pct)
+    ids = temporal_split_ids(traces, test_pct, val_pct, drop_spanning)
     # T_q are computed on TRAIN only (fit + val), never on TEST, so the
     # deadlines do not leak information from the test period.
     train_ids = set(ids["train_fit"]) | set(ids["val"])
     thresholds = deadline_thresholds((t for t in traces if case_id(t) in train_ids), quantiles)
+    # drop_spanning is part of the parameters, so it is part of the split hash too.
     params = {"strategy": "temporal", "test_pct": test_pct, "val_pct": val_pct,
-              "quantiles": list(quantiles)}
+              "quantiles": list(quantiles), "drop_spanning_train": drop_spanning}
     log_sha = sha256_of(Path(log_path))
     return SplitResult(
         train_fit_ids=ids["train_fit"],
@@ -146,6 +173,7 @@ def make_split(
         params=params,
         log_sha256=log_sha,
         split_hash=compute_split_hash(log_sha, params),
+        removed_spanning_ids=ids["removed_spanning"],
     )
 
 

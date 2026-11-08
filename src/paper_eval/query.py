@@ -9,10 +9,12 @@ logs can live in the same database (`connect_all`).
 
 Tables (the file each one reads, inside the run folder unless noted):
 
-  runs                  one row per run                  split.json, prefixes_meta.json
+  runs                  one row per run                  split.json, prefixes_meta.json, model_meta.json
   logs                  one row per log                  <data_dir>/<log>.stats.json
-  case_split            one row per case; part =         split.json (the three id lists)
-                        train_fit / val / test
+  case_split            one row per case; part =         split.json (the id lists)
+                        train_fit / val / test, or
+                        removed_spanning (taken out of
+                        TRAIN: still running at the split)
   models                one row per run: net, attributes,   model_stats.json
                         effect groups, PDDL, durations
   search_trials         one row per TPE trial            search_trials.json
@@ -90,8 +92,10 @@ _EMPTY: Dict[str, _Columns] = {
         ("log_sha256", "VARCHAR"),
         ("params", "STRUCT(test_pct DOUBLE, val_pct DOUBLE)"),
         ("train_fit_ids", "VARCHAR[]"), ("val_ids", "VARCHAR[]"), ("test_ids", "VARCHAR[]"),
+        ("removed_spanning_ids", "VARCHAR[]"),
     ),
     "prefixes_meta.json": (("deadline_variant_only", "BOOLEAN"),),
+    "model_meta.json": (("discovery_algorithm", "VARCHAR"), ("seed", "BIGINT")),
     "search_trials.json": (
         ("trial_number", "BIGINT"), ("score", "DOUBLE"),
         ("rejected_reason", "VARCHAR"), ("max_effect_groups", "BIGINT"),
@@ -228,21 +232,31 @@ def _build(runs: List[Run], data_dir: Optional[Path] = None) -> "duckdb.DuckDBPy
     # --- runs and case_split: SQL over each run's own split.json ---------------
     con.execute(f"CREATE VIEW _split AS {run_source('split.json')}")
     con.execute(f"CREATE VIEW _prefixes_meta AS {run_source('prefixes_meta.json')}")
+    con.execute(f"CREATE VIEW _model_meta AS {run_source('model_meta.json')}")
+    # split.json written before the option existed has no removed_spanning_ids: no case removed.
+    split_columns = {row[0] for row in con.execute("DESCRIBE _split").fetchall()}
+    has_removed = "removed_spanning_ids" in split_columns
     run_rows = ", ".join(f"({_quote(r.log)}, {_quote(r.split_hash)}, {_quote(r.model_dir)})" for r in runs)
     con.execute(
         "CREATE VIEW runs AS SELECT o.log, o.split_hash, o.model_dir, s.log_sha256, "
         "s.params.test_pct AS test_pct, s.params.val_pct AS val_pct, "
         "len(s.train_fit_ids) AS n_train_fit, len(s.val_ids) AS n_val, len(s.test_ids) AS n_test, "
+        + ("len(s.removed_spanning_ids)" if has_removed else "NULL::BIGINT") + " AS n_removed_spanning, "
         # A run made before the option existed used the min rule.
-        "coalesce(m.deadline_variant_only, false) AS deadline_variant_only "
+        "coalesce(m.deadline_variant_only, false) AS deadline_variant_only, "
+        "mm.discovery_algorithm AS discovery_algorithm, mm.seed AS seed "
         f"FROM (VALUES {run_rows}) AS o(log, split_hash, model_dir) "
         "LEFT JOIN _split s ON s.log = o.log AND s.split_hash = o.split_hash "
-        "LEFT JOIN _prefixes_meta m ON m.log = o.log AND m.split_hash = o.split_hash"
+        "LEFT JOIN _prefixes_meta m ON m.log = o.log AND m.split_hash = o.split_hash "
+        "LEFT JOIN _model_meta mm ON mm.log = o.log AND mm.split_hash = o.split_hash"
     )
     # One SELECT per part: unnest turns each list of case ids into one row per id.
     case_split = " UNION ALL ".join(
         f"SELECT log, split_hash, CAST(unnest({ids}) AS VARCHAR) AS case_id, '{part}' AS part FROM _split"
-        for part, ids in (("train_fit", "train_fit_ids"), ("val", "val_ids"), ("test", "test_ids"))
+        for part, ids in (
+            ("train_fit", "train_fit_ids"), ("val", "val_ids"), ("test", "test_ids"),
+            *((("removed_spanning", "removed_spanning_ids"),) if has_removed else ()),
+        )
     )
     con.execute(f"CREATE VIEW case_split AS {case_split}")
 

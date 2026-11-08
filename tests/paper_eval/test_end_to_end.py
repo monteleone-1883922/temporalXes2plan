@@ -53,6 +53,11 @@ def test_data_layer_end_to_end(tmp_path):
     model_dir = build_model(paths.log_xes, split_obj, cfg, paths.model_dir(split_obj.split_hash))
     assert (model_dir / "current.json").exists()
     assert (model_dir / "domain.pddl").exists()
+    # how the model was made (the default is the paper's: POWL)
+    meta = json.loads((model_dir / "model_meta.json").read_text())
+    assert meta == {"split_hash": split_obj.split_hash, "discovery_algorithm": "powl", "seed": 42,
+                    "search_n_trials": 2, "coverage_percentage": cfg.coverage_percentage}
+    assert split["removed_spanning_ids"] == []  # the synthetic cases never overlap the split point
     # tables written as the model is built, ready to be queried
     assert json.loads((model_dir / "split.json").read_text()) == split  # the folder's own copy
     attributes = px.read_jsonl(model_dir / "attributes.jsonl")
@@ -78,7 +83,8 @@ def test_data_layer_end_to_end(tmp_path):
     # the real files of the run, read by the SQL views
     from paper_eval import query as q
     con = q.connect(model_dir)
-    assert con.execute("SELECT n_train_fit, n_val, n_test FROM runs").fetchone() == (34, 8, 18)
+    assert con.execute("SELECT n_train_fit, n_val, n_test, n_removed_spanning, discovery_algorithm, seed FROM runs"
+                       ).fetchone() == (34, 8, 18, 0, "powl", 42)
     assert con.execute("SELECT count(*) FROM case_split").fetchone() == (60,)
     assert con.execute("SELECT count(*) FROM attributes").fetchone() == (len(attributes),)
     assert con.execute("SELECT count(*) FROM prefixes").fetchone() == (len(records),)
@@ -89,6 +95,43 @@ def test_data_layer_end_to_end(tmp_path):
     volume = json.loads(paths.volume_json.read_text())
     assert volume["n_prefixes"] == 36
     assert volume["n_distinct_activity_prefixes"] == 4
+
+
+def test_run_split_takes_the_cases_spanning_the_split_point_out_of_train(tmp_path):
+    """20 cases, one starting per day and lasting 3 days: the test period starts on day 14, so the
+    training cases that end after it (those starting on days 12 and 13) are removed."""
+    cfg = PaperEvalConfig(data_dir=tmp_path / "data", results_dir=tmp_path / "results")
+    paths = runner.Paths("toy", cfg)
+    paths.log_dir.mkdir(parents=True)
+    cfg.data_dir.mkdir(parents=True)
+    traces = [
+        make_trace(
+            make_event("A", lifecycle="complete", offset=i * DAY),
+            make_event("B", lifecycle="complete", offset=i * DAY + 36 * HOUR),
+            make_event("C", lifecycle="complete", offset=i * DAY + 3 * DAY),
+            case_id=f"case_{i:03d}",
+        )
+        for i in range(20)
+    ]
+    log = preprocess(make_log(*traces), cfg.min_trace_len)
+    write_traces_xes(log, list(log), paths.log_xes)
+
+    runner.run_split("toy", cfg, paths, force=False)
+    split = json.loads(paths.split_json.read_text())
+    # case_011 ends exactly when the test period starts: kept
+    assert split["removed_spanning_ids"] == ["case_012", "case_013"]
+    assert len(split["test_ids"]) == 6
+    assert (len(split["train_fit_ids"]), len(split["val_ids"])) == (10, 2)
+    assert split["params"]["drop_spanning_train"] is True
+
+    # the option can be switched off from the configuration: another split, another hash
+    other = PaperEvalConfig(data_dir=cfg.data_dir, results_dir=tmp_path / "results_keep",
+                            drop_spanning_train=False)
+    other_paths = runner.Paths("toy", other)
+    other_paths.log_dir.mkdir(parents=True)
+    runner.run_split("toy", other, other_paths, force=False)
+    kept = json.loads(other_paths.split_json.read_text())
+    assert kept["removed_spanning_ids"] == [] and kept["split_hash"] != split["split_hash"]
 
 
 @pytest.mark.integration
