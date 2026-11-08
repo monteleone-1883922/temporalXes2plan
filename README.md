@@ -255,7 +255,7 @@ PYTHONPATH=src python -m paper_eval.run --log sepsis --phase plan    # OPTIC on 
 |---|---|---|
 | `prepare` | downloads the log, normalises it (UTC, sorted events, `start`/`complete` only, traces with fewer than 3 events dropped; for BPIC 2013 incidents, whose `lifecycle:transition` holds sub-statuses, the activity is status and sub-status together) | `data/paper_eval/<log>.xes`, `<log>.stats.json` |
 | `split` | chronological split, removal of cases spanning the split point, validation set | `results/paper_eval/<log>/split.json` |
-| `model` | TPE search on the training part, final net, PDDL domain | `current.json`, `domain.pddl`, `analysis_config.json`, `model_meta.json`, `search_trials.json`, `attribute_filter.json`, `attributes.jsonl`, `transition_durations.jsonl` |
+| `model` | TPE search on the training part, final net, PDDL domain | `current.json`, `domain.pddl`, `petri_net.png`/`.svg` (picture of the net), `analysis_config.json`, `model_meta.json`, `search_trials.json`, `attribute_filter.json`, `attributes.jsonl`, `transition_durations.jsonl` |
 | `prefixes` | every prefix of every test trace, replay on the model, ground truth, goals, deduplicated instances | `prefixes.jsonl`, `instances.jsonl`, `prefix_stats.json` |
 | `volume` | number of prefixes per bucket, without building a model | `results/paper_eval/<log>/volume.json` |
 | `plan` | OPTIC on every instance, one at a time, resumable, with time and memory limits | `plan_results.jsonl`, `plan_meta.json` |

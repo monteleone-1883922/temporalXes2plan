@@ -3,6 +3,7 @@ on a small synthetic log. Builds a real network (TPE with 2 trials), so it
 is an integration test: run with `pytest -m integration`."""
 
 import json
+import shutil
 
 import pytest
 
@@ -265,3 +266,30 @@ def test_plan_stats_and_report_chain_on_a_real_model(tmp_path):
     assert net["places"] > 0 and net["transitions"] == net["transitions_visible"] + net["transitions_silent"]
     assert stats["pddl"]["actions"] >= 1 and stats["pddl"]["domain_bytes"] > 0
     assert stats["split"]["test"] == 18 and stats["search"]["trials"] == 2
+
+
+@pytest.mark.skipif(shutil.which("dot") is None, reason="Graphviz is not installed")
+def test_model_phase_draws_the_petri_net_and_redraws_it_for_a_cached_model(tmp_path):
+    from paper_eval.build_model import PETRI_NET_PNG, PETRI_NET_SVG, build_model
+    from paper_eval.split import read_split
+
+    cfg = PaperEvalConfig(data_dir=tmp_path / "data", results_dir=tmp_path / "results", search_n_trials=2)
+    paths = runner.Paths("toy", cfg)
+    paths.log_dir.mkdir(parents=True)
+    cfg.data_dir.mkdir(parents=True)
+    log = preprocess(_synthetic_log(), cfg.min_trace_len)
+    write_traces_xes(log, list(log), paths.log_xes)
+    runner.run_split("toy", cfg, paths, force=False)
+    split = read_split(paths.split_json)
+    model_dir = build_model(paths.log_xes, split, cfg, paths.model_dir(split.split_hash))
+
+    png, svg = model_dir / PETRI_NET_PNG, model_dir / PETRI_NET_SVG
+    assert png.stat().st_size > 0 and svg.stat().st_size > 0
+    assert "<svg" in svg.read_text(encoding="utf-8")
+
+    # a model built before pictures existed gets one without being rebuilt
+    current_mtime = (model_dir / "current.json").stat().st_mtime_ns
+    png.unlink()
+    build_model(paths.log_xes, split, cfg, model_dir)
+    assert png.stat().st_size > 0
+    assert (model_dir / "current.json").stat().st_mtime_ns == current_mtime

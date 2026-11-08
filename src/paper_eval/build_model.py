@@ -16,6 +16,7 @@ Outputs go to <model_dir> (one per split, keyed by split_hash):
   attributes.jsonl    one row per attribute of the log and its fate (kept, removed as
                       unused, as noise or by the cascade, ignored by the user), see model_tables
   transition_durations.jsonl  one row per transition with its duration statistics
+  petri_net.png/.svg  picture of the Petri net (structure only), drawn from current.json
   split.json          copy of the split the model was built on, so the folder is
                       self-contained (the log's own split.json is overwritten by a new split)
 """
@@ -28,7 +29,7 @@ import logging
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from core_utils import _load_log, save_original_and_current, write_traces_xes
 from encoding.domain_builder import DomainBuilder, build_domain_with_variant_map
@@ -44,6 +45,8 @@ from pipeline import Pipeline
 logger = logging.getLogger(__name__)
 
 DOMAIN_NAME = "paper_eval"
+PETRI_NET_PNG = "petri_net.png"
+PETRI_NET_SVG = "petri_net.svg"
 
 
 @dataclass
@@ -94,6 +97,8 @@ def build_model(
                 f"value is {cfg.unit_costs}: its domain.pddl has other costs. Use --force to rebuild it."
             )
         logger.info("model already at %s — skipped", model_dir)
+        if not (model_dir / PETRI_NET_PNG).exists():
+            render_petri_net(model_dir)
         return model_dir
     model_dir.mkdir(parents=True, exist_ok=True)
     if force:
@@ -222,7 +227,32 @@ def build_model(
         for r in (result.trial_records or [])
     ]
     (model_dir / "search_trials.json").write_text(json.dumps(trials, indent=2), encoding="utf-8")
+    render_petri_net(model_dir)
     return model_dir
+
+
+def render_petri_net(model_dir: Path) -> List[Path]:
+    """Draw the net stored in model_dir/current.json as petri_net.png and petri_net.svg
+    (the SVG can be zoomed, which large nets need). It is the net that later phases
+    replay on, rebuilt like load_model does. The picture is documentation: a failure
+    (for instance Graphviz missing) is logged and returns an empty list, the model stays valid."""
+    model_dir = Path(model_dir)
+    try:
+        import pm4py
+
+        _, _, net_model = _read_prepared(model_dir)
+        written = []
+        for name in (PETRI_NET_PNG, PETRI_NET_SVG):
+            path = model_dir / name
+            pm4py.save_vis_petri_net(
+                net_model.petrinet, net_model.initial_marking, net_model.final_marking,
+                str(path), rankdir="LR",
+            )
+            written.append(path)
+        return written
+    except Exception as exc:  # noqa: BLE001 - never fail a build over a picture
+        logger.warning("could not draw the Petri net of %s: %s", model_dir, exc)
+        return []
 
 
 def read_unit_costs(model_dir: Path) -> bool:
@@ -234,21 +264,27 @@ def read_unit_costs(model_dir: Path) -> bool:
     return bool(json.loads(path.read_text(encoding="utf-8")).get("unit_costs", False))
 
 
+def _read_prepared(model_dir: Path):
+    """current.json -> (serialized dict, PreparedDomainInput, PetriNetModel); the start and
+    end places come from the metadata build_model stored."""
+    serialized = json.loads((Path(model_dir) / "current.json").read_text(encoding="utf-8"))
+    prepared = PreparedDomainInput.from_dict(serialized)
+    meta = serialized.get("metadata", {})
+    petri_net_model = build_petrinet_model_from_prepared(
+        prepared, meta.get("start_place"), meta.get("end_place"),
+    )
+    return serialized, prepared, petri_net_model
+
+
 def load_model(model_dir: Path) -> LoadedModel:
     """Rebuild prepared input, Petri net model and PDDL domain from
     model_dir/current.json — the same reconstruction the thesis runner uses
     for its cache (evaluation/run_evaluation.py)."""
     model_dir = Path(model_dir)
-    # 1. read what build_model persisted
-    serialized = json.loads((model_dir / "current.json").read_text(encoding="utf-8"))
+    # 1-2. read what build_model persisted: JSON -> prepared input -> Petri net
+    serialized, prepared, petri_net_model = _read_prepared(model_dir)
     config = config_from_dict(
         json.loads((model_dir / "analysis_config.json").read_text(encoding="utf-8"))
-    )
-    # 2. JSON -> prepared input -> Petri net (start/end places from metadata)
-    prepared = PreparedDomainInput.from_dict(serialized)
-    meta = serialized.get("metadata", {})
-    petri_net_model = build_petrinet_model_from_prepared(
-        prepared, meta.get("start_place"), meta.get("end_place"),
     )
     # 3. regenerate the PDDL domain with the same flags as build_model
     # (durative + costs + deadline, unit costs as recorded in model_meta.json).
