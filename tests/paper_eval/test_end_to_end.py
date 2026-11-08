@@ -35,8 +35,9 @@ def _synthetic_log(n_cases=60):
 
 @pytest.mark.integration
 def test_data_layer_end_to_end(tmp_path):
+    # unit_costs asked for explicitly, so the test does not depend on the default
     cfg = PaperEvalConfig(data_dir=tmp_path / "data", results_dir=tmp_path / "results",
-                          search_n_trials=2)
+                          search_n_trials=2, unit_costs=True)
     paths = runner.Paths("toy", cfg)
     paths.log_dir.mkdir(parents=True)
     cfg.data_dir.mkdir(parents=True)
@@ -62,6 +63,8 @@ def test_data_layer_end_to_end(tmp_path):
     domain_text = (model_dir / "domain.pddl").read_text()
     costs = re.findall(r"\(increase \(total-cost\) ([0-9.]+)\)", domain_text)
     assert costs and set(costs) == {"1.0000"}
+    # ... and none is missing: exactly one increase per action (durative or not)
+    assert len(costs) == len(re.findall(r"\(:(?:durative-)?action ", domain_text))
     from paper_eval.build_model import load_model
     assert load_model(model_dir).domain.unit_costs is True  # the rebuilt domain agrees with the file
     assert split["removed_spanning_ids"] == []  # the synthetic cases never overlap the split point
