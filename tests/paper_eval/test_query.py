@@ -136,7 +136,7 @@ def _full_run(root, log="toy", split_hash="hash", plan=True):
         "log_sha256": "abc", "split_hash": split_hash})
     _write_json(model_dir / "model_meta.json", {
         "split_hash": split_hash, "discovery_algorithm": "powl", "seed": 42,
-        "search_n_trials": 30, "coverage_percentage": 0.001})
+        "search_n_trials": 30, "coverage_percentage": 0.001, "unit_costs": True})
     (model_dir / "current.json").write_text("{}")  # what marks a built model
     _write_json(root / "data" / f"{log}.stats.json", {
         "n_traces": 6, "lifecycle": {"complete": 10}, "trace_length": {"min": 2, "max": 9}})
@@ -179,14 +179,21 @@ class TestWholeRun:
         con = q.connect(_full_run(tmp_path), tmp_path / "data")
         row = con.execute(
             "SELECT log, split_hash, n_train_fit, n_val, n_test, deadline_variant_only, test_pct, log_sha256, "
-            "n_removed_spanning, discovery_algorithm, seed FROM runs"
+            "n_removed_spanning, discovery_algorithm, seed, unit_costs FROM runs"
         ).fetchone()
-        assert row == ("toy", "hash", 2, 1, 3, True, 0.3, "abc", 2, "powl", 42)
+        assert row == ("toy", "hash", 2, 1, 3, True, 0.3, "abc", 2, "powl", 42, True)
 
     def test_a_run_without_model_meta_has_no_algorithm_or_seed(self, tmp_path):
         model_dir = _full_run(tmp_path)
         (model_dir / "model_meta.json").unlink()
-        assert q.connect(model_dir).execute("SELECT discovery_algorithm, seed FROM runs").fetchone() == (None, None)
+        assert q.connect(model_dir).execute("SELECT discovery_algorithm, seed, unit_costs FROM runs"
+                                            ).fetchone() == (None, None, None)
+
+    def test_a_model_meta_written_before_unit_costs_has_no_value_for_it(self, tmp_path):
+        model_dir = _full_run(tmp_path)
+        _write_json(model_dir / "model_meta.json", {"discovery_algorithm": "powl", "seed": 42})
+        assert q.connect(model_dir).execute("SELECT discovery_algorithm, unit_costs FROM runs"
+                                            ).fetchone() == ("powl", None)
 
     def test_a_split_written_before_the_removal_option_removes_no_case(self, tmp_path):
         model_dir = _full_run(tmp_path)

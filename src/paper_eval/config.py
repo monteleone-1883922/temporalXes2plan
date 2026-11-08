@@ -120,6 +120,10 @@ class PaperEvalConfig:
     plan_memory_mb: int = 4000  # virtual memory limit of one OPTIC run (ulimit -v)
     plan_timeout_by_log: Dict[str, int] = field(default_factory=dict)
     plan_memory_by_log: Dict[str, int] = field(default_factory=dict)
+    # Every action of the PDDL domain costs exactly 1 (instead of the -log(probability)
+    # costs of the paper's §4.3 encoding): what the RQ1 tests use. It changes domain.pddl,
+    # so it is recorded in model_meta.json and a model built with the other value is refused.
+    unit_costs: bool = False
     # POWL, as in the paper (§4.1): sound models by construction and fewer silent
     # transitions than the Inductive Miner, which keeps the planning domain small.
     discovery_algorithm: str = "powl"

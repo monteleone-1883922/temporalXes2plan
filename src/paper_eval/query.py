@@ -95,7 +95,7 @@ _EMPTY: Dict[str, _Columns] = {
         ("removed_spanning_ids", "VARCHAR[]"),
     ),
     "prefixes_meta.json": (("deadline_variant_only", "BOOLEAN"),),
-    "model_meta.json": (("discovery_algorithm", "VARCHAR"), ("seed", "BIGINT")),
+    "model_meta.json": (("discovery_algorithm", "VARCHAR"), ("seed", "BIGINT"), ("unit_costs", "BOOLEAN")),
     "search_trials.json": (
         ("trial_number", "BIGINT"), ("score", "DOUBLE"),
         ("rejected_reason", "VARCHAR"), ("max_effect_groups", "BIGINT"),
@@ -236,6 +236,8 @@ def _build(runs: List[Run], data_dir: Optional[Path] = None) -> "duckdb.DuckDBPy
     # split.json written before the option existed has no removed_spanning_ids: no case removed.
     split_columns = {row[0] for row in con.execute("DESCRIBE _split").fetchall()}
     has_removed = "removed_spanning_ids" in split_columns
+    meta_columns = {row[0] for row in con.execute("DESCRIBE _model_meta").fetchall()}
+    has_unit_costs = "unit_costs" in meta_columns
     run_rows = ", ".join(f"({_quote(r.log)}, {_quote(r.split_hash)}, {_quote(r.model_dir)})" for r in runs)
     con.execute(
         "CREATE VIEW runs AS SELECT o.log, o.split_hash, o.model_dir, s.log_sha256, "
@@ -244,7 +246,8 @@ def _build(runs: List[Run], data_dir: Optional[Path] = None) -> "duckdb.DuckDBPy
         + ("len(s.removed_spanning_ids)" if has_removed else "NULL::BIGINT") + " AS n_removed_spanning, "
         # A run made before the option existed used the min rule.
         "coalesce(m.deadline_variant_only, false) AS deadline_variant_only, "
-        "mm.discovery_algorithm AS discovery_algorithm, mm.seed AS seed "
+        "mm.discovery_algorithm AS discovery_algorithm, mm.seed AS seed, "
+        + ("mm.unit_costs" if has_unit_costs else "NULL::BOOLEAN") + " AS unit_costs "
         f"FROM (VALUES {run_rows}) AS o(log, split_hash, model_dir) "
         "LEFT JOIN _split s ON s.log = o.log AND s.split_hash = o.split_hash "
         "LEFT JOIN _prefixes_meta m ON m.log = o.log AND m.split_hash = o.split_hash "

@@ -102,6 +102,7 @@ class EvalAPI:
         snapshot_dir: Optional[str] = None,
         discretizer_cache_path: Optional[Path] = None,
         force_rediscretize: bool = False,
+        unit_costs: bool = False,
     ) -> BuildResult:
         """Build the PDDL domain for an event log — delegates entirely to
         Pipeline.build_network() (the same optimizer + parse + encode logic
@@ -126,6 +127,7 @@ class EvalAPI:
             snapshot_dir=snapshot_dir,
             discretizer_cache_path=discretizer_cache_path,
             force_rediscretize=force_rediscretize,
+            unit_costs=unit_costs,
         )
 
 

@@ -171,6 +171,8 @@ def main(argv=None) -> None:
                         help="drop noise attributes (constant, long text, counter-like)")
     parser.add_argument("--unused-filter", action=argparse.BooleanOptionalAction, default=None,
                         help="drop attributes no guard reads, merging the groups that become equal")
+    parser.add_argument("--unit-costs", action=argparse.BooleanOptionalAction, default=None,
+                        help="model: every action of the PDDL domain costs 1 (default: on, see PaperEvalConfig)")
     parser.add_argument("--deadline-variant-only", action=argparse.BooleanOptionalAction, default=None,
                         help="prefixes: deadline = variant mean - elapsed always (default: min with real remaining time)")
     # Options of the "plan" phase.
@@ -196,6 +198,8 @@ def main(argv=None) -> None:
         cfg.noise_filter = args.noise_filter
     if args.unused_filter is not None:
         cfg.unused_attribute_filter = args.unused_filter
+    if args.unit_costs is not None:
+        cfg.unit_costs = args.unit_costs
     if args.deadline_variant_only is not None:
         cfg.deadline_variant_only = args.deadline_variant_only
     paths = Paths(args.log, cfg)

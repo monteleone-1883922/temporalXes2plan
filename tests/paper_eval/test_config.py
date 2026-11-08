@@ -35,3 +35,7 @@ class TestPaperDefaults:
         from paper_eval.config import PaperEvalConfig
         from parsing.model_discoverer import ModelDiscoverer
         assert PaperEvalConfig().discovery_algorithm in ModelDiscoverer.DISCOVERY_ALGORITHMS
+
+    def test_rq1_uses_unit_costs(self):
+        from paper_eval.config import PaperEvalConfig
+        assert PaperEvalConfig().unit_costs is True

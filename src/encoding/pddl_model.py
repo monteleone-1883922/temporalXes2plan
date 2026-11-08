@@ -585,8 +585,15 @@ class PDDLDomain:
     # divided by this same factor to stay on the same PDDL time axis as the
     # actions.
     duration_scale_factor: float = 1.0
+    # Every action increases total-cost by exactly 1, whatever the probabilities
+    # of its branch and effect group were (they normally become -log(p) costs; a
+    # variant with no probability term already costs 1). Applies to every action
+    # of the domain, silent ones included, and only makes sense with has_costs.
+    unit_costs: bool = False
 
     def __post_init__(self) -> None:
+        if self.unit_costs and not self.has_costs:
+            raise ValueError("unit_costs needs has_costs: without costs there is no total-cost to set to 1")
         if self.has_deadline:
             self.predicates.add(PDDLPredicate(self.deadline_predicate))
             for act in self.actions:
@@ -594,6 +601,9 @@ class PDDLDomain:
         if self.has_costs:
             for act in self.actions:
                 act.has_costs = True
+                if self.unit_costs:
+                    act.base_cost = 1.0
+                    act.additional_cost = None
 
     def write(self, path: Path) -> str:
         """Serialize this domain to PDDL text, write it to path, and return the text."""

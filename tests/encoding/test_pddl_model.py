@@ -563,3 +563,25 @@ class TestMultiWordAttributeNameRendering:
     def test_effect_clear_value_constant_uses_sanitized_attribute(self):
         eff = PDDLEffect.clear_attr_is("organization involved", "none")
         assert eff.to_pddl() == "(not (organization_involved_is organization_involved_val_none))"
+
+
+class TestDomainUnitCosts:
+    def _domain(self, **kwargs):
+        a = PDDLAction(name="a", base_cost=0.37, additional_cost=0.2)
+        b = PDDLAction(name="b")  # no cost given: renders as 1.0 by default
+        return PDDLDomain(name="d", actions=[a, b], has_costs=True, **kwargs)
+
+    def test_costs_are_what_the_actions_say_by_default(self):
+        text = str(self._domain())
+        assert "(increase (total-cost) 0.5700)" in text and "(increase (total-cost) 1.0000)" in text
+
+    def test_unit_costs_set_every_action_to_one(self):
+        domain = self._domain(unit_costs=True)
+        text = str(domain)
+        assert text.count("(increase (total-cost) 1.0000)") == 2
+        assert "0.5700" not in text
+        assert all(a.base_cost == 1.0 and a.additional_cost is None for a in domain.actions)
+
+    def test_unit_costs_without_costs_is_an_error(self):
+        with pytest.raises(ValueError, match="unit_costs"):
+            PDDLDomain(name="d", actions=[PDDLAction(name="a")], has_costs=False, unit_costs=True)

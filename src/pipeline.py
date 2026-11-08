@@ -89,6 +89,7 @@ class Pipeline:
         discretizer_cache_path: Optional[Path] = None,
         force_rediscretize: bool = False,
         search_split: Optional[Sequence[str]] = None,
+        unit_costs: bool = False,
     ) -> BuildResult:
 
         """Search (optionally) + parse + encode a single XES log file.
@@ -107,6 +108,8 @@ class Pipeline:
             coverage_percentage: Minimum cumulative variant coverage for log filtering.
             use_durative: Encode durative actions when True.
             use_costs: Include action cost effects and functions section when True.
+            unit_costs: Give every action cost 1 instead of -log(probability) costs
+                (needs use_costs; off by default).
             use_activity_classifier: Combine concept:name + lifecycle:transition as label.
             config: Analysis configuration. When search=False, used directly
                 (defaults to AnalysisConfig() if omitted). When search=True,
@@ -232,7 +235,8 @@ class Pipeline:
             domain_name=domain_name,
             use_durative=use_durative,
             use_costs=use_costs,
-            has_deadline=use_durative
+            has_deadline=use_durative,
+            unit_costs=unit_costs,
         )
 
         return BuildResult(
@@ -265,6 +269,7 @@ class Pipeline:
         search_test_pct: float = 0.2,
         search_seed: int = 42,
         search_weights: Optional[ScoreWeights] = None,
+        unit_costs: bool = False,
     ) -> Path:
         """Run the full pipeline for a single XES log file.
 
@@ -280,6 +285,8 @@ class Pipeline:
             coverage_percentage: Minimum cumulative variant coverage for log filtering.
             use_durative: Encode durative actions when True.
             use_costs: Include action cost effects and functions section when True.
+            unit_costs: Give every action cost 1 instead of -log(probability) costs
+                (needs use_costs; off by default).
             use_activity_classifier: Combine concept:name + lifecycle:transition as label.
             config: Analysis configuration — see build_network()'s docstring
                 (used as-is when search=False, as the base config when search=True).
@@ -322,6 +329,7 @@ class Pipeline:
             search_weights=search_weights,
             # Route per-config debug output to data/<stem>/analysis_debug/
             snapshot_dir=os.path.join(config_dir, "analysis_debug"),
+            unit_costs=unit_costs,
         )
 
         # 3 — Serialize (same PreparedDomainInput used to build the domain,

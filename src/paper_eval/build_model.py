@@ -10,7 +10,7 @@ Outputs go to <model_dir> (one per split, keyed by split_hash):
   domain.pddl         PDDL domain
   analysis_config.json the AnalysisConfig actually used
   model_meta.json     how the model was made: split hash, discovery algorithm, seed,
-                      number of TPE trials, coverage (what analysis_config.json lacks)
+                      number of TPE trials, coverage, unit_costs (what analysis_config.json lacks)
   search_trials.json  score of every TPE trial
   attribute_filter.json  what the two attribute filters did (lists and sizes)
   attributes.jsonl    one row per attribute of the log and its fate (kept, removed as
@@ -87,6 +87,12 @@ def build_model(
     # Cache: current.json is the last file written, so its presence means
     # a previous build completed.
     if (model_dir / "current.json").exists() and not force:
+        built_with = read_unit_costs(model_dir)
+        if built_with != cfg.unit_costs:
+            raise ValueError(
+                f"the model at {model_dir} was built with unit_costs={built_with}, but the current "
+                f"value is {cfg.unit_costs}: its domain.pddl has other costs. Use --force to rebuild it."
+            )
         logger.info("model already at %s — skipped", model_dir)
         return model_dir
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -135,6 +141,8 @@ def build_model(
             coverage_percentage=cfg.coverage_percentage,
             use_durative=True,
             use_costs=True,
+            # Every action costs 1 when asked (RQ1); otherwise -log(probability) costs.
+            unit_costs=cfg.unit_costs,
             # The cap on effect groups per transition keeps TPE configs whose
             # group product would not fit in memory out of the search.
             config=analysis_config,
@@ -169,6 +177,7 @@ def build_model(
         "seed": cfg.seed,
         "search_n_trials": cfg.search_n_trials,
         "coverage_percentage": cfg.coverage_percentage,
+        "unit_costs": cfg.unit_costs,
     }, indent=2), encoding="utf-8")
     # What the attribute filters did, for the paper's per-log table and for
     # reproducibility. noise_filter comes from the final build; the unused
@@ -216,6 +225,15 @@ def build_model(
     return model_dir
 
 
+def read_unit_costs(model_dir: Path) -> bool:
+    """Whether the model in model_dir was built with unit costs (False when
+    model_meta.json is missing or does not say: the -log(probability) costs)."""
+    path = Path(model_dir) / "model_meta.json"
+    if not path.exists():
+        return False
+    return bool(json.loads(path.read_text(encoding="utf-8")).get("unit_costs", False))
+
+
 def load_model(model_dir: Path) -> LoadedModel:
     """Rebuild prepared input, Petri net model and PDDL domain from
     model_dir/current.json — the same reconstruction the thesis runner uses
@@ -233,10 +251,12 @@ def load_model(model_dir: Path) -> LoadedModel:
         prepared, meta.get("start_place"), meta.get("end_place"),
     )
     # 3. regenerate the PDDL domain with the same flags as build_model
-    # (durative + costs + deadline). variant_map is only kept in memory,
-    # so it can only be obtained by rebuilding the domain.
+    # (durative + costs + deadline, unit costs as recorded in model_meta.json).
+    # variant_map is only kept in memory, so it can only be obtained by
+    # rebuilding the domain.
     domain, variant_map = build_domain_with_variant_map(
         prepared, config=config, domain_name=DOMAIN_NAME,
         use_durative=True, use_costs=True, has_deadline=True,
+        unit_costs=read_unit_costs(model_dir),
     )
     return LoadedModel(serialized, prepared, petri_net_model, domain, variant_map, config)

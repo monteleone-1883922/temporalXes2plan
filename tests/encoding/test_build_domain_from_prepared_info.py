@@ -4,6 +4,9 @@ Builds PreparedDomainInput instances by hand (no JSON, no ParseResult) to
 exercise the typed 3-axis Cartesian-product engine in isolation.
 """
 import math
+import re
+
+import pytest
 
 from encoding.domain_builder import build_domain_from_prepared_info
 from encoding.pddl_model import PDDLAction, PDDLCondition, PDDLDurativeAction, PDDLEffect
@@ -868,3 +871,83 @@ class TestDeadline:
         )
         text = str(domain)
         assert "deadline_ok" not in text
+
+
+class TestUnitCosts:
+    """unit_costs: every action of the domain costs exactly 1 (off by default)."""
+
+    @staticmethod
+    def _costs(domain):
+        return re.findall(r"\(increase \(total-cost\) ([0-9.]+)\)", str(domain))
+
+    @staticmethod
+    def _probabilistic_prepared(**transition_kwargs):
+        """One transition whose variant carries two probability terms: an unguarded XOR
+        branch (0.25) and an unguarded effect group (0.6)."""
+        catalog = {
+            "diagnosis": AttributeCatalogEntry(
+                attribute_type="categorical", possible_values={"flu", "cold"},
+            )
+        }
+        group = PreparedEffectGroup(assignments=[("diagnosis", "flu")], guard=[], probability=0.6)
+        prepared = _simple_prepared(effect_groups=[group], **transition_kwargs)
+        prepared.attribute_catalog = catalog
+        prepared.xor_branches["p_xor"] = [
+            PreparedXorBranch(activity_name="activity_a", conditions=[], probability=0.25)
+        ]
+        return prepared
+
+    def test_without_the_option_probabilities_become_log_costs(self):
+        domain = build_domain_from_prepared_info(self._probabilistic_prepared(), use_costs=True)
+        assert self._costs(domain) == [f"{-math.log(0.25) - math.log(0.6):.4f}"]
+
+    def test_with_the_option_the_same_variant_costs_one(self):
+        domain = build_domain_from_prepared_info(
+            self._probabilistic_prepared(), use_costs=True, unit_costs=True)
+        assert self._costs(domain) == ["1.0000"]
+
+    def test_every_variant_of_a_transition_costs_one(self):
+        left = Guard(attribute="risk", value="high", negated=False)
+        right = Guard(attribute="risk", value="low", negated=False)
+        group = PreparedEffectGroup(assignments=[], guard=[], probability=0.3)
+        prepared = _simple_prepared(effect_groups=[group])
+        prepared.xor_branches["p_xor"] = [
+            PreparedXorBranch(activity_name="activity_a", conditions=[[left], [right]], probability=0.5)
+        ]
+        domain = build_domain_from_prepared_info(prepared, use_costs=True, unit_costs=True)
+        variants = [a for a in domain.actions if a.name.startswith("execute_activity_a_v")]
+        assert len(variants) == 2
+        assert all(a.base_cost == 1.0 for a in variants)
+        assert self._costs(domain) == ["1.0000"] * len(domain.actions)
+
+    def test_silent_actions_cost_one_too(self):
+        nodes = [
+            GraphNode(id="p_start", type="place", label="p_start"),
+            GraphNode(id="tau_0", type="silent", label="tau_0"),
+            GraphNode(id="p_end", type="place", label="p_end"),
+        ]
+        edges = [GraphEdge(source="p_start", target="tau_0"), GraphEdge(source="tau_0", target="p_end")]
+        prepared = PreparedDomainInput(
+            nodes=nodes, edges=edges, transitions={}, xor_branches={}, attribute_catalog={},
+        )
+        domain = build_domain_from_prepared_info(prepared, use_costs=True, unit_costs=True)
+        assert self._costs(domain) == ["1.0000"]
+
+    def test_durative_actions_cost_one(self):
+        duration = ActionDurationStats(effective_min=1.0, effective_max=5.0, source="inter_event")
+        prepared = self._probabilistic_prepared(duration=duration)
+        domain = build_domain_from_prepared_info(
+            prepared, use_durative=True, use_costs=True, unit_costs=True)
+        assert any(isinstance(a, PDDLDurativeAction) for a in domain.actions)
+        assert self._costs(domain) == ["1.0000"]
+
+    def test_the_option_needs_costs(self):
+        with pytest.raises(ValueError, match="unit_costs"):
+            build_domain_from_prepared_info(_simple_prepared(), use_costs=False, unit_costs=True)
+
+    def test_off_by_default_changes_nothing(self):
+        with_default = build_domain_from_prepared_info(self._probabilistic_prepared(), use_costs=True)
+        explicit = build_domain_from_prepared_info(
+            self._probabilistic_prepared(), use_costs=True, unit_costs=False)
+        assert str(with_default) == str(explicit)
+        assert not with_default.unit_costs

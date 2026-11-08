@@ -262,7 +262,7 @@ PYTHONPATH=src python -m paper_eval.run --log sepsis --phase plan    # OPTIC on 
 | `report` | RQ1 summary (grounding and planning time per bucket, by status) | `rq1_summary.json`, `rq1_summary.md` |
 | `query` | SQL over all results with DuckDB | printed table |
 
-Useful options: `--force` recomputes a phase; `--limit N`, `--timeout S`, `--memory-mb M` and
+Useful options: `--force` recomputes a phase; `--unit-costs` / `--no-unit-costs` (model phase) gives every PDDL action cost 1, which is the default for these tests, instead of the −log(probability) costs; `--limit N`, `--timeout S`, `--memory-mb M` and
 `--goal completion|deadline|all` control `plan`; `--noise-filter` / `--unused-filter` switch the two
 automatic attribute filters.
 

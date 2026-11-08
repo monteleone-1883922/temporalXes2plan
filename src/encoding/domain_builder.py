@@ -229,6 +229,7 @@ def build_domain_from_prepared_info(
     use_durative: bool = False,
     use_costs: bool = False,
     has_deadline: bool = False,
+    unit_costs: bool = False,
 ) -> PDDLDomain:
     """Build a PDDLDomain from an already-resolved PreparedDomainInput.
 
@@ -242,6 +243,8 @@ def build_domain_from_prepared_info(
         use_costs: Include action cost effects and functions section when True.
         has_deadline: Add deadline_exceeded predicate and over-all condition
             when True and at least one durative action is produced.
+        unit_costs: Give every action cost 1 instead of the -log(probability)
+            costs (requires use_costs). Off by default.
 
     Returns:
         A fully populated PDDLDomain.
@@ -249,6 +252,7 @@ def build_domain_from_prepared_info(
     domain, _ = build_domain_with_variant_map(
         prepared, config=config, domain_name=domain_name,
         use_durative=use_durative, use_costs=use_costs, has_deadline=has_deadline,
+        unit_costs=unit_costs,
     )
     return domain
 
@@ -260,6 +264,7 @@ def build_domain_with_variant_map(
     use_durative: bool = False,
     use_costs: bool = False,
     has_deadline: bool = False,
+    unit_costs: bool = False,
 ) -> Tuple[PDDLDomain, Dict[str, VariantInfo]]:
     """Same build as build_domain_from_prepared_info, plus the variant lookup.
 
@@ -274,6 +279,9 @@ def build_domain_with_variant_map(
     build_domain_from_prepared_info is a thin wrapper around this function
     that discards variant_map, kept as the stable public entry point for
     callers that only need the PDDLDomain.
+
+    unit_costs: every action (every variant of every transition, and the silent
+    ones) costs exactly 1; it needs use_costs and is off by default.
     """
     config = config or AnalysisConfig()
     out_places_by_label, in_places_by_label = _prepared_graph_index(prepared)
@@ -328,6 +336,7 @@ def build_domain_with_variant_map(
         actions=actions,
         has_costs=has_costs,
         has_deadline=effective_deadline,
+        unit_costs=unit_costs,
     )
     _maybe_rescale_durations(domain)
     return domain, variant_map

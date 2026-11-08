@@ -56,7 +56,14 @@ def test_data_layer_end_to_end(tmp_path):
     # how the model was made (the default is the paper's: POWL)
     meta = json.loads((model_dir / "model_meta.json").read_text())
     assert meta == {"split_hash": split_obj.split_hash, "discovery_algorithm": "powl", "seed": 42,
-                    "search_n_trials": 2, "coverage_percentage": cfg.coverage_percentage}
+                    "search_n_trials": 2, "coverage_percentage": cfg.coverage_percentage, "unit_costs": True}
+    # RQ1 uses unit costs: every action of the domain increases total-cost by exactly 1
+    import re
+    domain_text = (model_dir / "domain.pddl").read_text()
+    costs = re.findall(r"\(increase \(total-cost\) ([0-9.]+)\)", domain_text)
+    assert costs and set(costs) == {"1.0000"}
+    from paper_eval.build_model import load_model
+    assert load_model(model_dir).domain.unit_costs is True  # the rebuilt domain agrees with the file
     assert split["removed_spanning_ids"] == []  # the synthetic cases never overlap the split point
     # tables written as the model is built, ready to be queried
     assert json.loads((model_dir / "split.json").read_text()) == split  # the folder's own copy
@@ -83,8 +90,8 @@ def test_data_layer_end_to_end(tmp_path):
     # the real files of the run, read by the SQL views
     from paper_eval import query as q
     con = q.connect(model_dir)
-    assert con.execute("SELECT n_train_fit, n_val, n_test, n_removed_spanning, discovery_algorithm, seed FROM runs"
-                       ).fetchone() == (34, 8, 18, 0, "powl", 42)
+    assert con.execute("SELECT n_train_fit, n_val, n_test, n_removed_spanning, discovery_algorithm, seed, unit_costs "
+                       "FROM runs").fetchone() == (34, 8, 18, 0, "powl", 42, True)
     assert con.execute("SELECT count(*) FROM case_split").fetchone() == (60,)
     assert con.execute("SELECT count(*) FROM attributes").fetchone() == (len(attributes),)
     assert con.execute("SELECT count(*) FROM prefixes").fetchone() == (len(records),)
