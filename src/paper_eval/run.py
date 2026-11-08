@@ -171,6 +171,9 @@ def main(argv=None) -> None:
                         help="drop noise attributes (constant, long text, counter-like)")
     parser.add_argument("--unused-filter", action=argparse.BooleanOptionalAction, default=None,
                         help="drop attributes no guard reads, merging the groups that become equal")
+    parser.add_argument("--drop-spanning", action=argparse.BooleanOptionalAction, default=None,
+                        help="split: take the TRAIN cases still running when the test period starts out of "
+                             "TRAIN (default: off, see PaperEvalConfig)")
     parser.add_argument("--unit-costs", action=argparse.BooleanOptionalAction, default=None,
                         help="model: every action of the PDDL domain costs 1 (default: on, see PaperEvalConfig)")
     parser.add_argument("--deadline-variant-only", action=argparse.BooleanOptionalAction, default=None,
@@ -198,6 +201,8 @@ def main(argv=None) -> None:
         cfg.noise_filter = args.noise_filter
     if args.unused_filter is not None:
         cfg.unused_attribute_filter = args.unused_filter
+    if args.drop_spanning is not None:
+        cfg.drop_spanning_train = args.drop_spanning
     if args.unit_costs is not None:
         cfg.unit_costs = args.unit_costs
     if args.deadline_variant_only is not None:

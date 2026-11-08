@@ -110,7 +110,8 @@ def test_data_layer_end_to_end(tmp_path):
 def test_run_split_takes_the_cases_spanning_the_split_point_out_of_train(tmp_path):
     """20 cases, one starting per day and lasting 3 days: the test period starts on day 14, so the
     training cases that end after it (those starting on days 12 and 13) are removed."""
-    cfg = PaperEvalConfig(data_dir=tmp_path / "data", results_dir=tmp_path / "results")
+    cfg = PaperEvalConfig(data_dir=tmp_path / "data", results_dir=tmp_path / "results",
+                          drop_spanning_train=True)  # asked for explicitly, off by default
     paths = runner.Paths("toy", cfg)
     paths.log_dir.mkdir(parents=True)
     cfg.data_dir.mkdir(parents=True)

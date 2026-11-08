@@ -236,7 +236,8 @@ separately.
 `src/paper_eval/` implements the evaluation protocol of the paper as resumable phases, one command each.
 
 **Protocol.** Each log is split chronologically (first 70% of the cases for discovery, last 30% for testing;
-training cases still running when the test period starts are removed). Model selection uses only the discovery
+`--drop-spanning` can take out of the discovery part the cases still running when the test period starts, it is
+off by default). Model selection uses only the discovery
 portion, whose last 20% is the validation split. Every test trace of length `n` contributes the prefixes of
 length 2 to `n-1`; results are reported per prefix-length bucket, with timeouts and out-of-memory errors
 reported separately. Identical inputs (same prefix, same initial state, same goal) are evaluated once.
@@ -252,7 +253,7 @@ PYTHONPATH=src python -m paper_eval.run --log sepsis --phase plan    # OPTIC on 
 
 | Phase | What it does | Main output (`results/paper_eval/<log>/<split_hash>/` unless noted) |
 |---|---|---|
-| `prepare` | downloads the log, normalises it (UTC, sorted events, `start`/`complete` only, traces with fewer than 3 events dropped) | `data/paper_eval/<log>.xes`, `<log>.stats.json` |
+| `prepare` | downloads the log, normalises it (UTC, sorted events, `start`/`complete` only, traces with fewer than 3 events dropped; for BPIC 2013 incidents, whose `lifecycle:transition` holds sub-statuses, the activity is status and sub-status together) | `data/paper_eval/<log>.xes`, `<log>.stats.json` |
 | `split` | chronological split, removal of cases spanning the split point, validation set | `results/paper_eval/<log>/split.json` |
 | `model` | TPE search on the training part, final net, PDDL domain | `current.json`, `domain.pddl`, `analysis_config.json`, `model_meta.json`, `search_trials.json`, `attribute_filter.json`, `attributes.jsonl`, `transition_durations.jsonl` |
 | `prefixes` | every prefix of every test trace, replay on the model, ground truth, goals, deduplicated instances | `prefixes.jsonl`, `instances.jsonl`, `prefix_stats.json` |

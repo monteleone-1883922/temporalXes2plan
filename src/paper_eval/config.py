@@ -31,6 +31,13 @@ class LogSpec:
             log, on top of AnalysisConfig's default ignored set.
         keep_attributes: Event attributes the two automatic filters (noise,
             unused) must not remove. An attribute cannot be in both lists.
+        status_as_activity: True when lifecycle:transition holds the sub-status of
+            a status change (BPIC 2013 incidents: "In Progress", "Awaiting Assignment",
+            ...), not start/complete. Each event is then an instantaneous change of
+            status: the activity becomes "<concept:name>-<lifecycle:transition>" and the
+            event a complete, so durations are inter-event times (the time spent in a
+            status is the time to the next change). The BPIC 2013 closed-problems log
+            comes already in this form.
     """
 
     name: str
@@ -39,6 +46,7 @@ class LogSpec:
     has_lifecycle: bool
     ignore_attributes: Tuple[str, ...] = ()
     keep_attributes: Tuple[str, ...] = ()
+    status_as_activity: bool = False
 
     @property
     def url(self) -> str:
@@ -62,7 +70,8 @@ LOGS: Dict[str, LogSpec] = {
         LogSpec("bpic13_cp", "BPI_Challenge_2013_closed_problems.xes",
                 "584c634dff73b336ab813dc39680762e0f3f0214d286817024b4c5e8028147eb", False),
         LogSpec("bpic13_i", "bpi_challenge_2013_incidents.xes",
-                "6ec2136c607648608655802486df97a866f351668751b7ecbca51e1f8715d522", False),
+                "6ec2136c607648608655802486df97a866f351668751b7ecbca51e1f8715d522", False,
+                status_as_activity=True),
         LogSpec("bpic17", "BPI_2017.xes",
                 "183c5e5189282779c811c78c33ff936351b3dd201165d612211fc220936f8249", True),
         LogSpec("helpdesk", "Helpdesk.xes",
@@ -87,8 +96,10 @@ class PaperEvalConfig:
     test_pct: float = 0.3  # last 30% of cases (by start time) -> TEST
     val_pct: float = 0.2  # last 20% of TRAIN -> VAL, scores the TPE trials
     # Take the TRAIN cases still running when the test period starts out of TRAIN
-    # (paper §5.1, "after removing cases that span the split point"). Part of the split hash.
-    drop_spanning_train: bool = True
+    # (paper §5.1, "after removing cases that span the split point"). Off: decided on
+    # 2026-11-09, because on some logs it removes most of the training cases (BPIC13: 596 of
+    # 695 closed problems, 3,836 of 5,280 incidents). Part of the split hash.
+    drop_spanning_train: bool = False
     min_trace_len: int = 3  # traces with fewer control-flow events are dropped
     k_min: int = 2  # shortest prefix generated
     # No longer used for the goals (the deadline is now min(variant mean - elapsed,

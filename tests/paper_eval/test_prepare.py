@@ -147,3 +147,47 @@ class TestDownloadLog:
         with patch.object(prep.requests, "get") as get:
             prep.download_log(self._spec("x"), tmp_path)
         get.assert_not_called()
+
+
+class TestMergeStatusIntoActivity:
+    """BPIC 2013 incidents: lifecycle:transition is a sub-status, not start/complete."""
+
+    @staticmethod
+    def _status_trace():
+        return make_trace(
+            make_event("Accepted", lifecycle="In Progress", offset=10),
+            make_event("Queued", lifecycle="Awaiting Assignment", offset=20),
+            make_event("Completed", lifecycle="Closed", offset=30),
+            case_id="inc1",
+        )
+
+    def test_the_activity_is_status_and_sub_status(self):
+        out = prep.merge_status_into_activity(make_log(self._status_trace()))
+        assert _names(out[0]) == ["Accepted-In Progress", "Queued-Awaiting Assignment", "Completed-Closed"]
+
+    def test_every_event_becomes_a_complete(self):
+        out = prep.merge_status_into_activity(make_log(self._status_trace()))
+        assert {e["lifecycle:transition"] for e in out[0]} == {"complete"}
+
+    def test_nothing_is_lost_by_the_preprocessing_afterwards(self):
+        # without the merge, no event would be a start or a complete and the log would be empty
+        log = make_log(self._status_trace())
+        assert len(prep.preprocess(log, 3)) == 0
+        merged = prep.preprocess(prep.merge_status_into_activity(log), 3)
+        assert len(merged) == 1 and _names(merged[0])[0] == "Accepted-In Progress"
+        assert prep.log_stats(merged)["n_activities"] == 3
+
+    def test_an_event_without_lifecycle_is_left_alone(self):
+        out = prep.merge_status_into_activity(make_log(make_trace(make_event("A", offset=1), case_id="c")))
+        assert _names(out[0]) == ["A"]
+
+    def test_the_input_log_is_not_modified_and_trace_attributes_are_kept(self):
+        log = make_log(self._status_trace())
+        out = prep.merge_status_into_activity(log)
+        assert _names(log[0]) == ["Accepted", "Queued", "Completed"]
+        assert out[0].attributes["concept:name"] == "inc1"
+
+    def test_timestamps_and_order_are_unchanged(self):
+        log = make_log(self._status_trace())
+        out = prep.merge_status_into_activity(log)
+        assert [e["time:timestamp"] for e in out[0]] == [e["time:timestamp"] for e in log[0]]

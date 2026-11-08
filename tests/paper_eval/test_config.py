@@ -27,9 +27,11 @@ class TestPaperDefaults:
         from paper_eval.config import PaperEvalConfig
         assert PaperEvalConfig().discovery_algorithm == "powl"
 
-    def test_cases_spanning_the_split_point_are_dropped_from_train(self):
+    def test_dropping_spanning_cases_from_train_is_a_switch_and_off_by_default(self):
+        # off since 2026-11-09: on BPIC13 it would leave 99 training cases of 993
         from paper_eval.config import PaperEvalConfig
-        assert PaperEvalConfig().drop_spanning_train is True
+        assert PaperEvalConfig().drop_spanning_train is False
+        assert PaperEvalConfig(drop_spanning_train=True).drop_spanning_train is True
 
     def test_powl_is_a_discovery_algorithm_the_pipeline_supports(self):
         from paper_eval.config import PaperEvalConfig
@@ -41,3 +43,8 @@ class TestPaperDefaults:
         assert isinstance(PaperEvalConfig().unit_costs, bool)
         assert PaperEvalConfig(unit_costs=True).unit_costs is True
         assert PaperEvalConfig(unit_costs=False).unit_costs is False
+
+
+def test_only_bpic13_incidents_reads_its_lifecycle_as_a_status():
+    # its lifecycle:transition holds sub-statuses; closed problems already has them in concept:name
+    assert [n for n, spec in LOGS.items() if spec.status_as_activity] == ["bpic13_i"]

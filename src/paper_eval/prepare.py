@@ -122,6 +122,29 @@ def preprocess_trace(trace: Trace) -> Trace:
     return new_trace
 
 
+def merge_status_into_activity(log: EventLog) -> EventLog:
+    """New log where each event's activity is "<concept:name>-<lifecycle:transition>"
+    and its lifecycle is "complete" (see LogSpec.status_as_activity).
+
+    For logs whose lifecycle:transition is a sub-status and not a start/complete
+    (BPIC 2013 incidents): the Volvo VINST data records only the moment of each status
+    change, so every event is instantaneous and the time in a status is the gap to the
+    next event. Events without lifecycle are left as they are. The input is not modified.
+    """
+    traces = []
+    for trace in log:
+        events = []
+        for original in trace:
+            event = Event(dict(original))
+            sub_status = event.get(LIFECYCLE_KEY)
+            if sub_status is not None:
+                event["concept:name"] = f"{event.get('concept:name')}-{sub_status}"
+                event[LIFECYCLE_KEY] = "complete"
+            events.append(event)
+        traces.append(Trace(events, attributes=dict(trace.attributes)))
+    return EventLog(traces, attributes=log.attributes)
+
+
 def preprocess(log: EventLog, min_trace_len: int) -> EventLog:
     """Apply the shared preprocessing to every trace (see module docstring).
 
@@ -184,6 +207,8 @@ def prepare_log(spec: LogSpec, data_dir: Path, min_trace_len: int, force: bool =
     raw_path = download_log(spec, data_dir, force=force)
     log = _load_log(str(raw_path), "xes", None)
     n_before = len(log)
+    if spec.status_as_activity:
+        log = merge_status_into_activity(log)
     prepared = preprocess(log, min_trace_len)
     logger.info("[%s] %d traces kept of %d", spec.name, len(prepared), n_before)
 
