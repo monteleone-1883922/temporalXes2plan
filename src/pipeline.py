@@ -24,7 +24,7 @@ re-implementing it or re-running the search.
 import dataclasses
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import core_utils as utils
 from models import AnalysisConfig, ParseResult
@@ -59,6 +59,12 @@ class BuildResult:
     # Attributes the noise filter removed from this build, {attribute: reason}
     # (empty when the filter is off); reported by paper_eval/build_model.py.
     noise_attributes: Dict[str, str] = dataclasses.field(default_factory=dict)
+    # Type and number of distinct values of each of them, {attribute: {"type", "n_distinct"}}.
+    noise_details: Dict[str, Dict[str, Any]] = dataclasses.field(default_factory=dict)
+    # Every attribute the model analysed (after the noise filter) and its type,
+    # {attribute: "numerical" | "boolean" | "categorical"}: tells the attributes
+    # that never reached the catalog (no effect or guard uses them) from the rest.
+    attribute_categories: Dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 class Pipeline:
@@ -238,6 +244,8 @@ class Pipeline:
             domain_name=domain_name,
             trial_records=trial_records,
             noise_attributes=parser.noise_attributes,
+            noise_details=parser.noise_details,
+            attribute_categories=dict(parser.attribute_categories),
         )
 
     def run(

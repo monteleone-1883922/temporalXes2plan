@@ -92,6 +92,10 @@ class PreloadedLogAndNet:
     # filter is off). They are already out of `attributes` and
     # `attribute_categories`; the Parser also keeps them out of the model state.
     noise_attributes: Dict[str, str] = dataclasses.field(default_factory=dict)
+    # What was known about each of them just before it was dropped, for the
+    # report: {attribute: {"type": "numerical"|"boolean"|"categorical",
+    # "n_distinct": number of distinct values observed in the log}}.
+    noise_details: Dict[str, Dict[str, Any]] = dataclasses.field(default_factory=dict)
 
 
 def load_and_discover(
@@ -120,12 +124,21 @@ def load_and_discover(
     # Drops attributes whose statistics mark them as noise, before the
     # discretizer, the replay or the decision trees ever see them.
     noise_attributes: Dict[str, str] = {}
+    noise_details: Dict[str, Dict[str, Any]] = {}
     if config.noise_filter:
         noise_attributes = find_noise_attributes(
             full_log, attribute_categories, processor.attribute_value_counts, config,
         )
         for attr, reason in noise_attributes.items():
             logger.info("Noise filter removed attribute '%s': %s", attr, reason)
+        # Type and distinct values are only known here: the next two lines drop them.
+        noise_details = {
+            attr: {
+                "type": attribute_categories.get(attr),
+                "n_distinct": len(processor.attribute_value_counts.get(attr, {})),
+            }
+            for attr in noise_attributes
+        }
         attributes = {a for a in attributes if a not in noise_attributes}
         attribute_categories = {a: t for a, t in attribute_categories.items() if a not in noise_attributes}
 
@@ -144,6 +157,7 @@ def load_and_discover(
         attribute_categories=attribute_categories,
         petri_net_model=petri_net_model,
         noise_attributes=noise_attributes,
+        noise_details=noise_details,
     )
 
 
@@ -293,6 +307,7 @@ class Parser:
         self.attributes = preloaded.attributes
         self.attribute_categories = preloaded.attribute_categories
         self.noise_attributes = preloaded.noise_attributes
+        self.noise_details = preloaded.noise_details
         self.petri_net_model = preloaded.petri_net_model
         pnm = self.petri_net_model
 

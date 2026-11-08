@@ -53,6 +53,13 @@ def test_data_layer_end_to_end(tmp_path):
     model_dir = build_model(paths.log_xes, split_obj, cfg, paths.model_dir(split_obj.split_hash))
     assert (model_dir / "current.json").exists()
     assert (model_dir / "domain.pddl").exists()
+    # tables written as the model is built, ready to be queried
+    assert json.loads((model_dir / "split.json").read_text()) == split  # the folder's own copy
+    attributes = px.read_jsonl(model_dir / "attributes.jsonl")
+    # the synthetic log has no data attributes: the table is empty, not missing
+    assert attributes == []
+    durations = px.read_jsonl(model_dir / "transition_durations.jsonl")
+    assert {r["activity_name"] for r in durations} >= {"A", "D", "E"}
 
     runner.run_prefixes("toy", cfg, paths, force=False)
     records = px.read_jsonl(model_dir / "prefixes.jsonl")
@@ -67,6 +74,16 @@ def test_data_layer_end_to_end(tmp_path):
     assert 4 <= n_completion_instances <= 36
     stats = json.loads((model_dir / "prefix_stats.json").read_text())
     assert stats["overall"]["n_prefixes"] == 36
+
+    # the real files of the run, read by the SQL views
+    from paper_eval import query as q
+    con = q.connect(model_dir)
+    assert con.execute("SELECT n_train_fit, n_val, n_test FROM runs").fetchone() == (34, 8, 18)
+    assert con.execute("SELECT count(*) FROM case_split").fetchone() == (60,)
+    assert con.execute("SELECT count(*) FROM attributes").fetchone() == (len(attributes),)
+    assert con.execute("SELECT count(*) FROM prefixes").fetchone() == (len(records),)
+    # nothing planned yet: every case is there, without an outcome
+    assert con.execute("SELECT count(*), count(status) FROM cases").fetchone() == (len(records), 0)
 
     runner.run_volume("toy", cfg, paths)
     volume = json.loads(paths.volume_json.read_text())
@@ -121,6 +138,25 @@ def test_attribute_lists_and_filters_end_to_end(tmp_path):
     assert config_from_dict(saved).keep_attributes == ("junk",)
     catalog = load_model(model_dir).prepared.attribute_catalog
     assert "mine" not in catalog and "event_id" not in catalog
+
+    # attributes.jsonl: every attribute with its fate, and the numbers agree with the report
+    from paper_eval.prefixes import read_jsonl
+    rows = {r["attribute"]: r for r in read_jsonl(model_dir / "attributes.jsonl")}
+    assert rows["event_id"]["status"] == "removed_noise"
+    assert rows["event_id"]["type"] == "categorical" and rows["event_id"]["n_distinct_observed"] > 50
+    assert rows["event_id"]["n_values"] is None and rows["event_id"]["reason"]
+    assert rows["mine"]["status"] == "ignored_by_user" and rows["mine"]["type"] is None
+    # constant, protected by keep: no effect or guard ever uses it, so it is not in the
+    # catalog; the table says so instead of leaving it out
+    assert rows["junk"]["kept_by_user"] is True
+    assert rows["junk"]["status"] == "removed_cascade" and rows["junk"]["type"] == "categorical"
+    analysed = [r for r in rows.values() if r["status"] in ("kept", "removed_unused")]
+    assert len(analysed) == report["attribute_catalog_size_before"]
+    assert sum(r["status"] == "kept" for r in analysed) == report["attribute_catalog_size_after"]
+    assert {a for a, r in rows.items() if r["status"] == "removed_unused"} == set(report["unused_attribute_filter"])
+    # whatever was removed as unused still has its type and values
+    assert all(r["type"] and r["possible_values"] is not None
+               for r in rows.values() if r["status"] == "removed_unused")
 
 
 @pytest.mark.integration

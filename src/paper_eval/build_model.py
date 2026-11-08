@@ -10,6 +10,12 @@ Outputs go to <model_dir> (one per split, keyed by split_hash):
   domain.pddl         PDDL domain
   analysis_config.json the AnalysisConfig actually used
   search_trials.json  score of every TPE trial
+  attribute_filter.json  what the two attribute filters did (lists and sizes)
+  attributes.jsonl    one row per attribute of the log and its fate (kept, removed as
+                      unused, as noise or by the cascade, ignored by the user), see model_tables
+  transition_durations.jsonl  one row per transition with its duration statistics
+  split.json          copy of the split the model was built on, so the folder is
+                      self-contained (the log's own split.json is overwritten by a new split)
 """
 
 from __future__ import annotations
@@ -28,7 +34,9 @@ from encoding.prepared_graph_utils import build_petrinet_model_from_prepared
 from encoding.prepared_input import PreparedDomainInput
 from models import AnalysisConfig
 from paper_eval.config import LogSpec, PaperEvalConfig
-from paper_eval.split import SplitResult, case_id
+from paper_eval.model_tables import attribute_rows, transition_duration_rows
+from paper_eval.prefixes import write_jsonl
+from paper_eval.split import SplitResult, case_id, write_split
 from pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
@@ -155,15 +163,34 @@ def build_model(
     # reproducibility. noise_filter comes from the final build; the unused
     # attributes are recomputed from its ParseResult by the same function the
     # encoding used.
+    unused = DomainBuilder().unused_attributes(result.parse_result, result.config)
     attribute_report = {
         "ignored_by_user": sorted(ignore_list),
         "kept_by_user": sorted(keep_list),
         "noise_filter": result.noise_attributes,
-        "unused_attribute_filter": sorted(DomainBuilder().unused_attributes(result.parse_result, result.config)),
+        "unused_attribute_filter": sorted(unused),
         "attribute_catalog_size_before": len(result.parse_result.attribute_catalog),
         "attribute_catalog_size_after": len(result.prepared.attribute_catalog),
     }
     (model_dir / "attribute_filter.json").write_text(json.dumps(attribute_report, indent=2), encoding="utf-8")
+    # The same information as plain rows, one per attribute, with everything known
+    # now: the type, values and discretization of the attributes removed as unused
+    # (still in parse_result's catalog) and the type of those removed as noise
+    # (carried by BuildResult.noise_details). Written as the model is built because
+    # current.json no longer has them.
+    rows, _ = attribute_rows(
+        parse_catalog=result.parse_result.attribute_catalog,
+        final_catalog=result.prepared.attribute_catalog,
+        unused=unused,
+        noise=result.noise_attributes,
+        noise_details=result.noise_details,
+        ignored_by_user=ignore_list,
+        kept_by_user=keep_list,
+        analysed_types=result.attribute_categories,
+    )
+    write_jsonl(rows, model_dir / "attributes.jsonl")
+    write_jsonl(transition_duration_rows(result.prepared.transitions), model_dir / "transition_durations.jsonl")
+    write_split(split, model_dir / "split.json")
     # One entry per TPE trial, to report how the search behaved.
     trials = [
         {
