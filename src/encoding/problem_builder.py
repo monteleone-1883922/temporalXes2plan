@@ -1,6 +1,6 @@
 """PDDL problem file builder using the same predicate objects as the domain encoder."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import core_utils as utils
 from encoding.pddl_model import PDDLCondition, PDDLEffect
@@ -35,7 +35,8 @@ class ProblemBuilder:
         require_completion: bool = False,
         end_place: Optional[str] = None,
         deadline: Optional[float] = None,
-        temporal: bool = False
+        temporal: bool = False,
+        negated_attributes: Optional[Set[str]] = None,
     ) -> str:
         """Build and return a PDDL problem definition as a string.
 
@@ -59,11 +60,17 @@ class ProblemBuilder:
             require_completion: If True, appends (marked end_place) to every goal clause.
             end_place: Sanitized name of the Petri net sink place; required when
                 require_completion is True.
+            negated_attributes: Attributes the DOMAIN gives a negative predicate
+                (the ones some guard negates, see _prepared_negated_attributes). A boolean
+                attribute whose value is false is then written as (attr_false); for any other
+                boolean attribute false is the absence of (attr_true) and nothing is written,
+                because the domain does not declare (attr_false). None (the default) writes
+                (attr_false) for every false boolean, as before.
 
         Returns:
             Complete PDDL problem text.
         """
-        init_atoms = self._build_init_atoms(init_places, init_effects, attribute_catalog, metric in ("minimize_cost", "minimize_weighted"), deadline, temporal)
+        init_atoms = self._build_init_atoms(init_places, init_effects, attribute_catalog, metric in ("minimize_cost", "minimize_weighted"), deadline, temporal, negated_attributes)
         goal_str = self._build_goal(goal_sop, attribute_catalog, require_completion, end_place)
         metric_str = self._build_metric(metric, cost_weight)
 
@@ -102,7 +109,8 @@ class ProblemBuilder:
         catalog: Dict[str, Any],
         has_costs: bool = False,
         deadline: Optional[float] = None,
-        temporal: bool = False
+        temporal: bool = False,
+        negated_attributes: Optional[Set[str]] = None,
     ) -> List[str]:
         atoms = []
         for place in (init_places or []):
@@ -116,13 +124,19 @@ class ProblemBuilder:
         already_set: set = set()
         for eff in effects:
             attr = eff["attribute"]
-            value = utils.sanitize_value(attr ,str(eff.get("value", "")))
+            raw_value = str(eff.get("value", ""))
+            value = utils.sanitize_value(attr, raw_value)
             is_bool = catalog.get(attr, {}).get("type") == "boolean"
 
             if is_bool:
+                # The raw value decides: `value` is the sanitised constant ("attr_val_true"),
+                # which is never equal to "true" (this used to turn every true into a false).
+                is_true = raw_value.strip().lower() == "true"
+                if not is_true and negated_attributes is not None and attr not in negated_attributes:
+                    continue  # false = no (attr_true); the domain has no (attr_false) to set
                 effect = (
                     PDDLEffect.set_attr_true(attr)
-                    if value == "true"
+                    if is_true
                     else PDDLEffect.set_attr_false(attr)
                 )
             else:

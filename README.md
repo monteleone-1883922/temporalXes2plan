@@ -285,7 +285,7 @@ The schema, with a note on every table and column, is in [`docs/PAPER_EVAL_FLOW.
 and, as an interactive diagram, in [`docs/paper_eval_er.html`](docs/paper_eval_er.html).
 
 **Reproducibility.** The launcher fixes `PYTHONHASHSEED`, the TPE is seeded, and two runs of `model` produce
-identical files; `plan` writes a line per instance as soon as it is done and resumes where it stopped, and it
+identical files; `plan` writes a line per instance as soon as it is done (and logs one line per instance, with progress, status and times, to the console and to `results/paper_eval/<log>/run.log`) and resumes where it stopped, and it
 refuses to mix results made with different settings (use `--force` to start over).
 
 **RQ2.** The `rq2` phase runs OPTIC without `-N`, on a domain without action costs, with the metric

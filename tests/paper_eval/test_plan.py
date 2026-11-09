@@ -167,6 +167,19 @@ class TestRunPlan:
         assert counts == {"solved": 3, pl.STATUS_SKIPPED_REPLAY: 1, pl.STATUS_SKIPPED_EXPIRED: 1}
         assert len(runner.calls) == 3  # skipped ones never reach OPTIC
 
+    def test_one_log_line_per_instance_with_progress_and_times(self, setup, caplog):
+        import logging
+        with caplog.at_level(logging.INFO, logger="paper_eval"):
+            pl.run_plan("toy", setup.cfg, setup.paths, runner=FakeRunner())
+        lines = [r.getMessage() for r in caplog.records if "plan " in r.getMessage() and "%)" in r.getMessage()]
+        assert len(lines) == 5  # one per instance, skipped ones included
+        assert lines[0].startswith("[toy] plan 1/5 (20.0%) group 0 ")
+        assert "solved grounding 0.50s, planning 1.00s" in lines[0]
+        assert lines[-1].startswith("[toy] plan 5/5 (100.0%)")
+        assert any("skipped_replay_failed" in line for line in lines)
+        # and the summary with the time left, at the end
+        assert any("5/5 done in" in r.getMessage() and "left" in r.getMessage() for r in caplog.records)
+
     def test_domain_is_copied_next_to_each_problem(self, setup):
         runner = FakeRunner()
         pl.run_plan("toy", setup.cfg, setup.paths, runner=runner)

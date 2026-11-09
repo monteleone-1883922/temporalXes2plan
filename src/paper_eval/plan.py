@@ -324,7 +324,30 @@ def run_plan(
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
             out.flush()  # on disk now, so a killed run loses at most this instance
             counts[row["status"]] += 1
+            elapsed = time.perf_counter() - started
+            # One line per instance, so a run that has stopped is noticed at once.
+            logger.info("[%s] plan %d/%d (%.1f%%) group %s %s k=%s: %s%s",
+                        log_name, n, len(todo), 100.0 * n / len(todo), row["group_id"], row["goal"],
+                        row["k"], row["status"], _times(row))
             if n % 50 == 0 or n == len(todo):
-                logger.info("[%s] plan: %d/%d done in %.0fs, %s",
-                            log_name, n, len(todo), time.perf_counter() - started, dict(counts))
+                eta = elapsed / n * (len(todo) - n)
+                logger.info("[%s] plan: %d/%d done in %s, about %s left, %s",
+                            log_name, n, len(todo), _hms(elapsed), _hms(eta), dict(counts))
     return counts
+
+
+def _times(row: Dict[str, Any]) -> str:
+    """" grounding Xs planning Ys" for the log line (nothing for a row without times)."""
+    parts = []
+    if row.get("grounding_s") is not None:
+        parts.append(f"grounding {row['grounding_s']:.2f}s")
+    if row.get("planning_s") is not None:
+        parts.append(f"planning {row['planning_s']:.2f}s")
+    if not parts and row.get("wall_s") is not None:
+        parts.append(f"wall {row['wall_s']:.2f}s")
+    return " " + ", ".join(parts) if parts else ""
+
+
+def _hms(seconds: float) -> str:
+    seconds = int(round(seconds))
+    return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m{seconds % 60:02d}s"

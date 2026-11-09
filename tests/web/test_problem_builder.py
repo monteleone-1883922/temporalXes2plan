@@ -98,17 +98,6 @@ class TestProblemBuilderInit:
         )
         assert "(status_is status_val_admitted)" in result
 
-    @pytest.mark.xfail(
-        reason=(
-            "Known bug in ProblemBuilder._build_init_atoms: `value` is "
-            "assigned from utils.sanitize_value(attr, ...) (e.g. "
-            "'critical_val_true') before the `value == \"true\"` check, "
-            "which can now never match -- boolean init effects always "
-            "resolve to set_attr_false regardless of the actual value. "
-            "Flagged to the user, not fixed here (tests-only task)."
-        ),
-        strict=True,
-    )
     def test_boolean_true_init_effect(self):
         result = _build(
             init_effects=[{"attribute": "critical", "value": "true"}],
@@ -130,13 +119,6 @@ class TestProblemBuilderInit:
         )
         assert "(crp_is crp_val_lt_50)" in result
 
-    @pytest.mark.xfail(
-        reason=(
-            "Same known bug as test_boolean_true_init_effect: the boolean "
-            "'critical' effect always resolves to set_attr_false."
-        ),
-        strict=True,
-    )
     def test_multiple_init_effects(self):
         result = _build(
             init_effects=[

@@ -34,6 +34,7 @@ from parsing.xes_parser import Parser
 from parsing.csv_loader import csv_to_event_log
 from encoding.domain_builder import DomainBuilder
 from encoding.domain_builder import build_domain_with_variant_map as _build_domain_with_variant_map
+from encoding.prepared_graph_utils import _prepared_negated_attributes
 from encoding.prepared_input import PreparedDomainInput, VariantInfo
 from encoding.problem_builder import ProblemBuilder
 from planning.planner_runner import PlannerResult, run_planner as _run_planner
@@ -211,6 +212,9 @@ class EvalAPI:
         """
         attribute_catalog = serialized.get("attribute_catalog", {})
         end_place = serialized.get("metadata", {}).get("end_place")
+        # The same set the domain builder uses to decide which boolean attributes get a
+        # (attr_false) predicate: the problem may only write the predicates the domain declares.
+        negated_attributes = _prepared_negated_attributes(PreparedDomainInput.from_dict(serialized))
         return ProblemBuilder().build(
             problem_name=problem_name,
             domain_name=domain_name,
@@ -223,7 +227,8 @@ class EvalAPI:
             require_completion=require_completion,
             end_place=end_place,
             deadline=deadline,
-            temporal=temporal
+            temporal=temporal,
+            negated_attributes=negated_attributes,
         )
 
     def run_planner(
