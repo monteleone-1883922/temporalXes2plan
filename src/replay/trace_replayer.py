@@ -49,6 +49,8 @@ import threading
 import time
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple
 
+import numpy as np
+
 from encoding.prepared_graph_utils import _prepared_xor_branch_of
 from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup, PreparedTransition
 from encoding.transition_action_builder import _combine_xor_branches
@@ -56,6 +58,7 @@ from models import AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard, Pet
 
 import core_utils as utils
 from replay._log_alignment import align_single_trace
+from replay.relaxation import AttributeRelaxation, Viability
 
 logger = utils.get_logger(__name__)
 
@@ -220,6 +223,24 @@ class _EffectChoicePoint:
     tried_count: int = 0
 
 
+_MISMATCH_REASON = (
+    "Final attribute state does not match the expected snapshot "
+    "after exhausting every effect-group alternative."
+)
+
+
+@dataclasses.dataclass
+class _RelaxContext:
+    """The per-attribute viable sets of one trace (replay.relaxation), with and without the target.
+
+    with_target prunes the search for a tail that ends in the observed final state; without_target
+    (guards only) answers "can the tail reach the end at all" for reached_end. offset is the index
+    in the trace's whole firing sequence of the first step the walk is given (the cut)."""
+    with_target: Viability
+    without_target: Viability
+    offset: int = 0
+
+
 @dataclasses.dataclass
 class _WalkResult:
     """Internal result of TraceReplayer._walk, before each public method
@@ -320,6 +341,52 @@ def _rank_candidates(
     """
     matching = [g for g in effect_groups if sop_holds(g.guard, pddl_state)]
     return sorted(matching, key=lambda g: _score_effect_group(g, observed))
+
+
+class _GuardIndex:
+    """Evaluates the guards of ALL the effect groups of one activity at once.
+
+    O_Create Offer has thousands of groups and the walk ranks them on every first visit of a state;
+    evaluating each group's guard with sop_holds dominated the run time (about 3 ms per visit). Here
+    every distinct literal of the activity is numbered and evaluated ONCE per state (a few dozen
+    Guard.holds calls); a clause is then the set of literals it needs, as a bit mask, and a group
+    passes when some clause has all its bits on, checked for every group in one numpy operation.
+    The result is the same list, in the same order, as [g for g in groups if sop_holds(g.guard, state)].
+    Only built for activities with many groups and at most 62 distinct literals."""
+
+    MIN_GROUPS = 64
+    MAX_LITERALS = 62
+
+    def __init__(self, groups: List[PreparedEffectGroup]) -> None:
+        self.groups = groups
+        literal_id: Dict[Guard, int] = {}
+        per_group: List[List[int]] = []
+        for group in groups:
+            clauses: List[int] = []
+            for clause in group.guard:
+                bits = 0
+                for literal in clause:
+                    bits |= 1 << literal_id.setdefault(literal, len(literal_id))
+                clauses.append(bits)
+            per_group.append(clauses or [0])  # no guard at all: always satisfied
+        self.literals: List[Guard] = list(literal_id)
+        width = max((len(c) for c in per_group), default=1)
+        self.masks = np.array([c + [c[0]] * (width - len(c)) for c in per_group], dtype=np.int64)
+
+    @classmethod
+    def build(cls, groups: List[PreparedEffectGroup]) -> Optional["_GuardIndex"]:
+        if len(groups) < cls.MIN_GROUPS:
+            return None
+        index = cls(groups)
+        return index if len(index.literals) <= cls.MAX_LITERALS else None
+
+    def matching(self, state: Dict[str, str]) -> List[PreparedEffectGroup]:
+        holding = 0
+        for i, literal in enumerate(self.literals):
+            if literal.holds(state):
+                holding |= 1 << i
+        passed = ((self.masks & holding) == self.masks).any(axis=1)
+        return [self.groups[i] for i in np.flatnonzero(passed)]
 
 
 def _collapse_no_impact(
@@ -437,6 +504,14 @@ class TraceReplayer:
         self.petrinet_model = petrinet_model
         self.config = config or AnalysisConfig()
         self._xor_branch_of = _prepared_xor_branch_of(prepared)
+        # Combined XOR guard per activity: a pure function of the model, and _walk asks for it at
+        # every step of every backtracking attempt (the combination is a product of SOPs).
+        self._xor_guard_cache: Dict[str, List[List[Guard]]] = {}
+        # Effect groups per activity with their values in the replay's value space (see
+        # _effect_groups_of).
+        self._groups_cache: Dict[str, List[PreparedEffectGroup]] = {}
+        self._relaxation_engine: Optional[AttributeRelaxation] = None
+        self._guard_index_cache: Dict[str, Optional[_GuardIndex]] = {}
 
     # ------------------------------------------------------------------
     # Public API — one method per use case
@@ -476,9 +551,12 @@ class TraceReplayer:
             steps = steps[start:]
             initial_marking = marking_at[start]
             initial_attributes = raw_attributes_at[start]
+        relax = self._relax_context(execution.steps, None, [initial_attributes])
+        if relax is not None:
+            relax = dataclasses.replace(relax, offset=len(execution.steps) - len(steps))
         result = self._walk(
             steps, initial_marking=initial_marking, initial_attributes=initial_attributes,
-            target_final_attributes=None, accumulate_duration=False,
+            target_final_attributes=None, accumulate_duration=False, relax=relax,
         )
         return ReplayOutcome(
             is_replayable=result.reached_end,
@@ -537,7 +615,10 @@ class TraceReplayer:
         except ReplayTimeLimitExceeded as exc:
             return self._timed_out_outcome(str(exc), check_deadline)
         remaining = None if limit is None else max(limit - (time.monotonic() - started), 0.001)
-        return self._evaluation_tail(phase1, n_prefix, check_deadline, deadline_seconds, time_limit_s=remaining)
+        return self._evaluation_tail(
+            phase1, n_prefix, check_deadline, deadline_seconds, time_limit_s=remaining,
+            relax=self._relax_context(phase1[0], phase1[2][-1], phase1[2]),
+        )
 
     @staticmethod
     def _timed_out_outcome(reason: str, check_deadline: bool) -> EvaluationReplayOutcome:
@@ -573,9 +654,13 @@ class TraceReplayer:
                 phase1 = self._evaluation_phase1(trace)
         except ReplayTimeLimitExceeded as exc:
             raise ReplayTimedOut(str(exc)) from None
+        # The viable sets depend only on the suffix of the sequence and on the final state, so one
+        # table serves every cut point.
+        relax = self._relax_context(phase1[0], phase1[2][-1], phase1[2])
         return {
             n: self._evaluation_tail(
                 phase1, n, check_deadline, deadline_seconds, time_limit_s=self.config.replay_time_limit_s,
+                relax=relax,
             )
             for n in n_prefixes
         }
@@ -604,6 +689,7 @@ class TraceReplayer:
         check_deadline: bool,
         deadline_seconds: Optional[float],
         time_limit_s: Optional[float] = None,
+        relax: Optional[_RelaxContext] = None,
     ) -> EvaluationReplayOutcome:
         """Cut + Phase 2 of replay_evaluation_split, from a Phase 1 result
         (never mutated, so it can be shared across cut points).
@@ -664,6 +750,7 @@ class TraceReplayer:
                     initial_attributes=split_attributes,
                     target_final_attributes=expected_final_attributes,
                     accumulate_duration=check_deadline,
+                    relax=None if relax is None else dataclasses.replace(relax, offset=cut_idx),
                 )
         except ReplayTimeLimitExceeded as exc:
             result = _WalkResult(
@@ -714,9 +801,84 @@ class TraceReplayer:
         AND-of-all-independent-XOR-splits semantics used to build the PDDL
         domain applies here (the probability component it also returns is a
         cost concept, irrelevant to plain satisfiability)."""
-        branches = self._xor_branch_of.get(activity_name)
-        combined_sop, _unguarded_prob = _combine_xor_branches(branches)
-        return combined_sop
+        cached = self._xor_guard_cache.get(activity_name)
+        if cached is None:
+            branches = self._xor_branch_of.get(activity_name)
+            cached, _unguarded_prob = _combine_xor_branches(branches)
+            self._xor_guard_cache[activity_name] = cached
+        return cached
+
+    def _ranked(
+        self, activity_name: str, effect_groups: List[PreparedEffectGroup],
+        pddl_state: Dict[str, str], observed: Dict[str, str],
+    ) -> List[PreparedEffectGroup]:
+        """_rank_candidates, with the guards of a many-group activity evaluated in bulk (_GuardIndex)."""
+        if activity_name not in self._guard_index_cache:
+            self._guard_index_cache[activity_name] = _GuardIndex.build(effect_groups)
+        index = self._guard_index_cache[activity_name]
+        if index is None:
+            return _rank_candidates(effect_groups, pddl_state, observed)
+        return sorted(index.matching(pddl_state), key=lambda g: _score_effect_group(g, observed))
+
+    def _relax_context(
+        self, firing_steps: List[FiringStep], target: Optional[Dict[str, str]],
+        attributes_seen: List[Dict[str, str]],
+    ) -> Optional[_RelaxContext]:
+        """The viable sets of a trace's whole firing sequence, or None when
+        config.replay_relaxation is off. attributes_seen: every attribute state of the trace (their
+        values are tracked even if the model never mentions them)."""
+        if not self.config.replay_relaxation:
+            return None
+        if self._relaxation_engine is None:
+            catalog = self.prepared.attribute_catalog
+            declared = {
+                a: ({"true", "false"} if e.attribute_type == "boolean" else {str(v) for v in e.possible_values})
+                for a, e in catalog.items()
+            }
+            names = set(self.prepared.transitions) | set(self._xor_branch_of)
+            self._relaxation_engine = AttributeRelaxation(
+                names, self._effect_groups_of, self._xor_guard_for, declared)
+        observed: Dict[str, Set[Optional[str]]] = {}
+        for state in attributes_seen:
+            for attribute, value in state.items():
+                observed.setdefault(attribute, set()).add(value)
+        if target is not None:
+            for attribute, value in target.items():
+                observed.setdefault(attribute, set()).add(value)
+        return _RelaxContext(
+            with_target=self._relaxation_engine.build(firing_steps, target, observed),
+            without_target=self._relaxation_engine.build(firing_steps, None, observed),
+        )
+
+    def _effect_groups_of(self, activity_name: str) -> List[PreparedEffectGroup]:
+        """The effect groups of an activity with every value in the SAME value space as the
+        replay state and the observed events.
+
+        The model stores the value a group assigns to a boolean attribute as a Python bool
+        (True/False), but everything the replay compares it with is the string "true"/"false"
+        (_normalize_event_value; Guard.holds reads value None as "true"). Left as it was, an
+        attribute set by a group could never equal the observed final value, and a guard on it
+        never held: with BPIC17's Accepted/Selected (written by O_Create Offer, inside the
+        replayed tail) no trace could match its final state, so the search exhausted every
+        alternative and the TPE saw full replayability 0 for every trial. Assignments of the
+        other attribute types are already strings and are left untouched."""
+        cached = self._groups_cache.get(activity_name)
+        if cached is not None:
+            return cached
+        transition = self.prepared.transitions.get(activity_name)
+        groups = list(transition.effect_groups) if transition else []
+        catalog = self.prepared.attribute_catalog
+        boolean = {a for a, e in catalog.items() if e.attribute_type == "boolean"}
+        if boolean:
+            groups = [
+                dataclasses.replace(g, assignments=[
+                    (a, ("true" if (v is True or str(v).lower() == "true") else "false") if a in boolean else v)
+                    for a, v in g.assignments
+                ]) if any(a in boolean for a, _ in g.assignments) else g
+                for g in groups
+            ]
+        self._groups_cache[activity_name] = groups
+        return groups
 
     def _unwritten_attributes(self) -> Dict[str, str]:
         """State before any event: every categorical or numerical attribute the model knows a
@@ -799,6 +961,7 @@ class TraceReplayer:
         initial_attributes: Dict[str, str],
         target_final_attributes: Optional[Dict[str, str]],
         accumulate_duration: bool,
+        relax: Optional[_RelaxContext] = None,
     ) -> _WalkResult:
         """Phase 2 core engine: walk firing_steps checking axis-B (XOR) and
         axis-C (effect-group) guards, backtracking over which effect group a
@@ -812,6 +975,14 @@ class TraceReplayer:
         satisfied along the way (replay_evaluation_split's case: verifying
         the domain actually explains the trace's real continuation, not just
         that *some* continuation exists).
+
+        relax (replay.relaxation): per-attribute viable sets used ONLY to prune. A branch whose
+        attribute state is not viable can never succeed, so the verdict of the search does not
+        change; the exhaustive backtracking over the effect groups, which explodes on a trace the
+        model cannot explain, is replaced by an immediate "not replayable". reached_end means
+        "some path respecting the guards reaches the end, ignoring the target": when the search
+        is exhausted without any attempt having reached the end and branches were pruned, that is
+        decided by a second walk without target.
 
         Axis A (structural attribute preconditions) is not checked here: it
         is empty today for every PreparedTransition
@@ -833,6 +1004,39 @@ class TraceReplayer:
         # repeatedly-firing ambiguous transition (a process loop) from
         # multiplying backtracking work across every repetition.
         dead_states: Set[Tuple[int, FrozenSet[Tuple[str, str]]]] = set()
+
+        # What does not depend on the choices of the walk is computed ONCE here, not again
+        # at every backtracking attempt: the normalised attributes each event observed, the
+        # marking after every prefix of firing_steps (it only follows the fixed Phase-1
+        # sequence) and the duration of every prefix.
+        observed_at: List[Dict[str, str]] = [
+            {} if step.is_tau else _extract_event_attributes(
+                step.attributes, self.prepared.attribute_catalog, warnings)
+            for step in firing_steps
+        ]
+        marking_after: List[Set[str]] = [set(initial_marking)]
+        for step in firing_steps:
+            nxt = set(marking_after[-1])
+            self._advance_marking(nxt, step)
+            marking_after.append(nxt)
+        duration_before: List[float] = [0.0]
+        for step in firing_steps:
+            duration_before.append(duration_before[-1] + (step.duration_seconds or 0.0))
+
+        viability: Optional[Viability] = None
+        offset = 0
+        if relax is not None:
+            viability = relax.with_target if target_final_attributes is not None else relax.without_target
+            offset = relax.offset
+        ever_reached_end = False   # some attempt walked the whole tail (target aside)
+        pruned_any = False         # some branch was cut by the relaxation
+        last_blocked: Optional[Tuple[int, str]] = None  # the last genuine guard block seen
+        if viability is not None and not viability.state_ok(offset, pddl_state):
+            # No continuation can succeed, whatever the choices: skip the search altogether.
+            return self._relaxed_failure(
+                firing_steps, initial_marking, initial_attributes, target_final_attributes,
+                accumulate_duration, relax, warnings,
+            )
 
         # Two nested loops, on purpose:
         #  - the INNER loop is a plain forward walk over firing_steps, from
@@ -882,6 +1086,13 @@ class TraceReplayer:
                         blocked_step = step_idx
                         blocked_reason = self._block_reason(step.activity_name, False, [])
                         break
+                    if viability is not None and not viability.state_ok(offset + step_idx + 1, pddl_state):
+                        memo_hit_reason = (
+                            f"'{step.activity_name}' leaves an attribute state from which the target "
+                            f"cannot be reached (relaxation)."
+                        )
+                        pruned_any = True
+                        break
                     steps.append(ReplayStep(step.activity_name, is_tau=True, attributes_applied={}))
                     if duration_total is not None:
                         duration_total += step.duration_seconds or 0.0
@@ -891,15 +1102,12 @@ class TraceReplayer:
                 # transition may be absent from prepared.transitions (e.g. an
                 # activity with no mined effect data) -- treated the same as
                 # "no effect groups": fires with no attribute assignment.
-                transition = self.prepared.transitions.get(step.activity_name)
-                effect_groups = transition.effect_groups if transition else []
+                effect_groups = self._effect_groups_of(step.activity_name)
                 xor_sop = self._xor_guard_for(step.activity_name)
                 # observed = this step's own log event, normalized -- used
                 # only to break ties between candidates (_rank_candidates),
                 # never to decide guard satisfiability.
-                observed = _extract_event_attributes(
-                    step.attributes, self.prepared.attribute_catalog, warnings,
-                )
+                observed = observed_at[step_idx]
 
                 # Are we re-entering this exact step because a LATER step
                 # (or the final target check) forced a backtrack that landed
@@ -946,7 +1154,8 @@ class TraceReplayer:
                     # backtracking work without ever changing the outcome.
                     xor_ok = sop_holds(xor_sop, pddl_state)
                     candidates = (
-                        _collapse_no_impact(_rank_candidates(effect_groups, pddl_state, observed), pddl_state)
+                        _collapse_no_impact(
+                            self._ranked(step.activity_name, effect_groups, pddl_state, observed), pddl_state)
                         if xor_ok else []
                     )
                     # Blocked when the XOR guard itself fails, OR when this
@@ -956,6 +1165,21 @@ class TraceReplayer:
                     # attribute effect to apply", handled by chosen is None
                     # below).
                     is_blocked = (not xor_ok) or (bool(effect_groups) and not candidates)
+                    if viability is not None and not is_blocked:
+                        # Keep only the choices that leave a viable state; none left = a pruned
+                        # branch (not a block: the guards were satisfiable).
+                        if effect_groups:
+                            candidates = viability.filter_candidates(offset + step_idx, pddl_state, candidates)
+                            pruned_here = not candidates
+                        else:
+                            pruned_here = not viability.state_ok(offset + step_idx + 1, pddl_state)
+                        if pruned_here:
+                            memo_hit_reason = (
+                                f"'{step.activity_name}' has no choice that keeps the target reachable "
+                                f"(relaxation)."
+                            )
+                            pruned_any = True
+                            break
                     chosen = candidates[0] if candidates else None
                     # Only a REAL ambiguity (2+ guard-satisfying candidates)
                     # is worth remembering as a choice point -- a single
@@ -1008,9 +1232,12 @@ class TraceReplayer:
             #      without finding a further alternative, see the
             #      "restored_idx is None" branch below).
             mismatch_reason: Optional[str] = None
+            if blocked_step is not None:
+                last_blocked = (blocked_step, blocked_reason)
             if memo_hit_reason is not None:
                 mismatch_reason = memo_hit_reason
             elif blocked_step is None:
+                ever_reached_end = True
                 if target_final_attributes is None or all(
                         pddl_state.get(attr) == val for attr, val in target_final_attributes.items()
                 ):
@@ -1020,35 +1247,46 @@ class TraceReplayer:
                         steps=steps, final_marking=marking, final_attributes=pddl_state,
                         accumulated_duration_seconds=duration_total, warnings=warnings,
                     )
-                mismatch_reason = (
-                    "Final attribute state does not match the expected snapshot "
-                    "after exhausting every effect-group alternative."
-                )
+                mismatch_reason = _MISMATCH_REASON
 
             # Whether we got here via a structural block or a target
             # mismatch, the recovery mechanism is identical: pop back to the
             # most recent choice point with an untried candidate left.
             restored_idx = self._backtrack(choice_points, pddl_state, dead_states)
             if restored_idx is None:
-                # No choice point left to try -- this is a final, terminal
-                # outcome. Which one depends on why we got here:
-                if blocked_step is not None:
-                    # Real structural failure: never reached the end at all.
+                # No choice point left to try -- this is a final, terminal outcome: the target
+                # cannot be matched. reached_end says whether SOME path respecting the guards
+                # walks the whole tail (target aside), not what the last attempt happened to do.
+                if ever_reached_end:
+                    # Structurally fine, but the domain never explains the trace's real
+                    # continuation: reported distinctly from a block, with no failing step.
                     return _WalkResult(
-                        reached_end=False, matches_target=False,
-                        error_step=blocked_step, error_reason=blocked_reason,
+                        reached_end=True, matches_target=False,
+                        error_step=None, error_reason=_MISMATCH_REASON,
                         steps=steps, final_marking=marking, final_attributes=pddl_state,
                         accumulated_duration_seconds=duration_total, warnings=warnings,
                     )
-                # Reached the end on every attempt, just never with the
-                # right attribute values -- structurally fine, but the
-                # domain never explains the trace's real continuation (see
-                # open question #3 in the implementation plan: this is
-                # reported distinctly from a structural block, with no
-                # single failing step).
+                if pruned_any and target_final_attributes is not None:
+                    # Cut branches may have hidden a path that reaches the end with other values.
+                    free = self._walk(
+                        firing_steps, initial_marking, initial_attributes, None, accumulate_duration,
+                        relax=relax,
+                    )
+                    if free.reached_end:
+                        return _WalkResult(
+                            reached_end=True, matches_target=False,
+                            error_step=None, error_reason=_MISMATCH_REASON,
+                            steps=free.steps, final_marking=free.final_marking,
+                            final_attributes=free.final_attributes,
+                            accumulated_duration_seconds=free.accumulated_duration_seconds, warnings=warnings,
+                        )
+                    last_blocked = (free.error_step, free.error_reason)
+                # Never reached the end with the guards: a structural failure.
+                if last_blocked is None or last_blocked[0] is None:
+                    last_blocked = (blocked_step, blocked_reason or "No guard-consistent path reaches the end.")
                 return _WalkResult(
-                    reached_end=True, matches_target=False,
-                    error_step=None, error_reason=mismatch_reason,
+                    reached_end=False, matches_target=False,
+                    error_step=last_blocked[0], error_reason=last_blocked[1],
                     steps=steps, final_marking=marking, final_attributes=pddl_state,
                     accumulated_duration_seconds=duration_total, warnings=warnings,
                 )
@@ -1067,23 +1305,59 @@ class TraceReplayer:
             # restored_idx drops only the steps beyond the point being retried.
             steps = steps[:restored_idx]
             step_idx = restored_idx
-            # Re-simulate the marking up to restored_idx: cheap re-derivation
-            # from the walk's own starting marking keeps _advance_marking as
-            # the single source of truth instead of snapshotting marking per
-            # choice point too. Marking never depends on which effect group
-            # was chosen (it only depends on the fixed Phase-1-resolved
-            # transition sequence), so replaying it from scratch is always
-            # correct, not just a cheap shortcut.
-            marking = set(initial_marking)
-            for prior in firing_steps[:restored_idx]:
-                self._advance_marking(marking, prior)
+            # The marking at restored_idx: marking_after was built once, with the same
+            # _advance_marking. It never depends on which effect group was chosen (it only
+            # follows the fixed Phase-1 sequence), so the precomputed one is always right.
+            marking = set(marking_after[restored_idx])
             # duration_seconds is a property of the FiringStep itself
             # (lifecycle timestamps), independent of which effect group was
-            # chosen — safe to re-derive the same way as the marking.
+            # chosen — the same precomputed prefix sums apply.
             if duration_total is not None:
-                duration_total = sum(
-                    (s.duration_seconds or 0.0) for s in firing_steps[:restored_idx]
+                duration_total = duration_before[restored_idx]
+
+    def _relaxed_failure(
+        self,
+        firing_steps: List[FiringStep],
+        initial_marking: Set[str],
+        initial_attributes: Dict[str, str],
+        target: Optional[Dict[str, str]],
+        accumulate_duration: bool,
+        relax: _RelaxContext,
+        warnings: List[str],
+    ) -> _WalkResult:
+        """The relaxation proved that no continuation from the starting state can succeed.
+
+        With a target: it cannot match, and reached_end is decided by a walk WITHOUT the target
+        (itself pruned by the guards-only table). Without one: the guards alone cannot be
+        satisfied, and the first step no choice can get past is reported."""
+        if target is not None:
+            free = self._walk(
+                firing_steps, initial_marking, initial_attributes, None, accumulate_duration, relax=relax,
+            )
+            if free.reached_end:
+                return _WalkResult(
+                    reached_end=True, matches_target=False, error_step=None, error_reason=_MISMATCH_REASON,
+                    steps=free.steps, final_marking=free.final_marking, final_attributes=free.final_attributes,
+                    accumulated_duration_seconds=free.accumulated_duration_seconds, warnings=warnings,
                 )
+            return _WalkResult(
+                reached_end=False, matches_target=False, error_step=free.error_step,
+                error_reason=free.error_reason, steps=free.steps, final_marking=free.final_marking,
+                final_attributes=free.final_attributes,
+                accumulated_duration_seconds=free.accumulated_duration_seconds, warnings=warnings,
+            )
+        located = relax.without_target.first_blocked_step(initial_attributes, relax.offset)
+        if located is not None:
+            local = located[0] - relax.offset
+            activity = firing_steps[local].activity_name
+            reason = self._block_reason(activity, located[1] == "effect", self._effect_groups_of(activity))
+        else:
+            local, reason = None, "No guard-consistent path reaches the end."
+        return _WalkResult(
+            reached_end=False, matches_target=False, error_step=local, error_reason=reason,
+            steps=[], final_marking=set(initial_marking), final_attributes=dict(initial_attributes),
+            accumulated_duration_seconds=0.0 if accumulate_duration else None, warnings=warnings,
+        )
 
     def _advance_marking(self, marking: Set[str], step: FiringStep) -> None:
         """Move tokens per step: consume from_places, produce the transition's
