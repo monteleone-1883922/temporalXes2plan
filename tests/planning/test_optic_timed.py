@@ -138,6 +138,33 @@ class TestEveryPlanOpticPrints:
         assert result["plans"][0]["steps"] == [(0.0, "go-b", 0.001), (0.001, "go-c", 0.001)]
 
 
+class TestEmptyPlan:
+    """A problem whose initial state already satisfies the goal gets ";;;; Solution Found" and no
+    plan line (OPTIC: "The empty plan is optimal"). It is a solution, not a failure (it used to be
+    classified as unsolvable_resource, 34 times on Helpdesk)."""
+
+    BODY = """
+        print("Initial heuristic = 0.000", flush=True)
+        print("(G); The empty plan is optimal", flush=True)
+        print(";;;; Solution Found", flush=True)
+        print("; States evaluated: 1", flush=True)
+        print("; Cost: 0.000", flush=True)
+        print("; Time 0.01", flush=True)
+    """
+
+    def test_the_empty_plan_is_solved_with_no_actions(self, tmp_path):
+        result = run_timed(_pddl_dir(tmp_path), timeout=30, optic_cmd=_fake(tmp_path, self.BODY))
+        assert result["solvability"] == "solved" and result["success"] is True
+        assert result["plan_text"] == "" and result["plan_actions"] == []
+        assert result["plans"][0]["final"] and result["plans"][0]["steps"] == []
+        assert result["search_completed"] is True
+
+    def test_without_the_solution_marker_no_plan_lines_still_fails(self, tmp_path):
+        body = 'print("Initial heuristic = 2.000", flush=True)'
+        result = run_timed(_pddl_dir(tmp_path), timeout=30, optic_cmd=_fake(tmp_path, body))
+        assert result["solvability"] != "solved" and result["plan_text"] is None
+
+
 class TestFailures:
     def test_timeout_after_the_heuristic_keeps_the_grounding_time(self, tmp_path):
         body = """

@@ -56,6 +56,24 @@ _DURATION_RESCALE_UNITS: List[Tuple[float, str]] = [
 ]
 
 
+# OPTIC rounds numeric constants to this accuracy ("rounding numeric constants such as ... to an
+# accuracy of 0.001"). An action whose MAXIMUM duration is below it becomes a zero-length action,
+# and a domain with such an action plus a deadline (timed initial literal) makes OPTIC crash with a
+# segmentation fault (found on BPIC12 A: [0.0, 0.0] and [0.0, 0.0005] durations, 6,037 of 6,548 runs).
+_OPTIC_ACCURACY = 0.001
+
+
+def _enforce_representable_durations(domain: PDDLDomain) -> None:
+    """Raise the upper duration bound of every durative action to OPTIC's numeric accuracy.
+
+    Only the maximum is touched (and only when it is below the accuracy): the minimum may stay 0.
+    Time is in the domain's units, after any rescale. The change is at most 0.001 time units."""
+    for action in domain.actions:
+        if isinstance(action, PDDLDurativeAction) and action.duration_max < _OPTIC_ACCURACY:
+            action.duration_max = _OPTIC_ACCURACY
+            action.duration_min = min(action.duration_min, action.duration_max)
+
+
 def _maybe_rescale_durations(domain: PDDLDomain) -> None:
     """Rescale every durative action's duration bounds when the domain's max
     duration exceeds Fast Downward's internal numeric limit, so the planner
@@ -339,6 +357,7 @@ def build_domain_with_variant_map(
         unit_costs=unit_costs,
     )
     _maybe_rescale_durations(domain)
+    _enforce_representable_durations(domain)
     return domain, variant_map
 
 

@@ -416,6 +416,12 @@ def run_timed(
         ]
         makespan = best["makespan"]
     plan_text = "\n".join(plan_lines) if plan_lines else None
+    # OPTIC prints ";;;; Solution Found" also for the EMPTY plan (the initial state already
+    # satisfies the goal: "The empty plan is optimal"): there are no plan lines, but it is a
+    # solution. Without this it was classified as unsolvable_resource (seen on Helpdesk).
+    solution_found = any(_SOLUTION_FOUND_MARK in text for _, text in lines)
+    if plan_text is None and solution_found:
+        plan_text = ""
     metrics = _parse_optic_metrics(out, "", makespan)
     metrics["solution_length"] = len(plan_actions) if plan_actions else None
 

@@ -409,6 +409,35 @@ class TestDurativeAction:
         assert domain.has_deadline is False  # no duration data -> no durative action
 
 
+class TestDurationsOpticCanRepresent:
+    """OPTIC rounds numbers to 0.001: an action whose maximum duration is below that is a
+    zero-length action, and with a deadline (TIL) in the problem OPTIC crashes (segmentation fault,
+    seen on BPIC12 A). The builder keeps every upper bound at or above 0.001."""
+
+    def _action(self, lo, hi):
+        duration = ActionDurationStats(effective_min=lo, effective_max=hi, source="external")
+        domain = build_domain_from_prepared_info(_simple_prepared(duration=duration), use_durative=True)
+        return next(a for a in domain.actions if a.name == "execute_activity_a")
+
+    def test_a_zero_duration_gets_the_smallest_representable_upper_bound(self):
+        action = self._action(0.0, 0.0)
+        assert action.duration_max == 0.001 and action.duration_min == 0.0
+
+    def test_a_maximum_below_the_accuracy_is_raised(self):
+        action = self._action(0.0, 0.0005)
+        assert action.duration_max == 0.001
+
+    def test_a_minimum_above_the_new_maximum_cannot_happen(self):
+        action = self._action(0.0004, 0.0005)
+        assert action.duration_min <= action.duration_max == 0.001
+
+    def test_normal_durations_are_untouched(self):
+        action = self._action(0.0, 12.5)
+        assert (action.duration_min, action.duration_max) == (0.0, 12.5)
+        action = self._action(0.5, 0.5)
+        assert (action.duration_min, action.duration_max) == (0.5, 0.5)
+
+
 class TestDurationRescale:
     """domain_builder._maybe_rescale_durations — see
     encoding/domain_builder.py::_FD_MAX_DURATION_VALUE for why this exists:

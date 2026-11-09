@@ -27,7 +27,6 @@ import json
 import logging
 import os
 import platform
-import shutil
 import subprocess
 import tempfile
 import time
@@ -55,6 +54,9 @@ PREFIXES_META = "prefixes_meta.json"  # written by the prefixes phase
 STATUS_SKIPPED_REPLAY = "skipped_replay_failed"  # no initial state: the prefix could not be replayed
 STATUS_SKIPPED_EXPIRED = "skipped_expired"  # the deadline was already past at the cut
 STATUS_ERROR = "error"
+# A run whose first instances all end as "unsolvable_parse" has a PDDL OPTIC cannot read (domain
+# and problem disagree): it is stopped instead of writing thousands of useless rows.
+PARSE_FAILURE_CHECK_AFTER = 30
 
 # Same metric the thesis runner uses for Q1/Q2 (time plus weighted cost). With
 # OPTIC's -N (first plan, no optimisation) the metric does not change how long the first plan takes.
@@ -318,13 +320,28 @@ def run_plan(
     # problem.pddl changes from one instance to the next.
     with tempfile.TemporaryDirectory() as tmp, _open_for_append(results_path) as out:
         work_dir = Path(tmp)
-        shutil.copyfile(model_dir / "domain.pddl", work_dir / "domain.pddl")
+        # The domain OPTIC reads is the one the model builds NOW (the same code that wrote
+        # domain.pddl, plus any later fix of it, e.g. durations OPTIC can represent): if it
+        # differs from the file in the model folder, the file is brought up to date, so the
+        # folder always shows the domain the results were obtained with.
+        domain_text = str(model.domain)
+        (work_dir / "domain.pddl").write_text(domain_text, encoding="utf-8")
+        disk_domain = model_dir / "domain.pddl"
+        if not disk_domain.exists() or disk_domain.read_text(encoding="utf-8") != domain_text:
+            logger.warning("[%s] domain.pddl of the model folder differs from the rebuilt domain: updated", log_name)
+            disk_domain.write_text(domain_text, encoding="utf-8")
         for n, instance in enumerate(todo, start=1):
             row = plan_instance(instance, model, work_dir, log_name, settings, cost_weight, runner)
             out.write(json.dumps(row, ensure_ascii=False) + "\n")
             out.flush()  # on disk now, so a killed run loses at most this instance
             counts[row["status"]] += 1
             elapsed = time.perf_counter() - started
+            if n == PARSE_FAILURE_CHECK_AFTER and counts["unsolvable_parse"] == n:
+                raise RuntimeError(
+                    f"[{log_name}] the first {n} instances all ended as unsolvable_parse: OPTIC cannot read "
+                    f"the PDDL (see its message with `optic-clp.sh -N domain.pddl problem.pddl`). Stopped; "
+                    f"the rows written so far are in {results_path}."
+                )
             # One line per instance, so a run that has stopped is noticed at once.
             logger.info("[%s] plan %d/%d (%.1f%%) group %s %s k=%s: %s%s",
                         log_name, n, len(todo), 100.0 * n / len(todo), row["group_id"], row["goal"],

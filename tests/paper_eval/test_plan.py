@@ -15,9 +15,17 @@ from paper_eval.config import PaperEvalConfig
 SCALE = 60.0
 
 
+class _Domain:
+    """A domain with its PDDL text (what str() gives) and the duration scale factor."""
+    duration_scale_factor = SCALE
+
+    def __str__(self):
+        return "(define (domain paper_eval))"
+
+
 def _model():
     return SimpleNamespace(
-        domain=SimpleNamespace(duration_scale_factor=SCALE),
+        domain=_Domain(),
         serialized={
             "attribute_catalog": {"crp": {"type": "categorical", "possible_values": ["high", "low"]}},
             "metadata": {"end_place": "p_end"},
@@ -167,6 +175,22 @@ class TestRunPlan:
         assert counts == {"solved": 3, pl.STATUS_SKIPPED_REPLAY: 1, pl.STATUS_SKIPPED_EXPIRED: 1}
         assert len(runner.calls) == 3  # skipped ones never reach OPTIC
 
+    def test_a_run_whose_first_instances_are_all_unreadable_is_stopped(self, setup, monkeypatch):
+        # 40 instances that OPTIC cannot parse: stop after PARSE_FAILURE_CHECK_AFTER, not after 40
+        monkeypatch.setattr(pl, "PARSE_FAILURE_CHECK_AFTER", 3)
+        px.write_jsonl([_instance(i) for i in range(10)], setup.model_dir / "instances.jsonl")
+        runner = FakeRunner({i: _result("unsolvable_parse") for i in range(1, 11)})
+        with pytest.raises(RuntimeError, match="unsolvable_parse"):
+            pl.run_plan("toy", setup.cfg, setup.paths, runner=runner)
+        assert len(runner.calls) == 3 and len(_rows(setup.model_dir)) == 3
+
+    def test_a_few_unreadable_instances_among_good_ones_do_not_stop_the_run(self, setup, monkeypatch):
+        monkeypatch.setattr(pl, "PARSE_FAILURE_CHECK_AFTER", 3)
+        px.write_jsonl([_instance(i) for i in range(6)], setup.model_dir / "instances.jsonl")
+        runner = FakeRunner({1: _result("unsolvable_parse"), 2: _result("unsolvable_parse")})
+        pl.run_plan("toy", setup.cfg, setup.paths, runner=runner)
+        assert len(_rows(setup.model_dir)) == 6
+
     def test_one_log_line_per_instance_with_progress_and_times(self, setup, caplog):
         import logging
         with caplog.at_level(logging.INFO, logger="paper_eval"):
@@ -179,6 +203,16 @@ class TestRunPlan:
         assert any("skipped_replay_failed" in line for line in lines)
         # and the summary with the time left, at the end
         assert any("5/5 done in" in r.getMessage() and "left" in r.getMessage() for r in caplog.records)
+
+    def test_a_stale_domain_file_is_replaced_by_the_domain_the_model_builds_now(self, setup, caplog):
+        import logging
+        (setup.model_dir / "domain.pddl").write_text("(define (domain old))")
+        runner = FakeRunner()
+        with caplog.at_level(logging.WARNING, logger="paper_eval"):
+            pl.run_plan("toy", setup.cfg, setup.paths, runner=runner)
+        assert all(c["domain"] == "(define (domain paper_eval))" for c in runner.calls)  # OPTIC got the new one
+        assert (setup.model_dir / "domain.pddl").read_text() == "(define (domain paper_eval))"
+        assert any("differs" in r.getMessage() for r in caplog.records)
 
     def test_domain_is_copied_next_to_each_problem(self, setup):
         runner = FakeRunner()
