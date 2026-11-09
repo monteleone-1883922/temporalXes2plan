@@ -42,8 +42,12 @@ the attribute state starts with "none" for every attribute the model has a "none
 guard of a silent transition is checked like that of a labeled one (the PDDL has it as a
 precondition of the tau action).
 """
+import contextlib
 import dataclasses
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+import signal
+import threading
+import time
+from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, Tuple
 
 from encoding.prepared_graph_utils import _prepared_xor_branch_of
 from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup, PreparedTransition
@@ -67,6 +71,51 @@ _PM4PY_META_KEYS = frozenset({
     "@@index",
     "@@classifier",
 })
+
+
+class ReplayTimeLimitExceeded(BaseException):
+    """A trace took longer than AnalysisConfig.replay_time_limit_s in the replayer.
+
+    Raised from a timer signal in the middle of whatever code is running, so it derives from
+    BaseException: the many `except Exception` in the libraries below (pm4py, ...) must not
+    swallow it. The public methods catch it; they never let it out."""
+
+
+class ReplayTimedOut(Exception):
+    """replay_all_splits could not align the trace within the time limit (a normal exception,
+    for callers that treat any failed replay of a trace alike)."""
+
+
+@contextlib.contextmanager
+def _time_limit(seconds: Optional[float]) -> Iterator[None]:
+    """Raise ReplayTimeLimitExceeded in the running code after `seconds` of wall-clock time.
+
+    Uses a real-time interval timer (SIGALRM), the only way to interrupt a long pure-Python
+    computation without running it in another process. It only works in the main thread of
+    a Unix process: anywhere else (or with seconds None) it does nothing, so there is no
+    limit there. The previous handler and timer are restored on exit, so limits can nest
+    only in the sense that the inner one wins while it runs."""
+    usable = (
+        seconds is not None and seconds > 0
+        and hasattr(signal, "setitimer")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if not usable:
+        yield
+        return
+
+    def _on_alarm(signum: int, frame: Any) -> None:
+        raise ReplayTimeLimitExceeded(f"replay time limit of {seconds:g} s exceeded")
+
+    previous_handler = signal.signal(signal.SIGALRM, _on_alarm)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:  # an outer timer was running: give back what is left of it
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 @dataclasses.dataclass
@@ -394,7 +443,19 @@ class TraceReplayer:
     # ------------------------------------------------------------------
 
     def replay_full_trace(self, trace: Any) -> ReplayOutcome:
-        """Case 1: replay the entire trace, verify it is fully executable."""
+        """Case 1: replay the entire trace, verify it is fully executable.
+
+        A trace that takes longer than config.replay_time_limit_s counts as not replayable."""
+        try:
+            with _time_limit(self.config.replay_time_limit_s):
+                return self._replay_full_trace(trace)
+        except ReplayTimeLimitExceeded as exc:
+            return ReplayOutcome(
+                is_replayable=False, error_step=None, error_reason=str(exc), steps=[],
+                final_marking=set(), final_attributes={}, warnings=[str(exc)],
+            )
+
+    def _replay_full_trace(self, trace: Any) -> ReplayOutcome:
         model = self.petrinet_model
         execution, phase1_warnings = align_single_trace(
             trace, model.petrinet, model.initial_marking, model.final_marking,
@@ -466,8 +527,28 @@ class TraceReplayer:
         check_deadline is True, accumulating duration_seconds along that tail
         only (never time before the cut) against deadline_seconds.
         """
-        phase1 = self._evaluation_phase1(trace)
-        return self._evaluation_tail(phase1, n_prefix, check_deadline, deadline_seconds)
+        # One budget (config.replay_time_limit_s) for the whole trace: what the alignment
+        # leaves is what the tail walk may use. Past it the trace is NOT replayable.
+        limit = self.config.replay_time_limit_s
+        started = time.monotonic()
+        try:
+            with _time_limit(limit):
+                phase1 = self._evaluation_phase1(trace)
+        except ReplayTimeLimitExceeded as exc:
+            return self._timed_out_outcome(str(exc), check_deadline)
+        remaining = None if limit is None else max(limit - (time.monotonic() - started), 0.001)
+        return self._evaluation_tail(phase1, n_prefix, check_deadline, deadline_seconds, time_limit_s=remaining)
+
+    @staticmethod
+    def _timed_out_outcome(reason: str, check_deadline: bool) -> EvaluationReplayOutcome:
+        """The outcome of a trace whose alignment hit the time limit: nothing reached, nothing known."""
+        return EvaluationReplayOutcome(
+            reached_end=False, matches_expected_final_state=False, error_step=None, error_reason=reason,
+            steps=[], split_marking=set(), split_attributes={}, final_marking=set(), final_attributes={},
+            expected_final_attributes={}, accumulated_duration_seconds=None,
+            within_deadline=False if check_deadline else None,
+            min_modeled_duration_seconds=0.0, max_modeled_duration_seconds=0.0, warnings=[reason],
+        )
 
     def replay_all_splits(
         self,
@@ -479,12 +560,23 @@ class TraceReplayer:
         """replay_evaluation_split for several cut points of the same trace,
         running Phase 1 (alignment + snapshots, the expensive part) once.
         Returns {n_prefix: outcome}, each outcome identical to what
-        replay_evaluation_split(trace, n_prefix, ...) returns."""
+        replay_evaluation_split(trace, n_prefix, ...) returns.
+
+        Time limit (config.replay_time_limit_s): a cut point whose tail walk takes longer is
+        returned as not reaching the end (its split state is still valid). If the alignment
+        itself takes longer, ReplayTimedOut is raised: there is no state for any cut
+        point, which the caller treats like any other failed replay of the trace."""
         # Phase 1 once for the whole trace; _evaluation_tail does not mutate
         # it, so each cut point can reuse it.
-        phase1 = self._evaluation_phase1(trace)
+        try:
+            with _time_limit(self.config.replay_time_limit_s):
+                phase1 = self._evaluation_phase1(trace)
+        except ReplayTimeLimitExceeded as exc:
+            raise ReplayTimedOut(str(exc)) from None
         return {
-            n: self._evaluation_tail(phase1, n, check_deadline, deadline_seconds)
+            n: self._evaluation_tail(
+                phase1, n, check_deadline, deadline_seconds, time_limit_s=self.config.replay_time_limit_s,
+            )
             for n in n_prefixes
         }
 
@@ -511,9 +603,13 @@ class TraceReplayer:
         n_prefix: int,
         check_deadline: bool,
         deadline_seconds: Optional[float],
+        time_limit_s: Optional[float] = None,
     ) -> EvaluationReplayOutcome:
         """Cut + Phase 2 of replay_evaluation_split, from a Phase 1 result
-        (never mutated, so it can be shared across cut points)."""
+        (never mutated, so it can be shared across cut points).
+
+        time_limit_s bounds the walk; when it runs out the tail counts as not reached
+        (reached_end False, no match), with the split state intact."""
         firing_steps, marking_at, raw_attributes_at, event_counts, phase1_warnings = phase1
         warnings = list(phase1_warnings)
 
@@ -560,13 +656,21 @@ class TraceReplayer:
         # makes replay_evaluation_split answer "does the domain correctly
         # explain the trace's real continuation from this point", not
         # "is the whole trace executable from the very start" (that's caso 1).
-        result = self._walk(
-            firing_steps[cut_idx:],
-            initial_marking=split_marking,
-            initial_attributes=split_attributes,
-            target_final_attributes=expected_final_attributes,
-            accumulate_duration=check_deadline,
-        )
+        try:
+            with _time_limit(time_limit_s):
+                result = self._walk(
+                    firing_steps[cut_idx:],
+                    initial_marking=split_marking,
+                    initial_attributes=split_attributes,
+                    target_final_attributes=expected_final_attributes,
+                    accumulate_duration=check_deadline,
+                )
+        except ReplayTimeLimitExceeded as exc:
+            result = _WalkResult(
+                reached_end=False, matches_target=False, error_step=None, error_reason=str(exc),
+                steps=[], final_marking=set(split_marking), final_attributes=dict(split_attributes),
+                accumulated_duration_seconds=None, warnings=[str(exc)],
+            )
         warnings.extend(result.warnings)
 
         # Per user confirmation: duration is counted from 0 at the cut, never

@@ -164,6 +164,7 @@ def suggest_config(trial: optuna.Trial, base_config: Optional[AnalysisConfig] = 
         lower_bound_prob_actions=base.lower_bound_prob_actions,
         replay_engine=base.replay_engine,
         replay_alignment_variant=base.replay_alignment_variant,
+        replay_time_limit_s=base.replay_time_limit_s,
         ignored_attributes=base.ignored_attributes,
         attr_precondition_min_frequency=base.attr_precondition_min_frequency,
         attr_precondition_min_firings=base.attr_precondition_min_firings,

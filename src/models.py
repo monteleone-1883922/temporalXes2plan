@@ -630,6 +630,13 @@ class AnalysisConfig:
     # Traces below this threshold are skipped and logged.
     replay_min_fitness: float = 0.8
 
+    # --- Time limit of the trace replayer ---
+    # Wall-clock seconds one trace may take in TraceReplayer (alignment, then the guarded walk
+    # with its backtracking). A trace that exceeds it counts as NOT replayable (it reached no
+    # end and matches nothing) instead of holding up the run: the backtracking over effect
+    # groups can take very long on a long, ambiguous trace. None = no limit.
+    replay_time_limit_s: Optional[float] = None
+
     # --- Replay engine (Fase 1: costruzione del PetriNetLog) ---
     # token_based_replay: greedy, fast, suited to whole-log replay (automatic pipeline).
     # alignments: optimal search (A*/Dijkstra), more expensive, needed when an exact

@@ -214,6 +214,7 @@ CUSTOM_BASE_CONFIG = AnalysisConfig(
     attr_precondition_min_firings=99,
     log_removed_effects=False,
     snapshot_dir="custom_snapshot_dir",
+    replay_time_limit_s=12.5,
 )
 
 
@@ -245,6 +246,8 @@ class TestBaseConfigOverride:
             assert cfg.attr_precondition_min_firings == CUSTOM_BASE_CONFIG.attr_precondition_min_firings
             assert cfg.log_removed_effects == CUSTOM_BASE_CONFIG.log_removed_effects
             assert cfg.snapshot_dir == CUSTOM_BASE_CONFIG.snapshot_dir
+            # the replayer's time limit must reach every trial (copied field by field)
+            assert cfg.replay_time_limit_s == 12.5
 
     def test_tuned_fields_still_vary(self, configs_with_base_config):
         # base_config must not leak into the 27 Optuna-tuned fields.

@@ -129,6 +129,7 @@ def build_model(
         keep_attributes=keep_list,
         noise_filter=cfg.noise_filter,
         unused_attribute_filter=cfg.unused_attribute_filter,
+        replay_time_limit_s=cfg.replay_time_limit_s,
     )
 
     # The Parser reads from file, so the TRAIN subset goes to a temp XES.

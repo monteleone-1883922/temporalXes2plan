@@ -139,6 +139,12 @@ class PaperEvalConfig:
     # of each attribute) and unused (written but never read by a guard).
     noise_filter: bool = True
     unused_attribute_filter: bool = True
+    # Wall-clock limit (seconds) of the trace replayer for ONE trace, in the model search and in
+    # the prefixes phase (see AnalysisConfig.replay_time_limit_s): a trace that takes longer counts
+    # as not replayable instead of holding up the run (decided on 2026-11-09 after the BPIC17
+    # model search spent over half an hour on one trial). None = no limit. Stored in the model's
+    # analysis_config.json, so the prefixes phase uses the same value. Provisional.
+    replay_time_limit_s: Optional[float] = 30.0
     # Phase "plan" (OPTIC on every instance). The values are starting points to
     # be reviewed per log before the definitive runs; *_by_log override them for one log.
     plan_timeout_s: int = 120  # wall-clock limit of one OPTIC run (2 min, decided 2026-11-09)

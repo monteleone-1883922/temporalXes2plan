@@ -63,3 +63,10 @@ class TestPaperDefaults:
 def test_only_bpic13_incidents_reads_its_lifecycle_as_a_status():
     # its lifecycle:transition holds sub-statuses; closed problems already has them in concept:name
     assert [n for n, spec in LOGS.items() if spec.status_as_activity] == ["bpic13_i"]
+
+
+def test_replay_time_limit_is_a_provisional_config_value_off_in_the_library_default():
+    from models import AnalysisConfig
+    from paper_eval.config import PaperEvalConfig
+    assert AnalysisConfig().replay_time_limit_s is None       # thesis and web: no limit
+    assert PaperEvalConfig().replay_time_limit_s == 30.0      # paper_eval: provisional

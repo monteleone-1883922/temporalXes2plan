@@ -15,7 +15,10 @@ from encoding.prepared_input import (
 )
 from models import ActionDurationStats, AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard
 from replay.trace_replayer import (
+    ReplayTimedOut,
+    ReplayTimeLimitExceeded,
     TraceReplayer,
+    _time_limit,
     _sum_modeled_duration,
     _sum_modeled_max_duration,
     _sum_modeled_min_duration,
@@ -774,3 +777,87 @@ class TestGuardsOfSilentTransitions:
         outcome = replayer.replay_evaluation_split(
             make_trace(make_event("A", flag="y"), make_event("B")), 1)
         assert not outcome.reached_end and "tau_1" in outcome.error_reason
+
+
+class TestTimeLimit:
+    """A trace that takes longer than config.replay_time_limit_s counts as NOT replayable."""
+
+    @staticmethod
+    def _slow(seconds):
+        import time
+
+        def slow(*args, **kwargs):
+            time.sleep(seconds)
+            raise AssertionError("the time limit should have interrupted this")
+        return slow
+
+    def _replayer(self, tau_seq_net, limit):
+        trans_a = PreparedTransition(activity_name="A", input_places=["p_in"], preconditions=[], effect_groups=[])
+        return _replayer(tau_seq_net, {"A": trans_a}, config=AnalysisConfig(replay_time_limit_s=limit))
+
+    def test_a_walk_over_the_limit_is_not_replayable_and_keeps_the_split_state(self, tau_seq_net, monkeypatch):
+        replayer = self._replayer(tau_seq_net, 0.2)
+        monkeypatch.setattr(TraceReplayer, "_walk", self._slow(3))
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A"), make_event("B")), 1)
+        assert outcome.reached_end is False and outcome.matches_expected_final_state is False
+        assert "time limit" in outcome.error_reason
+        assert outcome.split_marking == {"p_mid1"}  # the cut state is real, only the tail is unknown
+
+    def test_an_alignment_over_the_limit_gives_an_empty_not_replayable_outcome(self, tau_seq_net, monkeypatch):
+        replayer = self._replayer(tau_seq_net, 0.2)
+        monkeypatch.setattr(TraceReplayer, "_evaluation_phase1", self._slow(3))
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A"), make_event("B")), 1)
+        assert outcome.reached_end is False and "time limit" in outcome.error_reason
+        assert outcome.split_marking == set() and outcome.steps == []
+
+    def test_replay_all_splits_raises_a_normal_exception_when_the_alignment_is_too_slow(self, tau_seq_net, monkeypatch):
+        replayer = self._replayer(tau_seq_net, 0.2)
+        monkeypatch.setattr(TraceReplayer, "_evaluation_phase1", self._slow(3))
+        with pytest.raises(ReplayTimedOut):  # an Exception: callers that catch Exception see it
+            replayer.replay_all_splits(make_trace(make_event("A"), make_event("B")), [1])
+
+    def test_replay_all_splits_marks_only_the_slow_cut_as_not_reached(self, tau_seq_net, monkeypatch):
+        replayer = self._replayer(tau_seq_net, 0.2)
+        monkeypatch.setattr(TraceReplayer, "_walk", self._slow(3))
+        outcomes = replayer.replay_all_splits(make_trace(make_event("A"), make_event("B")), [1, 2])
+        assert set(outcomes) == {1, 2} and not any(o.reached_end for o in outcomes.values())
+
+    def test_a_full_trace_over_the_limit_is_not_replayable(self, tau_seq_net, monkeypatch):
+        replayer = self._replayer(tau_seq_net, 0.2)
+        monkeypatch.setattr(TraceReplayer, "_walk", self._slow(3))
+        outcome = replayer.replay_full_trace(make_trace(make_event("A"), make_event("B")))
+        assert outcome.is_replayable is False and "time limit" in outcome.error_reason
+
+    def test_without_a_limit_nothing_changes(self, tau_seq_net):
+        replayer = self._replayer(tau_seq_net, None)
+        assert replayer.replay_full_trace(make_trace(make_event("A"), make_event("B"))).is_replayable
+
+    def test_a_fast_trace_under_the_limit_is_unaffected_and_the_timer_is_cleared(self, tau_seq_net):
+        import signal
+        replayer = self._replayer(tau_seq_net, 5.0)
+        assert replayer.replay_full_trace(make_trace(make_event("A"), make_event("B"))).is_replayable
+        assert signal.getitimer(signal.ITIMER_REAL)[0] == 0  # no alarm left running
+
+    def test_the_limit_cannot_be_swallowed_by_an_except_exception(self):
+        import time
+        with pytest.raises(ReplayTimeLimitExceeded):
+            with _time_limit(0.1):
+                try:
+                    time.sleep(2)
+                except Exception:  # noqa: BLE001 -- what a library might do
+                    pass
+
+    def test_outside_the_main_thread_there_is_no_limit_and_no_crash(self):
+        import threading
+        import time
+        done = []
+
+        def work():
+            with _time_limit(0.05):
+                time.sleep(0.2)
+            done.append(True)
+
+        t = threading.Thread(target=work)
+        t.start()
+        t.join()
+        assert done == [True]

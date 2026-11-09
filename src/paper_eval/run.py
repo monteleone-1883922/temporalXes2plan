@@ -181,6 +181,9 @@ def main(argv=None) -> None:
                              "TRAIN (default: off, see PaperEvalConfig)")
     parser.add_argument("--unit-costs", action=argparse.BooleanOptionalAction, default=None,
                         help="model: every action of the PDDL domain costs 1 (default: on, see PaperEvalConfig)")
+    parser.add_argument("--replay-time-limit", type=float, default=None,
+                        help="model: seconds the replayer may spend on one trace before it counts as not "
+                             "replayable (0 = no limit; default: see PaperEvalConfig)")
     parser.add_argument("--deadline-variant-only", action=argparse.BooleanOptionalAction, default=None,
                         help="prefixes: deadline = variant mean - elapsed always (default: min with real remaining time)")
     # Options of the "plan" phase.
@@ -210,6 +213,8 @@ def main(argv=None) -> None:
         cfg.drop_spanning_train = args.drop_spanning
     if args.unit_costs is not None:
         cfg.unit_costs = args.unit_costs
+    if args.replay_time_limit is not None:
+        cfg.replay_time_limit_s = args.replay_time_limit if args.replay_time_limit > 0 else None
     if args.deadline_variant_only is not None:
         cfg.deadline_variant_only = args.deadline_variant_only
     paths = Paths(args.log, cfg)
