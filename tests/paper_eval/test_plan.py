@@ -65,7 +65,8 @@ class FakeRunner:
         return self.results.get(len(self.calls), _result())
 
 
-SETTINGS = {"timeout_s": 60, "memory_mb": 4000, "metric": pl.DEFAULT_METRIC, "mode": "first_plan", "stop_at_first": True,
+_CFG = PaperEvalConfig()  # the limits are the config defaults, whatever their current value
+SETTINGS = {"timeout_s": _CFG.plan_timeout_s, "memory_mb": _CFG.plan_memory_mb, "metric": pl.DEFAULT_METRIC, "mode": "first_plan", "stop_at_first": True,
             "deadline_variant_only": False}
 
 
@@ -98,8 +99,8 @@ class TestPlanInstance:
         assert row["states_evaluated"] == 7 and row["cpu_s"] == 0.12
         assert row["makespan"] == 2.0 and row["makespan_s"] == pytest.approx(2.0 * SCALE)  # back to real seconds
         assert row["plan_actions"] == ["a"] and row["plan_length"] == 1
-        assert (row["timeout_s"], row["memory_mb"]) == (60, 4000)
-        assert runner.calls[0]["stop_at_first"] is True and runner.calls[0]["timeout"] == 60
+        assert (row["timeout_s"], row["memory_mb"]) == (_CFG.plan_timeout_s, _CFG.plan_memory_mb)
+        assert runner.calls[0]["stop_at_first"] is True and runner.calls[0]["timeout"] == _CFG.plan_timeout_s
 
     def test_failed_run_keeps_its_status_and_has_no_plan_fields(self, tmp_path):
         runner = FakeRunner({1: _result("timeout")})
@@ -274,9 +275,9 @@ class TestRunPlan:
 class TestConfigPerLog:
     def test_defaults(self):
         cfg = PaperEvalConfig()
-        assert (cfg.timeout_for("sepsis"), cfg.memory_for("sepsis")) == (60, 4000)
+        assert (cfg.timeout_for("sepsis"), cfg.memory_for("sepsis")) == (cfg.plan_timeout_s, cfg.plan_memory_mb)
 
     def test_overrides_apply_to_one_log_only(self):
         cfg = PaperEvalConfig(plan_timeout_by_log={"bpic17": 300}, plan_memory_by_log={"bpic17": 8000})
         assert (cfg.timeout_for("bpic17"), cfg.memory_for("bpic17")) == (300, 8000)
-        assert (cfg.timeout_for("sepsis"), cfg.memory_for("sepsis")) == (60, 4000)
+        assert (cfg.timeout_for("sepsis"), cfg.memory_for("sepsis")) == (cfg.plan_timeout_s, cfg.plan_memory_mb)

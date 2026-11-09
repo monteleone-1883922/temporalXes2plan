@@ -28,6 +28,13 @@ def test_factory_is_a_local_log_without_its_event_attributes():
     assert [s.name for s in LOGS.values() if s.local] == ["factory"]
 
 
+def test_rq1_run_parameters_decided_on_2026_11_09():
+    from paper_eval.config import PaperEvalConfig
+    cfg = PaperEvalConfig()
+    assert cfg.plan_timeout_s == 120 and cfg.plan_memory_mb == 12288  # 2 minutes, 12 GB
+    assert cfg.search_n_trials == 100 and cfg.unit_costs is True and cfg.seed == 42
+
+
 class TestPaperDefaults:
     """The defaults follow the paper (§4.1 POWL, §5.1 split without spanning cases)."""
 

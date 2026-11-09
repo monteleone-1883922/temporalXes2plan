@@ -342,6 +342,10 @@ class DecisionMiner:
 
         Detection rules for column types (applied to each column of X):
         - dtype bool, or binary values in {0, 1} → boolean (cast to int, no dummies)
+        - dtype object whose non-missing values are all Python bools (a boolean
+          attribute with missing values: pandas stores True/False/NaN as object)
+          → boolean too, like the attribute catalog says (see
+          LogProcessor.categorize_attributes); missing counts as False
         - dtype object / string → categorical (one-hot via get_dummies)
         - numeric (float/int, not binary) → left as-is; raw numerics produce no
           PDDL conditions and are excluded from guard extraction
@@ -374,6 +378,11 @@ class DecisionMiner:
                 continue
             if pd.api.types.is_bool_dtype(X[col]):
                 X = X.assign(**{col: X[col].fillna(False).astype(int)})
+                bool_cols.add(col)
+            elif X[col].dtype == object and all(isinstance(v, (bool, np.bool_)) for v in series):
+                # Without this the column is read as categorical and the guard comes out as
+                # Guard(attr, "True"), while the PDDL schema declares attr as boolean.
+                X = X.assign(**{col: X[col].map(lambda v: int(bool(v)) if v is not None and v == v else 0)})
                 bool_cols.add(col)
             elif pd.api.types.is_numeric_dtype(X[col]):
                 unique_vals = set(series.unique())

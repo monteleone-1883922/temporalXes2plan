@@ -127,7 +127,7 @@ class PaperEvalConfig:
     deadline_variant_only: bool = False
     buckets_by_log: Dict[str, List[Bucket]] = field(default_factory=dict)
     seed: int = 42  # TPE seed
-    search_n_trials: int = 30  # TPE trials
+    search_n_trials: int = 100  # TPE trials (30 before 2026-11-09)
     # Rung 0 of the TPE search: trials where one transition's effect groups pass
     # this are rejected before they can exhaust memory (None = no limit).
     max_effect_groups: Optional[int] = 4096
@@ -141,8 +141,8 @@ class PaperEvalConfig:
     unused_attribute_filter: bool = True
     # Phase "plan" (OPTIC on every instance). The values are starting points to
     # be reviewed per log before the definitive runs; *_by_log override them for one log.
-    plan_timeout_s: int = 60  # wall-clock limit of one OPTIC run
-    plan_memory_mb: int = 4000  # virtual memory limit of one OPTIC run (ulimit -v)
+    plan_timeout_s: int = 120  # wall-clock limit of one OPTIC run (2 min, decided 2026-11-09)
+    plan_memory_mb: int = 12288  # virtual memory limit of one OPTIC run (ulimit -v), 12 GB
     plan_timeout_by_log: Dict[str, int] = field(default_factory=dict)
     plan_memory_by_log: Dict[str, int] = field(default_factory=dict)
     # Phase "rq2" (OPTIC optimising total-time, runs only on the factory log). Provisional,
@@ -152,7 +152,7 @@ class PaperEvalConfig:
     # Every action of the PDDL domain costs exactly 1 (instead of the -log(probability)
     # costs of the paper's §4.3 encoding): what the RQ1 tests use. It changes domain.pddl,
     # so it is recorded in model_meta.json and a model built with the other value is refused.
-    unit_costs: bool = False
+    unit_costs: bool = True  # on again for the RQ1 runs (2026-11-09)
     # POWL, as in the paper (§4.1): sound models by construction and fewer silent
     # transitions than the Inductive Miner, which keeps the planning domain small.
     discovery_algorithm: str = "powl"

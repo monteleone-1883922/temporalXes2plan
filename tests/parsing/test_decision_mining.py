@@ -818,6 +818,30 @@ class TestTrainAndExtract:
         import pandas as pd
         return pd.DataFrame(rows), pd.Series(labels, dtype=str)
 
+    def test_boolean_column_with_missing_values_gives_boolean_guards(self):
+        # True/False/NaN is stored by pandas as dtype object. It used to be read as a categorical
+        # column, giving Guard("urgent", "True"), while the PDDL schema declares urgent as boolean
+        # (the attribute catalog says so) and the domain did not even parse.
+        import numpy as np
+        import pandas as pd
+        urgent = pd.Series([True, False, np.nan, False] * 10, dtype=object)
+        X = pd.DataFrame({"urgent": urgent})
+        y = pd.Series(["b" if v is True else "c" for v in urgent], dtype=str)
+        assert X["urgent"].dtype == object
+        guards, accuracy = self.m._train_and_extract(X, y)
+        assert accuracy == 1.0
+        assert guards["b"] == [[Guard(attribute="urgent", value=None, negated=False)]]
+        assert guards["c"] == [[Guard(attribute="urgent", value=None, negated=True)]]
+        assert all(g.value is None for clauses in guards.values() for clause in clauses for g in clause)
+
+    def test_object_column_that_mixes_bools_and_strings_stays_categorical(self):
+        import pandas as pd
+        X = pd.DataFrame({"flag": pd.Series([True, "maybe", False, "maybe"] * 10, dtype=object)})
+        y = pd.Series(["b" if v == "maybe" else "c" for v in X["flag"]], dtype=str)
+        guards, _ = self.m._train_and_extract(X, y)
+        values = {g.value for clauses in guards.values() for clause in clauses for g in clause}
+        assert values and values <= {"maybe", "True", "False"} and None not in values
+
     def test_returns_dict_and_float(self):
         X, y = self._make_df(
             [{"risk": "high"}, {"risk": "low"}],
