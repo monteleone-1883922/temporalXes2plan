@@ -75,7 +75,7 @@ values.
 | Model selection | Hyperparameter search (TPE, successive halving, exact early stopping of replays, feasibility gate on effect-group blow-up) | `src/network_search/` |
 | PDDL encoding | PDDL 3.1 domain with durative actions, `total-cost` and `deadline_ok`; PDDL problems from a state, a target and a deadline | `src/encoding/` |
 | Planning | OPTIC (temporal, partial-order) and Fast Downward (classical); timeouts, memory limits, a timed run that splits grounding from planning | `src/planning/` |
-| Replay and validation | Replay of traces on the net and validation of planner plans against the domain | `src/replay/` |
+| Replay and validation | Replay of traces on the net (guarded walk over the effect groups, with a per-attribute relaxation that proves unexplainable tails impossible without searching, bulk guard evaluation and a per-trace time limit) and validation of planner plans against the domain | `src/replay/` |
 | Web interface | Upload and validate a log, run the pipeline as a background job, inspect and correct the discovered net, pose queries from a prefix | `src/web/` |
 | Evaluation | Two evaluation harnesses (see below) and SQL-queryable results (DuckDB) | `src/evaluation/`, `src/paper_eval/` |
 
@@ -94,7 +94,7 @@ temporalXes2plan/
 │   ├── parsing/                 # log loading, discovery, decision mining, discretisation, durations
 │   ├── encoding/                # PDDL model, domain and problem builders, guard/effect encoders
 │   ├── network_search/          # TPE model selection: search space, scoring, early stopping
-│   ├── replay/                  # trace replayer (alignment + walk) and plan replayer
+│   ├── replay/                  # trace replayer (alignment + walk), per-attribute relaxation, plan replayer
 │   ├── planning/                # OPTIC and Fast Downward wrappers, planner dispatcher and config
 │   ├── web/                     # Flask application, REST API, job tracker, templates, static files
 │   ├── evaluation/              # first evaluation harness (Q1/Q2/Q3 queries on public logs)
@@ -265,8 +265,9 @@ PYTHONPATH=src python -m paper_eval.run --log sepsis --phase plan    # OPTIC on 
 | `query` | SQL over all results with DuckDB | printed table |
 
 Useful options: `--force` recomputes a phase; `--unit-costs` / `--no-unit-costs` (model phase) gives every PDDL action cost 1 instead of the −log(probability) costs (default: `PaperEvalConfig.unit_costs`); `--limit N`, `--timeout S`, `--memory-mb M` and
-`--goal completion|deadline|all` control `plan`; `--noise-filter` / `--unused-filter` switch the two
-automatic attribute filters.
+`--goal completion|deadline|all` control `plan` (which logs one line per instance, with progress, status and times); `--noise-filter` / `--unused-filter` switch the two
+automatic attribute filters; `--replay-time-limit S` (model and prefixes phases) is the time one trace may take in the
+replayer before it counts as not replayable (default 150 s, 0 = no limit).
 
 **Querying the results.** Every result is a table in an in-memory DuckDB database (`paper_eval/query.py`):
 `runs`, `logs`, `case_split`, `models`, `search_trials`, `attributes`, `transition_durations`, `prefixes`,
@@ -287,6 +288,18 @@ and, as an interactive diagram, in [`docs/paper_eval_er.html`](docs/paper_eval_e
 **Reproducibility.** The launcher fixes `PYTHONHASHSEED`, the TPE is seeded, and two runs of `model` produce
 identical files; `plan` writes a line per instance as soon as it is done (and logs one line per instance, with progress, status and times, to the console and to `results/paper_eval/<log>/run.log`) and resumes where it stopped, and it
 refuses to mix results made with different settings (use `--force` to start over).
+
+**Replay of the tail.** `model` and `prefixes` replay traces on the net: after the alignment, a walk over the fixed
+sequence of transitions checks the XOR and effect-group guards and must end in the observed final attribute values;
+`reached_end` is true when some path respecting the guards reaches the end, and a trace is fully replayable when one
+also matches the final state. On a trace the model cannot explain, trying every effect group of an activity with
+thousands of them explodes, so the walk is pruned by a per-attribute relaxation (`src/replay/relaxation.py`): for each
+attribute alone it computes backwards from which values the observed final value is still reachable under the guards
+projected on that attribute. It is a necessary condition, so it only cuts what cannot succeed and the verdicts do not
+change (`AnalysisConfig.replay_relaxation`, on by default, switches it off for comparisons). The guards of activities
+with many groups are evaluated in bulk, and the per-trace time limit above is the last safety net. Attributes that
+describe the type of each event and that the replay cannot reproduce can be left out per log (`LogSpec.ignore_attributes`;
+BPIC17 ignores `Action` and `EventOrigin`).
 
 **RQ2.** The `rq2` phase runs OPTIC without `-N`, on a domain without action costs, with the metric
 `total-time` and no deadline, so that the plan is the fastest completion OPTIC finds. Every plan OPTIC prints is
@@ -328,7 +341,7 @@ integration` is given (OPTIC-dependent ones also skip if the binary is not built
 | `tests/parsing/` | log loading and validation, preprocessing, discovery (including canonical net form), replay, decision mining, discretisation, effect analysis, probabilities, durations, attribute filter, the parser facade |
 | `tests/encoding/` | PDDL model rendering, guard and effect encoders, prepared input, domain and problem builders |
 | `tests/network_search/` | search space, score composition, exact early stopping, metrics, the search runner |
-| `tests/replay/` | trace replayer (alignment and walk) and plan replayer |
+| `tests/replay/` | trace replayer (alignment, guarded walk, boolean values, time limit), the per-attribute relaxation (soundness against an exhaustive search on random models) and plan replayer |
 | `tests/planning/` | OPTIC wrapper (output parsing, timeouts, timed runs with a fake planner, duration semantics), planner configuration and dispatcher |
 | `tests/evaluation/` | evaluation API, log downloader, query builder, metrics, retry runner, report generator, test-case selector, trace sampler |
 | `tests/paper_eval/` | configuration, preparation, splits (including spanning cases), prefixes and deduplication, model tables and statistics, the plan phase with a fake OPTIC, the report, the DuckDB tables, and an end-to-end run on a small synthetic log |

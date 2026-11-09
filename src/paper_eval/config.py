@@ -76,8 +76,13 @@ LOGS: Dict[str, LogSpec] = {
         LogSpec("bpic13_i", "bpi_challenge_2013_incidents.xes",
                 "6ec2136c607648608655802486df97a866f351668751b7ecbca51e1f8715d522", False,
                 status_as_activity=True),
+        # Action and EventOrigin describe the TYPE of each event (a function of the activity) and
+        # change at every event; the replay cannot reproduce them from the modelled effects, so the
+        # guards learned on them never hold in the replay (0 of 120 validation traces replayable;
+        # 92 of 120 once they are ignored) and they double the effect groups of O_Create Offer.
         LogSpec("bpic17", "BPI_2017.xes",
-                "183c5e5189282779c811c78c33ff936351b3dd201165d612211fc220936f8249", True),
+                "183c5e5189282779c811c78c33ff936351b3dd201165d612211fc220936f8249", True,
+                ignore_attributes=("Action", "EventOrigin")),
         LogSpec("helpdesk", "Helpdesk.xes",
                 "daa36a75933e4c032a4f21ce6e4f583563f65cb79ce0d3976b8b2c17c98a0a79", False),
         # The learning-factory log (RQ2 runs only on it). Provided by hand. Its event

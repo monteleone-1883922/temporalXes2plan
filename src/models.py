@@ -636,6 +636,10 @@ class AnalysisConfig:
     # end and matches nothing) instead of holding up the run: the backtracking over effect
     # groups can take very long on a long, ambiguous trace. None = no limit.
     replay_time_limit_s: Optional[float] = None
+    # Prune the replayer's search with the per-attribute relaxation (replay.relaxation): a necessary
+    # condition that proves most unexplainable traces impossible in milliseconds. It only prunes, so
+    # replayability verdicts do not depend on it; False runs the plain search (for comparisons).
+    replay_relaxation: bool = True
 
     # --- Replay engine (Fase 1: costruzione del PetriNetLog) ---
     # token_based_replay: greedy, fast, suited to whole-log replay (automatic pipeline).

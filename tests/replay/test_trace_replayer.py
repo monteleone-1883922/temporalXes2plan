@@ -861,3 +861,57 @@ class TestTimeLimit:
         t.start()
         t.join()
         assert done == [True]
+
+
+_BOOL_CATALOG = {
+    "paid": AttributeCatalogEntry(attribute_type="boolean", possible_values=set(), bin_boundaries=None),
+}
+
+
+class TestBooleanValuesAssignedByGroups:
+    """The model stores the value a group assigns to a boolean as a Python bool, the replay state
+    and the observed events use "true"/"false". They were never equal, so a boolean written
+    INSIDE the replayed tail could not match the final state and its guards never held (BPIC17's
+    Accepted/Selected: full replayability 0 on every trial, and an exhaustive search per trace)."""
+
+    @staticmethod
+    def _model(tau_seq_net, assigned, guard_on_b=None):
+        trans_a = PreparedTransition(
+            activity_name="A", input_places=["p_in"], preconditions=[],
+            effect_groups=[PreparedEffectGroup(assignments=[("paid", assigned)], guard=[], probability=1.0)],
+        )
+        groups_b = [PreparedEffectGroup(assignments=[], guard=guard_on_b or [], probability=1.0)]
+        trans_b = PreparedTransition(activity_name="B", input_places=["p_mid2"], preconditions=[], effect_groups=groups_b)
+        return _replayer(tau_seq_net, {"A": trans_a, "B": trans_b}, catalog=_BOOL_CATALOG)
+
+    def test_a_boolean_set_by_a_group_matches_the_observed_final_value(self, tau_seq_net):
+        replayer = self._model(tau_seq_net, True)
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A", paid=True), make_event("B")), 0)
+        assert outcome.reached_end and outcome.matches_expected_final_state
+        assert outcome.final_attributes["paid"] == "true"  # the replay's own value space
+
+    def test_false_is_matched_too(self, tau_seq_net):
+        replayer = self._model(tau_seq_net, False)
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A", paid=False), make_event("B")), 0)
+        assert outcome.matches_expected_final_state and outcome.final_attributes["paid"] == "false"
+
+    def test_a_wrong_boolean_still_does_not_match(self, tau_seq_net):
+        replayer = self._model(tau_seq_net, False)
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A", paid=True), make_event("B")), 0)
+        assert outcome.reached_end and not outcome.matches_expected_final_state
+
+    def test_a_positive_boolean_guard_holds_after_the_group_set_it(self, tau_seq_net):
+        replayer = self._model(tau_seq_net, True, guard_on_b=[[Guard(attribute="paid", value=None, negated=False)]])
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A", paid=True), make_event("B")), 0)
+        assert outcome.reached_end
+
+    def test_a_negated_boolean_guard_fails_when_the_group_set_true(self, tau_seq_net):
+        replayer = self._model(tau_seq_net, True, guard_on_b=[[Guard(attribute="paid", value=None, negated=True)]])
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A", paid=True), make_event("B")), 0)
+        assert not outcome.reached_end and "B" in outcome.error_reason
+
+    def test_the_model_itself_is_left_untouched(self, tau_seq_net):
+        replayer = self._model(tau_seq_net, True)
+        replayer.replay_evaluation_split(make_trace(make_event("A", paid=True), make_event("B")), 0)
+        original = replayer.prepared.transitions["A"].effect_groups[0].assignments
+        assert original == [("paid", True)]
