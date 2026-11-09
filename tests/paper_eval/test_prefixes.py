@@ -174,6 +174,19 @@ class TestDeadlineGoal:
         assert case.deadline_variant_s == pytest.approx(2 * DAY)
 
 
+    def test_every_length_is_its_own_bucket_by_default(self):
+        from paper_eval.config import bucket_label
+        assert DEFAULT_BUCKETS == []
+        assert [bucket_label(k, DEFAULT_BUCKETS) for k in (2, 10, 11, 37, 184)] == ["2", "10", "11", "37", "184"]
+        trace = _trace("c1", "ABCDE", [0, 1, 2, 3, 4])
+        recs = _completion(px.prefix_records_for_trace(trace, _replayer(), {}, DEFAULT_BUCKETS, 2))
+        assert [r.bucket for r in recs] == ["2", "3", "4"]
+
+    def test_ranges_still_work_and_leave_uncovered_lengths_without_bucket(self):
+        from paper_eval.config import bucket_label
+        ranges = [(2, 3), (11, 15), (21, None)]
+        assert [bucket_label(k, ranges) for k in (3, 5, 13, 30)] == ["2-3", None, "11-15", "21+"]
+
     def test_buckets_configurable(self):
         trace = _trace("c1", "ABCDEF", [0, 1, 2, 3, 4, 5])
         buckets = [(2, 3), (4, None)]

@@ -94,7 +94,9 @@ LOGS: Dict[str, LogSpec] = {
 # Inclusive (low, high) prefix-length ranges; high=None means open-ended.
 Bucket = Tuple[int, Optional[int]]
 
-DEFAULT_BUCKETS: List[Bucket] = [(k, k) for k in range(2, 11)] + [(11, 15), (16, 20), (21, None)]
+# No ranges: every prefix length k is its own bucket ("2", "3", ..., "37"), decided on
+# 2026-11-09. A log can still group lengths with buckets_by_log (see bucket_label).
+DEFAULT_BUCKETS: List[Bucket] = []
 
 
 @dataclass
@@ -171,10 +173,13 @@ class PaperEvalConfig:
 
 
 def bucket_label(k: int, buckets: List[Bucket]) -> Optional[str]:
-    """Label of the bucket containing prefix length k ("5", "11-15", "21+"),
-    or None when no bucket covers k."""
-    # First matching bucket wins. E.g. with DEFAULT_BUCKETS: 5 -> "5",
-    # 13 -> "11-15", 30 -> "21+", 1 -> None.
+    """Label of the bucket containing prefix length k, or None when no bucket covers k.
+
+    With no buckets at all (DEFAULT_BUCKETS) every length is its own bucket: 5 -> "5".
+    With ranges, e.g. [(2, 3), (11, 15), (21, None)]: 3 -> "2-3", 13 -> "11-15",
+    30 -> "21+", 5 -> None; the first matching range wins."""
+    if not buckets:
+        return str(k)
     for low, high in buckets:
         if k >= low and (high is None or k <= high):
             if high is None:
