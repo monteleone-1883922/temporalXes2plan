@@ -35,6 +35,12 @@ TauSplitPoint/_backtrack mechanism, generalized to effect-group choice. For
 replay_evaluation_split, a mismatch against the target final state at the end
 of the walk is treated exactly like any other block: it triggers the same
 backtrack to the next untried candidate.
+
+Two rules keep the replay coherent with the PDDL domain and with how the guards were mined:
+the attribute state starts with "none" for every attribute the model has a "none" value for
+(_unwritten_attributes: guards such as "Diagnose = none" mean "not written yet"), and the XOR
+guard of a silent transition is checked like that of a labeled one (the PDDL has it as a
+precondition of the tau action).
 """
 import dataclasses
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
@@ -397,7 +403,7 @@ class TraceReplayer:
         )
         steps = execution.steps
         initial_marking = {p.name for p in model.initial_marking}
-        initial_attributes: Dict[str, str] = {}
+        initial_attributes: Dict[str, str] = self._unwritten_attributes()
         snapshot_warnings: List[str] = []
         if self.config.initial_event_as_input:
             # Start right after the first visible event, with the attributes
@@ -608,6 +614,21 @@ class TraceReplayer:
         combined_sop, _unguarded_prob = _combine_xor_branches(branches)
         return combined_sop
 
+    def _unwritten_attributes(self) -> Dict[str, str]:
+        """State before any event: every categorical or numerical attribute the model knows a
+        "none" value for (that is, some guard or effect talks about it) is "none".
+
+        This is how the decision trees were trained (log_preprocessor seeds the running state
+        with "none"), so guards like "Diagnose = none" only mean something if the replay and the
+        planning problem start the same way. Boolean attributes have no "none": false is
+        the absence of (attr_true)."""
+        return {
+            attr: "none"
+            for attr, entry in self.prepared.attribute_catalog.items()
+            if entry.attribute_type in ("categorical", "numerical")
+            and "none" in {str(v) for v in entry.possible_values}
+        }
+
     def _build_snapshots(
         self, firing_steps: List[FiringStep],
     ) -> Tuple[List[Set[str]], List[Dict[str, str]], List[int], List[str]]:
@@ -633,7 +654,10 @@ class TraceReplayer:
         # state" pattern as PartialTraceReplayer's acc/attrs_at. This is
         # deliberately NOT pddl_state: no guard or effect group is consulted
         # here, only what the log itself says happened.
-        acc: Dict[str, str] = {}
+        # It starts like the mining did (log_preprocessor): an attribute not
+        # written yet is "none", so a guard "attribute = none" holds until the
+        # first event that writes it.
+        acc: Dict[str, str] = self._unwritten_attributes()
 
         marking_at: List[Set[str]] = [set(marking)]
         raw_attributes_at: List[Dict[str, str]] = [dict(acc)]
@@ -746,8 +770,14 @@ class TraceReplayer:
                 self._advance_marking(marking, step)
 
                 if step.is_tau:
-                    # No axis-A/B/C check for tau (see _walk's docstring):
-                    # nothing to verify, nothing to apply.
+                    # A silent transition that is the branch of an XOR split has the
+                    # same guard in the PDDL domain (its preconditions), so it is checked
+                    # here too: otherwise a tail the planner cannot follow would count as
+                    # replayable. There is nothing to apply (a tau writes no attribute).
+                    if not sop_holds(self._xor_guard_for(step.activity_name), pddl_state):
+                        blocked_step = step_idx
+                        blocked_reason = self._block_reason(step.activity_name, False, [])
+                        break
                     steps.append(ReplayStep(step.activity_name, is_tau=True, attributes_applied={}))
                     if duration_total is not None:
                         duration_total += step.duration_seconds or 0.0

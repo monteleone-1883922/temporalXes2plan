@@ -86,15 +86,17 @@ def activity_of_action(model: LoadedModel) -> Dict[str, Optional[str]]:
 
     OPTIC prints the sanitised names of the domain ("execute_act_one" for the action
     "execute_Act One"), so the keys are sanitised. An action is a variant of an activity
-    (variant_map) or the activity itself; anything that is not an activity of the net
-    is a silent transition."""
-    visible = set(model.prepared.transitions)
+    (variant_map) or the activity itself; the silent transitions map to None. They are
+    not told apart by prepared.transitions (a silent transition that carries guards is in
+    it, with variants, like tau_15_v0) but by the graph: its node has type "silent"."""
+    silent = {n.label for n in model.prepared.nodes if n.type == "silent"}
+    visible = set(model.prepared.transitions) - silent
     mapping: Dict[str, Optional[str]] = {}
     for action in model.domain.actions:
         raw = action.name
         info = model.variant_map.get(raw)
         if info is not None:
-            activity: Optional[str] = info.activity_name
+            activity: Optional[str] = info.activity_name if info.activity_name in visible else None
         else:
             base = raw[len("execute_"):] if raw.startswith("execute_") else raw
             activity = base if base in visible else None

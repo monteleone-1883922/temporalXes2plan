@@ -268,3 +268,31 @@ def test_with_the_real_optic_the_fastest_plan_is_saved_with_the_log_activities(b
     visible = {s["activity"] for s in steps if not s["is_tau"]}
     assert visible <= {"A", "B", "C", "D", "E"} and visible
     assert all(s["start_s"] >= 0 and s["duration_s"] > 0 for s in steps if not s["is_tau"])
+
+
+def test_a_silent_transition_with_guards_is_not_an_activity():
+    """A silent transition that has XOR guards sits in prepared.transitions with variants
+    (execute_tau_15_v0, ...): it must still map to None, not to the activity "tau_15"."""
+    from types import SimpleNamespace
+
+    from encoding.prepared_input import GraphNode, PreparedDomainInput, PreparedTransition, VariantInfo
+
+    def transition(name):
+        return PreparedTransition(activity_name=name, input_places=[], preconditions=[], effect_groups=[])
+
+    prepared = PreparedDomainInput(
+        transitions={"A": transition("A"), "tau_15": transition("tau_15"), "tau_2": transition("tau_2")},
+        xor_branches={}, attribute_catalog={},
+        nodes=[GraphNode("t_a", "transition", "A"), GraphNode("t_15", "silent", "tau_15"),
+               GraphNode("t_2", "silent", "tau_2")],
+    )
+    model = SimpleNamespace(
+        prepared=prepared,
+        domain=SimpleNamespace(actions=[SimpleNamespace(name=n) for n in (
+            "execute_A", "execute_tau_15_v0", "execute_tau_15_v1", "execute_tau_2")]),
+        variant_map={n: VariantInfo(activity_name="tau_15", preconditions=[], effect_group=None)
+                     for n in ("execute_tau_15_v0", "execute_tau_15_v1")},
+    )
+    assert rq2.activity_of_action(model) == {
+        "execute_a": "A", "execute_tau_15_v0": None, "execute_tau_15_v1": None, "execute_tau_2": None,
+    }

@@ -10,7 +10,9 @@ import pytest
 
 from tests.helpers import make_event, make_trace
 
-from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup, PreparedTransition
+from encoding.prepared_input import (
+    PreparedDomainInput, PreparedEffectGroup, PreparedTransition, PreparedXorBranch,
+)
 from models import ActionDurationStats, AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard
 from replay.trace_replayer import (
     TraceReplayer,
@@ -692,3 +694,83 @@ class TestInitialEventAsInput:
         assert outcome.is_replayable
         assert outcome.final_attributes == {"flag": "x", "risk": "high"}
         assert outcome.final_marking == {"p_out"}
+
+
+_NONE_CATALOG = {
+    "flag": AttributeCatalogEntry(attribute_type="categorical", possible_values={"x", "y", "none"}, bin_boundaries=None),
+    "urgent": AttributeCatalogEntry(attribute_type="boolean", possible_values=set(), bin_boundaries=None),
+}
+
+
+def _replayer_with_tau_guard(tau_seq_net, guard, catalog=None, a_writes=None):
+    """tau_seq_net: A -> tau_1 -> B. tau_1 is a branch of an XOR split guarded by `guard`;
+    A writes flag=`a_writes` when given (the walk only moves the attribute state with effect groups)."""
+    groups = [PreparedEffectGroup(assignments=[("flag", a_writes)], guard=[], probability=1.0)] if a_writes else []
+    prepared = PreparedDomainInput(
+        transitions={
+            "A": PreparedTransition(activity_name="A", input_places=["p_in"], preconditions=[], effect_groups=groups),
+            "B": PreparedTransition(activity_name="B", input_places=["p_mid2"], preconditions=[], effect_groups=[]),
+        },
+        xor_branches={"p_mid1": [PreparedXorBranch(activity_name="tau_1", conditions=guard, probability=0.5)]},
+        attribute_catalog=catalog or _NONE_CATALOG, nodes=[], edges=[],
+    )
+    return TraceReplayer(prepared, tau_seq_net, AnalysisConfig())
+
+
+class TestAttributesNotWrittenYetAreNone:
+    """The decision trees were trained with every categorical or numerical attribute at "none"
+    until an event writes it (log_preprocessor), so the replay starts the same way. Without it
+    a guard such as "flag = none" could never hold for an attribute the log does not write."""
+
+    def test_the_snapshot_starts_with_none_for_the_attributes_that_have_a_none_value(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, {}, catalog=_NONE_CATALOG)
+        snapshot = replayer.replay_partial_trace(make_trace(make_event("A")))
+        assert snapshot.attributes == {"flag": "none"}  # urgent is boolean: no none; absent = false
+
+    def test_a_written_value_replaces_none(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, {}, catalog=_NONE_CATALOG)
+        snapshot = replayer.replay_partial_trace(make_trace(make_event("A", flag="y")))
+        assert snapshot.attributes == {"flag": "y"}
+
+    def test_attributes_without_a_none_value_are_not_seeded(self, tau_seq_net):
+        # the default test catalog has no "none": nothing is invented
+        replayer = _replayer(tau_seq_net, {})
+        assert replayer.replay_partial_trace(make_trace(make_event("A"))).attributes == {}
+
+    def test_the_evaluation_split_state_carries_the_none(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, {}, catalog=_NONE_CATALOG)
+        outcome = replayer.replay_evaluation_split(make_trace(make_event("A"), make_event("B")), 1)
+        assert outcome.split_attributes == {"flag": "none"}
+        assert outcome.expected_final_attributes == {"flag": "none"}
+        assert outcome.matches_expected_final_state
+
+    def test_a_guard_on_none_holds_for_an_attribute_the_log_never_writes(self, tau_seq_net):
+        replayer = _replayer_with_tau_guard(tau_seq_net, [[Guard(attribute="flag", value="none")]])
+        outcome = replayer.replay_full_trace(make_trace(make_event("A"), make_event("B")))
+        assert outcome.is_replayable
+
+
+class TestGuardsOfSilentTransitions:
+    """The PDDL domain gives a tau that is a branch of an XOR split the same guard as a labeled
+    branch, so the replay must check it too: a tail the planner cannot follow is not replayable."""
+
+    def test_a_tau_whose_guard_holds_is_replayable(self, tau_seq_net):
+        replayer = _replayer_with_tau_guard(tau_seq_net, [[Guard(attribute="flag", value="x")]], a_writes="x")
+        outcome = replayer.replay_full_trace(make_trace(make_event("A", flag="x"), make_event("B")))
+        assert outcome.is_replayable
+
+    def test_a_tau_whose_guard_fails_blocks_the_replay(self, tau_seq_net):
+        replayer = _replayer_with_tau_guard(tau_seq_net, [[Guard(attribute="flag", value="x")]], a_writes="y")
+        outcome = replayer.replay_full_trace(make_trace(make_event("A", flag="y"), make_event("B")))
+        assert not outcome.is_replayable
+        assert "tau_1" in outcome.error_reason
+
+    def test_a_tau_without_a_guard_is_never_blocked(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, {})
+        assert replayer.replay_full_trace(make_trace(make_event("A"), make_event("B"))).is_replayable
+
+    def test_the_evaluation_split_reports_a_blocked_tail(self, tau_seq_net):
+        replayer = _replayer_with_tau_guard(tau_seq_net, [[Guard(attribute="flag", value="x")]])
+        outcome = replayer.replay_evaluation_split(
+            make_trace(make_event("A", flag="y"), make_event("B")), 1)
+        assert not outcome.reached_end and "tau_1" in outcome.error_reason
