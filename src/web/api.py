@@ -463,7 +463,14 @@ def build_problem(config_name: str):
         init_places = []
     init_effects = body.get("init", [])
     goal_sop = body.get("goal", [])
-    metric = body.get("metric") or None   # "minimize_cost" | "minimize_time" | None
+    metric = body.get("metric") or None   # "minimize_cost" | "minimize_time" | "minimize_weighted" | None
+    # alpha of "minimize_weighted": total-time + alpha * total-cost (alpha >= 0)
+    try:
+        cost_weight = float(body["cost_weight"]) if body.get("cost_weight") is not None else 0.001
+    except (TypeError, ValueError):
+        return jsonify({"error": "cost_weight must be a number"}), 400
+    if cost_weight < 0:
+        return jsonify({"error": "cost_weight must be >= 0"}), 400
     require_completion = bool(body.get("require_completion", False))
 
     if (not goal_sop or not any(goal_sop)) and not require_completion:
@@ -484,7 +491,7 @@ def build_problem(config_name: str):
 
     planner = body.get("planner", "fast_downward")
     use_durative = (planner == "optic")
-    use_costs = (metric == "minimize_cost")
+    use_costs = metric in ("minimize_cost", "minimize_weighted")
 
     # Parse and validate deadline (positive number, seconds).
     deadline_raw = body.get("deadline", None)
@@ -525,6 +532,7 @@ def build_problem(config_name: str):
         goal_sop=goal_sop,
         attribute_catalog=attribute_catalog,
         metric=metric,
+        cost_weight=cost_weight,
         require_completion=require_completion,
         end_place=end_place,
         deadline=deadline,

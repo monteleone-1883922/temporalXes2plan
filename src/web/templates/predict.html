@@ -106,7 +106,12 @@
                                 <option value="">Plan length (default)</option>
                                 <option value="minimize_cost">Minimize cost</option>
                                 <option value="minimize_time">Minimize time</option>
+                                <option value="minimize_weighted">Minimize time + &alpha; &middot; cost</option>
                             </select>
+                        </div>
+                        <div class="form-field js-hidden" id="metric-alpha-field" style="margin-bottom:16px;">
+                            <label>Cost weight &alpha; <span class="field-hint-inline">metric = total-time + &alpha; &middot; total-cost (OPTIC only; for a ratio a&middot;cost + b&middot;time use &alpha; = a/b)</span></label>
+                            <input id="metric-alpha" type="number" class="form-control" min="0" step="any" value="0.001" style="max-width:160px;">
                         </div>
                         <div id="planner-inner"></div>
                     </div>

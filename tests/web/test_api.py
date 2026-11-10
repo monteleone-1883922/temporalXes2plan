@@ -559,6 +559,35 @@ class TestBuildProblem:
         assert len(warnings) > 0
         assert any("duration" in w.lower() for w in warnings)
 
+    def test_weighted_metric_writes_alpha_and_enables_costs(self, client, data_dir):
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        resp = client.post(
+            "/api/test_cfg/build-problem",
+            json={"goal": goal, "planner": "optic", "metric": "minimize_weighted", "cost_weight": 0.5},
+        )
+        assert resp.status_code == 200
+        text = resp.get_json()["problem_text"]
+        assert "(:metric minimize (+ (total-time) (* 0.5 (total-cost))))" in text
+        assert ":action-costs" in (data_dir / "test_cfg" / "pddl" / "domain.pddl").read_text()
+
+    def test_weighted_metric_default_alpha(self, client):
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        resp = client.post(
+            "/api/test_cfg/build-problem",
+            json={"goal": goal, "planner": "optic", "metric": "minimize_weighted"},
+        )
+        assert resp.status_code == 200
+        assert "(* 0.001 (total-cost))" in resp.get_json()["problem_text"]
+
+    @pytest.mark.parametrize("bad", [-1, "abc"])
+    def test_weighted_metric_rejects_bad_alpha(self, client, bad):
+        goal = [[{"attribute": "status", "predicate": "=", "value": "discharged"}]]
+        resp = client.post(
+            "/api/test_cfg/build-problem",
+            json={"goal": goal, "planner": "optic", "metric": "minimize_weighted", "cost_weight": bad},
+        )
+        assert resp.status_code == 400
+
     def test_fast_downward_never_warns_about_durations(self, client_no_duration):
         resp = client_no_duration.post(
             "/api/test_cfg/build-problem",

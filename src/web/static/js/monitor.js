@@ -46,6 +46,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     document.getElementById("solve-form").addEventListener("submit", onSolveSubmit);
+    document.getElementById("metric-select")?.addEventListener("change", () => {
+        _onMetricChange();
+        _optimiseWhenMetricChosen();
+    });
 });
 
 async function loadPetriData() {
@@ -186,6 +190,8 @@ async function onSolveSubmit(e) {
     const init = collectInitEffects();
     const goal = collectGoalSop();
     const metric = (document.getElementById("metric-select")?.value) || null;
+    const alphaRaw = parseFloat(document.getElementById("metric-alpha")?.value);
+    const costWeight = (metric === "minimize_weighted" && Number.isFinite(alphaRaw) && alphaRaw >= 0) ? alphaRaw : null;
     const requireCompletion = document.getElementById("require-completion-checkbox")?.checked ?? false;
     const deadlineRaw = _activePlanner() === "optic"
         ? (document.getElementById("optic-deadline")?.value?.trim() || null)
@@ -203,7 +209,7 @@ async function onSolveSubmit(e) {
         const resp = await fetch(`/api/${document.body.dataset.configName}/build-problem`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ init_places: _initPlaces, init, goal, metric, require_completion: requireCompletion, deadline, planner: _activePlanner() }),
+            body: JSON.stringify({ init_places: _initPlaces, init, goal, metric, cost_weight: costWeight, require_completion: requireCompletion, deadline, planner: _activePlanner() }),
         });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || resp.statusText);
@@ -369,10 +375,28 @@ function _updateMetricOptions(planner) {
     const sel = document.getElementById("metric-select");
     if (!sel) return;
     const timeOpt = sel.querySelector('option[value="minimize_time"]');
+    const weightedOpt = sel.querySelector('option[value="minimize_weighted"]');
     if (!timeOpt) return;
     const isFd = planner === "fast_downward";
+    // Time is only modelled by the temporal planner (OPTIC), so both time-based metrics need it.
     timeOpt.disabled = isFd;
-    if (isFd && sel.value === "minimize_time") sel.value = "";
+    if (weightedOpt) weightedOpt.disabled = isFd;
+    if (isFd && (sel.value === "minimize_time" || sel.value === "minimize_weighted")) sel.value = "";
+    _onMetricChange();
+}
+
+// Show the alpha field for the weighted metric, and switch OPTIC from "stop at first
+// solution" to optimisation when a metric is chosen (the first plan ignores the metric).
+function _onMetricChange() {
+    const sel = document.getElementById("metric-select");
+    const field = document.getElementById("metric-alpha-field");
+    if (field) field.classList.toggle("js-hidden", sel?.value !== "minimize_weighted");
+}
+
+function _optimiseWhenMetricChosen() {
+    const sel = document.getElementById("metric-select");
+    const stop = document.getElementById("optic-stop-first");
+    if (sel && sel.value && stop && _activePlanner() === "optic") stop.checked = false;
 }
 
 function _makeTab(label, planner) {
