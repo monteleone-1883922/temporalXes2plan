@@ -41,9 +41,33 @@ const SECTION_ICONS = {
 // Transition panel
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Silent (tau) transitions with no effects or guards have no keyed entry in
+// current.json; the domain builder handles them as plain place-transfer actions.
+// Give the panel a default entry (no preconditions, no effects, cost 0) so they
+// can be shown and edited like any other transition; the backend creates the real
+// entry on the first save.
+function _ensureTransitionEntry(name) {
+    if (!currentData) return null;
+    if (currentData.transitions[name]) return currentData.transitions[name];
+    const nodes = currentData.graph?.nodes || [];
+    const node = nodes.find(n => n.type === "silent" && n.label === name);
+    if (!node) return null;
+    const inputs = (currentData.graph.edges || [])
+        .filter(e => e.target === node.id).map(e => e.source);
+    currentData.transitions[name] = {
+        activity_name: name,
+        input_places: inputs,
+        preconditions: [],
+        effect_groups: [],
+        cost: 0,
+        duration: null,
+    };
+    return currentData.transitions[name];
+}
+
 function showTransitionPanel(activityName) {
     if (!currentData) return;
-    const t = currentData.transitions[activityName];
+    const t = _ensureTransitionEntry(activityName);
     if (!t) return;
 
     const icon = document.getElementById("panel-header-icon");
@@ -230,7 +254,7 @@ function showXorSplitPanel(placeId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function _enterTransitionEdit(actName) {
-    const t = currentData.transitions[actName];
+    const t = _ensureTransitionEntry(actName);
     if (!t) return;
     const catalog = currentData.attribute_catalog || {};
     const content = document.getElementById("panel-content");

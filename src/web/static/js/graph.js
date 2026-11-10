@@ -162,7 +162,7 @@ function initGraph() {
         if (type === "place") {
             onPlaceSelected(id);
             closePanel();
-        } else if (type === "transition" || type === "and_split") {
+        } else if (type === "transition" || type === "and_split" || type === "silent") {
             onPlaceClear();
             showTransitionPanel(label);
         } else if (type === "xor_split") {

@@ -388,6 +388,27 @@ class TestPatchTransition:
         resp = client.patch("/api/nonexistent/transition/register", json={"cost": 1.0})
         assert resp.status_code == 404
 
+    def test_silent_transition_without_entry_is_created_on_patch(self, client, data_dir):
+        import json
+        path = data_dir / "test_cfg" / "current.json"
+        data = json.loads(path.read_text())
+        data["graph"]["nodes"].append({"id": "tau_1", "type": "silent", "label": "tau_1"})
+        data["graph"]["edges"].append({"source": "p_start", "target": "tau_1"})
+        path.write_text(json.dumps(data))
+        assert "tau_1" not in data["transitions"]
+
+        resp = client.patch("/api/test_cfg/transition/tau_1", json={"cost": 2.5})
+        assert resp.status_code == 200
+        saved = json.loads(path.read_text())["transitions"]["tau_1"]
+        assert saved["cost"] == 2.5
+        assert saved["input_places"] == ["p_start"]
+        assert saved["preconditions"] == []
+        assert saved["duration"] is None
+
+    def test_unknown_name_is_not_created_as_silent(self, client):
+        resp = client.patch("/api/test_cfg/transition/tau_9", json={"cost": 1.0})
+        assert resp.status_code == 404
+
     def test_returns_404_for_missing_transition(self, client):
         resp = client.patch("/api/test_cfg/transition/nonexistent_activity", json={"cost": 1.0})
         assert resp.status_code == 404

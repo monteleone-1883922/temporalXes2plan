@@ -785,9 +785,24 @@ def patch_transition(config_name: str, activity_name: str):
         return jsonify({"error": "Configuration not found"}), 404
     body = request.get_json(force=True) or {}
     data = _read_json(current_path)
-    transitions = data.get("transitions", {})
+    transitions = data.setdefault("transitions", {})
     if activity_name not in transitions:
-        return jsonify({"error": f"Transition '{activity_name}' not found"}), 404
+        # A silent (tau) transition with no effects or guards has no keyed entry;
+        # create a neutral one from the graph so it can be edited like the others.
+        graph = data.get("graph", {})
+        silent = [n for n in graph.get("nodes", [])
+                  if n.get("type") == "silent" and n.get("label") == activity_name]
+        if not silent:
+            return jsonify({"error": f"Transition '{activity_name}' not found"}), 404
+        node_id = silent[0]["id"]
+        transitions[activity_name] = {
+            "activity_name": activity_name,
+            "input_places": [e["source"] for e in graph.get("edges", []) if e["target"] == node_id],
+            "preconditions": [],
+            "effect_groups": [{"assignments": [], "guard": [], "probability": 1.0}],
+            "cost": 0.0,
+            "duration": None,
+        }
     t = transitions[activity_name]
     if "cost" in body:
         t["cost"] = float(body["cost"])
