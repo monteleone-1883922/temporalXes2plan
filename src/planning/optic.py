@@ -298,6 +298,7 @@ def run_timed(
     memory_mb: int = 4000,
     stop_at_first: bool = True,
     optic_cmd: Optional[List[str]] = None,
+    ignore_costs: bool = False,
 ) -> Dict[str, Any]:
     """Like run(), but timestamps OPTIC's output to split grounding from planning.
 
@@ -321,6 +322,7 @@ def run_timed(
         stop_at_first: Pass -N: stop at the first plan, do not optimise.
         optic_cmd: Replaces the OPTIC wrapper script; used by the tests to run a
             fake planner. A list of command words.
+        ignore_costs: Pass -c: treat all actions as unit cost.
 
     Returns:
         The same keys as run() (success, solvability, plan_text, plan_actions,
@@ -356,7 +358,7 @@ def run_timed(
         return {**result, "message": "domain.pddl or problem.pddl not found in pddl directory."}
 
     words = list(optic_cmd) if optic_cmd is not None else [str(OPTIC_SH)]
-    flags = ["-N"] if stop_at_first else []
+    flags = (["-N"] if stop_at_first else []) + (["-c"] if ignore_costs else [])
     inner_cmd = (
         f"ulimit -v {int(memory_mb) * 1024}; stdbuf -oL "
         + " ".join(shlex.quote(w) for w in words + flags + [str(domain), str(problem)])

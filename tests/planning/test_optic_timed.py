@@ -266,3 +266,16 @@ class TestOptimisingWithTheRealPlanner:
         assert result["plan_actions"] == ["b", "c"]  # 2 time units, faster than a alone (4)
         assert result["plans"][-1]["final"] and result["plans"][-1]["makespan"] == pytest.approx(2.001)
         assert result["metrics"]["duration"] == pytest.approx(2.001)
+
+
+class TestIgnoreCostsFlag:
+    def test_ignore_costs_passes_dash_c(self, tmp_path):
+        body = """
+            import sys
+            print("flags:", " ".join(a for a in sys.argv[1:] if a.startswith("-")), flush=True)
+        """
+        words = _fake(tmp_path, body)
+        with_c = run_timed(_pddl_dir(tmp_path), timeout=30, stop_at_first=False, ignore_costs=True, optic_cmd=words)["stdout"]
+        without = run_timed(tmp_path, timeout=30, stop_at_first=False, optic_cmd=words)["stdout"]
+        assert "-c" in with_c.split("flags:")[1]
+        assert "-c" not in without.split("flags:")[1]

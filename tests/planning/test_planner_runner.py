@@ -188,3 +188,49 @@ class TestRunPlannerIntegration:
         logs = []
         run_planner(pddl_dir, "fast_downward", {"timeout": 30}, log_fn=logs.append)
         assert len(logs) > 0
+
+
+# ---------------------------------------------------------------------------
+# OPTIC with "show all plans": every plan printed is kept and saved
+# ---------------------------------------------------------------------------
+
+class TestShowAllPlans:
+    RAW = {
+        "success": True, "solvability": "solved", "plan_text": "0.000: (a)  [1.000]",
+        "plan_actions": ["a"], "metrics": {}, "stdout": "raw optic output", "stderr": "",
+        "message": "Plan found — 1 action(s)",
+        "plans": [
+            {"found_s": 0.1, "metric": 9.0, "steps": [(0.0, "a", 1.0)], "final": False, "makespan": 1.0},
+            {"found_s": 0.2, "metric": 7.5, "steps": [(0.0, "b", 1.0)], "final": True, "makespan": 1.0},
+        ],
+        "timings": {"grounding_s": 0.05, "first_plan_s": 0.1, "planning_s": 0.05, "wall_s": 0.3, "cpu_s": 0.1},
+        "search_completed": True,
+    }
+
+    def test_uses_the_streaming_runner_and_returns_every_plan(self, tmp_path):
+        with patch("planning.planner_runner.optic.run_timed", return_value=dict(self.RAW)) as timed, \
+             patch("planning.planner_runner.optic.run") as plain:
+            result = run_planner(tmp_path, "optic", {"show_all_plans": True, "stop_at_first": False,
+                                                     "ignore_costs": True, "timeout": 5, "memory_mb": 500})
+        plain.assert_not_called()
+        kwargs = timed.call_args.kwargs
+        assert kwargs["stop_at_first"] is False and kwargs["ignore_costs"] is True
+        assert [p["metric"] for p in result.plans] == [9.0, 7.5]
+        assert result.search_completed is True and result.timings["wall_s"] == 0.3
+
+    def test_saves_output_and_plans_next_to_the_pddl(self, tmp_path):
+        import json
+        with patch("planning.planner_runner.optic.run_timed", return_value=dict(self.RAW)):
+            run_planner(tmp_path, "optic", {"show_all_plans": True})
+        assert (tmp_path / "optic_output.txt").read_text() == "raw optic output"
+        saved = json.loads((tmp_path / "plans.json").read_text())
+        assert len(saved["plans"]) == 2 and saved["search_completed"] is True
+
+    def test_off_by_default_keeps_the_plain_runner(self, tmp_path):
+        raw = {k: v for k, v in self.RAW.items() if k not in ("plans", "timings", "search_completed")}
+        with patch("planning.planner_runner.optic.run", return_value=raw) as plain, \
+             patch("planning.planner_runner.optic.run_timed") as timed:
+            result = run_planner(tmp_path, "optic", {})
+        timed.assert_not_called()
+        plain.assert_called_once()
+        assert result.plans == []

@@ -24,6 +24,8 @@ class OpticConfig:
     ignore_costs: bool = False
     timeout: int = 60
     memory_mb: int = 4000
+    # Keep and show every plan OPTIC prints (time found, metric value) and its raw output.
+    show_all_plans: bool = False
 
 
 @dataclass

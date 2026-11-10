@@ -920,6 +920,11 @@ def _planner_thread(
             "metrics": result.metrics,
             "message": result.message,
             "planner": result.planner,
+            # Only with "show all plans": every plan OPTIC printed, and its raw output.
+            "plans": result.plans,
+            "timings": result.timings,
+            "search_completed": result.search_completed,
+            "stdout": result.stdout if result.plans or options.get("show_all_plans") else None,
         })
     except Exception:
         err = traceback.format_exc()

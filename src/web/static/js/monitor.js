@@ -399,6 +399,58 @@ function _optimiseWhenMetricChosen() {
     if (sel && sel.value && stop && _activePlanner() === "optic") stop.checked = false;
 }
 
+// ---------------------------------------------------------------------------
+// All plans printed by OPTIC (only when "Show all plans" is on)
+// ---------------------------------------------------------------------------
+
+function _fmt(x, d = 3) {
+    return (x === null || x === undefined || Number.isNaN(x)) ? "—" : Number(x).toFixed(d);
+}
+
+function _renderAllPlans(result) {
+    const plans = result.plans || [];
+    if (!plans.length && !result.stdout) return "";
+    const t = result.timings || {};
+
+    const head = [];
+    head.push(`${plans.length} plan(s) printed`);
+    if (t.grounding_s != null) head.push(`grounding ${_fmt(t.grounding_s)} s`);
+    if (t.first_plan_s != null) head.push(`first plan at ${_fmt(t.first_plan_s)} s`);
+    if (t.wall_s != null) head.push(`total ${_fmt(t.wall_s)} s`);
+    if (result.search_completed === true) head.push("OPTIC ended its search by itself");
+    else if (result.search_completed === false) head.push("stopped before the search ended (time limit, or -N)");
+
+    const rows = plans.map((p, i) => {
+        const steps = (p.steps || []);
+        const visible = steps.filter(st => !/^(execute_)?tau_/.test(String(st[1])));
+        const lines = steps.map(st => `${_fmt(st[0])}: (${st[1]}) [${_fmt(st[2])}]`).join("\n");
+        const best = i === plans.length - 1;
+        return `
+            <tr${best ? ' style="font-weight:600;"' : ""}>
+                <td>${i + 1}${best ? " (best)" : ""}</td>
+                <td>${_fmt(p.found_s)}</td>
+                <td>${_fmt(p.metric)}</td>
+                <td>${_fmt(p.makespan)}</td>
+                <td>${visible.length}</td>
+                <td>${escapeHtml(visible.map(st => st[1]).join(" → "))}
+                    <details><summary>timed plan</summary><pre>${escapeHtml(lines)}</pre></details></td>
+            </tr>`;
+    }).join("");
+
+    return `
+        <div class="field-hint" style="margin-top:14px;">${escapeHtml(head.join(" · "))}</div>
+        ${plans.length ? `
+        <table class="table table-sm" style="margin-top:6px;font-size:0.85rem;">
+            <thead><tr><th>#</th><th>found at (s)</th><th>metric</th><th>makespan</th><th>actions</th><th>plan</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>` : ""}
+        ${result.stdout ? `
+        <details class="pddl-preview" style="margin-top:10px;">
+            <summary>Show the raw OPTIC output</summary>
+            <pre>${escapeHtml(result.stdout)}</pre>
+        </details>` : ""}`;
+}
+
 function _makeTab(label, planner) {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -503,6 +555,10 @@ function _buildOpticPanel(op, opCfg) {
         <label class="check-label">
             <input type="checkbox" id="optic-ignore-costs">
             Ignore action costs <span class="field-hint-inline">(-c, treat all actions as unit cost)</span>
+        </label>
+        <label class="check-label">
+            <input type="checkbox" id="optic-show-all">
+            Show all plans and the raw OPTIC output <span class="field-hint-inline">(every improving plan with the time it was found and its metric value; use with "Stop at first solution" off)</span>
         </label>`;
     panel.appendChild(checks);
 
@@ -539,6 +595,8 @@ function _populateOpticFields(cfg) {
     if (stop) stop.checked = cfg.stop_at_first ?? true;
     const ic = document.getElementById("optic-ignore-costs");
     if (ic) ic.checked = cfg.ignore_costs ?? false;
+    const sa = document.getElementById("optic-show-all");
+    if (sa) sa.checked = cfg.show_all_plans ?? false;
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +697,7 @@ function _collectPlannerOptions(planner) {
         return {
             stop_at_first: document.getElementById("optic-stop-first")?.checked ?? true,
             ignore_costs: document.getElementById("optic-ignore-costs")?.checked ?? false,
+            show_all_plans: document.getElementById("optic-show-all")?.checked ?? false,
             timeout: parseInt(document.getElementById("optic-timeout")?.value || "60") || 60,
             memory_mb: parseInt(document.getElementById("optic-memory")?.value || "4000") || 4000,
         };
@@ -708,7 +767,7 @@ function _showPlanResult(result) {
         el.innerHTML = `
             <div class="result-status" style="background:var(--red-100);color:var(--red-600);border-color:var(--red-100);">
                 <i class="bi bi-x-circle-fill"></i> ${label}
-            </div>`;
+            </div>${_renderAllPlans(result || {})}`;
         return;
     }
 
@@ -739,5 +798,6 @@ function _showPlanResult(result) {
                    <pre>${escapeHtml(result.plan_text)}</pre>
                </details>`
             : ""
-        }`;
+        }
+        ${_renderAllPlans(result)}`;
 }
