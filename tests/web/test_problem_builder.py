@@ -98,6 +98,15 @@ class TestProblemBuilderInit:
         )
         assert "(status_is status_val_admitted)" in result
 
+    def test_unknown_categorical_init_effect(self):
+        # a value the model never saw reaches the problem as the attribute's "unknown" value
+        catalog = {"status": {"type": "categorical", "possible_values": ["admitted", "unknown"]}}
+        result = _build(
+            init_effects=[{"attribute": "status", "value": "unknown"}],
+            attribute_catalog=catalog,
+        )
+        assert "(status_is status_val_unknown)" in result
+
     def test_boolean_true_init_effect(self):
         result = _build(
             init_effects=[{"attribute": "critical", "value": "true"}],
