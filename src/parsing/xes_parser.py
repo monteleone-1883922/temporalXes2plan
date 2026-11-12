@@ -41,6 +41,7 @@ from models import (
     PetriNetModel,
     PreprocessedLog,
     TransitionEffects,
+    UNKNOWN_VALUE,
     TransitionInfo,
     TransitionScreening,
     XorBranchInfo,
@@ -850,6 +851,7 @@ class Parser:
             end_place=end_place,
             attribute_catalog=self._build_attribute_catalog(),
             negated_attributes=self._collect_negated_attributes(),
+            static_attributes=set(self.preprocessed_log.static_attributes),
         )
 
 
@@ -891,8 +893,10 @@ class Parser:
                 _scan_sop(sop)
 
         # Seed from the pre-computed sanitized value catalog (Step 3.5).
-        # Guarantees all valid values — including unobserved numerical bins and
-        # every categorical value in the full log — are present from the start.
+        # Guarantees all discretized numerical values, including unobserved bins,
+        # are present from the start. Categorical attributes are NOT seeded: they
+        # only list the values their effects and guards mention (plus "unknown",
+        # added below).
         for attr, values in self.sanitized_value_catalog.items():
             for v in values:
                 _add_value(attr, v)
@@ -911,6 +915,13 @@ class Parser:
             for branch_info in branch_info_list:
                 if branch_info.guards is not None:
                     _scan_sop(branch_info.guards)
+
+        # A categorical attribute can always hold a value the model never saw: it gets
+        # "unknown" (not "none", which means "not written"). No guard names it; it is the
+        # value a replayed or planned case takes when its value is not one of the above.
+        for attr, values in attr_values.items():
+            if self.attribute_categories.get(attr, 'categorical') == 'categorical':
+                values.add(UNKNOWN_VALUE)
 
         return {
             attr: AttributeCatalogEntry(

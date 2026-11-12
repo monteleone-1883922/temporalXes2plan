@@ -85,13 +85,12 @@ LOGS: Dict[str, LogSpec] = {
                 ignore_attributes=("Action", "EventOrigin")),
         LogSpec("helpdesk", "Helpdesk.xes",
                 "daa36a75933e4c032a4f21ce6e4f583563f65cb79ce0d3976b8b2c17c98a0a79", False),
-        # The learning-factory log (RQ2 runs only on it). Provided by hand. Its event
-        # attributes are copies of the activity and the resource, the BPMN element id and
-        # simulator ids/costs, none of them a decision of the process: all left out, so
-        # the net is control flow plus durations.
-        LogSpec("factory", "fabbrica_2vgr_normalizzato.xes",
-                "9011045a56c206acbff80a4998cc23239efac2a0bef82eb7699a670f8ba5f856", True,
-                ignore_attributes=("Activity", "Resource", "elementId", "resourceCost", "resourceId"),
+        # The learning-factory log (RQ2 runs only on it). Provided by hand. Same control flow,
+        # timestamps and resources as fabbrica_2vgr_normalizzato.xes, with three event
+        # attributes added (piece_id, piece_color, anomaly; constant within a case). None is
+        # ignored by hand: the automatic filters decide which ones the net keeps.
+        LogSpec("factory", "fabbrica_2vgr_normalizzato_w_attr.xes",
+                "f3154b0fb0c32a1ec9397a86199040ddd92c99c96b49fbd68e6e95997182ff75", True,
                 local=True),
     ]
 }

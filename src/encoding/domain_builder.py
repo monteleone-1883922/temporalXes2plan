@@ -230,6 +230,7 @@ class DomainBuilder:
             keep = read | set(config.keep_attributes)
             attribute_catalog = {a: entry for a, entry in attribute_catalog.items() if a in keep}
 
+        _, read_by_guards = _attribute_usage(parse_result)
         nodes, edges = PreparedDomainInput.build_graph_from_petri_net(parse_result.petri_net_model)
         return PreparedDomainInput(
             nodes=nodes,
@@ -237,6 +238,13 @@ class DomainBuilder:
             transitions=transitions,
             xor_branches=xor_branches,
             attribute_catalog=attribute_catalog,
+            # A start-of-trace attribute is only worth setting when a guard reads it (or the
+            # user protects it with keep_attributes) and the catalog keeps it: whether the
+            # unused-attribute filter is on or not.
+            start_of_trace_attributes=sorted(
+                a for a in parse_result.static_attributes
+                if a in attribute_catalog and (a in read_by_guards or a in config.keep_attributes)
+            ),
         )
 
 

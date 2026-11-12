@@ -73,6 +73,8 @@ def attribute_rows(
     ignored_by_user: Sequence[str],
     kept_by_user: Sequence[str],
     analysed_types: Optional[Mapping[str, str]] = None,
+    static_attributes: Optional[Set[str]] = None,
+    static_info: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """One row per attribute of the log and its fate, plus the inconsistencies found.
 
@@ -92,6 +94,10 @@ def attribute_rows(
             (after the noise filter). The ones that are not in parse_catalog never
             appear in an effect or guard (a constant attribute, for instance): they
             get status removed_cascade, so every attribute of the log is accounted for.
+        static_attributes: the start-of-trace attributes the model found (set by the first
+            event of a case and never changed, in at least N of the training traces).
+        static_info: {attribute: StaticAttributeInfo} with the counts behind them, for every
+            attribute the preprocessor saw (ignored attributes are never seen).
 
     Returns:
         (rows, anomalies). An attribute can have only one fate; when two lists
@@ -155,6 +161,16 @@ def attribute_rows(
             kept_by_user=name in protected, attr_type=kind,
         ))
         seen[name] = REMOVED_CASCADE
+
+    # Start-of-trace attributes are not a fate of their own (one that a guard reads is
+    # still `kept`): two columns say whether the model treated the attribute as one and
+    # how often, in the training traces, the first event set it and it never changed.
+    static_attributes = static_attributes or set()
+    static_info = static_info or {}
+    for row in rows:
+        info = static_info.get(row["attribute"])
+        row["start_of_trace"] = row["attribute"] in static_attributes
+        row["start_of_trace_share"] = float(info.share) if info is not None else None
     return rows, anomalies
 
 

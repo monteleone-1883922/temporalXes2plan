@@ -668,6 +668,16 @@ class TestConstants:
         # raw value.
         assert diag_vals == {"diagnosis_val_flu", "diagnosis_val_cold", "diagnosis_val_covid"}
 
+    def test_the_unknown_value_is_declared_like_any_other_value(self):
+        catalog = {
+            "diagnosis": AttributeCatalogEntry(
+                attribute_type="categorical", possible_values={"flu", "unknown"},
+            )
+        }
+        domain = build_domain_from_prepared_info(_sequence_prepared(catalog))
+        diag_vals = {c.name for c in domain.constants if c.type_name == "diagnosis_val"}
+        assert diag_vals == {"diagnosis_val_flu", "diagnosis_val_unknown"}
+
     def test_no_value_objects_for_boolean(self):
         catalog = {"urgent": AttributeCatalogEntry(attribute_type="boolean", possible_values=set())}
         domain = build_domain_from_prepared_info(_sequence_prepared(catalog))

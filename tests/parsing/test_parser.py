@@ -355,6 +355,19 @@ class TestAttributeCatalog:
                 f"possible_values for '{attr}' is not a set"
             )
 
+    def test_categorical_attributes_have_the_unknown_value(self, parse_result):
+        """A categorical attribute can hold a value the model never saw: "unknown", not "none"."""
+        from models import UNKNOWN_VALUE
+        for attr, entry in parse_result.attribute_catalog.items():
+            if entry.attribute_type == "categorical":
+                assert UNKNOWN_VALUE in entry.possible_values, f"'{attr}' has no 'unknown' value"
+            else:
+                assert UNKNOWN_VALUE not in entry.possible_values, f"'{attr}' is not categorical"
+
+    def test_static_attributes_are_a_set_of_names(self, parse_result):
+        assert isinstance(parse_result.static_attributes, set)
+        assert all(isinstance(a, str) for a in parse_result.static_attributes)
+
     def test_effect_attributes_present_in_catalog(self, parse_result):
         """Every attribute that appears in at least one EffectInfo must be in the catalog."""
         for info in parse_result.transitions.values():
@@ -745,3 +758,47 @@ class TestAttributeFilters:
         assert not (unused & set(prepared.attribute_catalog))
         assigned = {a for t in prepared.transitions.values() for g in t.effect_groups for a, _ in g.assignments}
         assert not (unused & assigned)
+
+
+@pytest.mark.integration
+class TestStartOfTraceAttributesThroughTheParser:
+    """The real Parser on the noisy XOR log: const is written by every event with the same value,
+    junk changes from event to event. const is a start-of-trace attribute, junk is not."""
+
+    @staticmethod
+    def _parser(tmp_path_factory, **kwargs) -> Parser:
+        tmp = tmp_path_factory.mktemp("parser_static")
+        path = str(tmp / "noisy.xes")
+        pm4py.write_xes(_make_noisy_xor_log(), path)
+        options = dict(
+            dt_min_samples=20, probability_min_samples=5,
+            static_appearances_min_samples=1, static_attr_probability=0.9,
+            snapshot_dir=str(tmp / "snap"),
+        )
+        options.update(kwargs)
+        return Parser(path, 0.8, "inductive", config=AnalysisConfig(**options))
+
+    def test_an_attribute_set_by_the_first_event_and_never_changed_is_static(self, tmp_path_factory):
+        parser = self._parser(tmp_path_factory)
+        assert "const" in parser.parse_result.static_attributes
+        assert parser.preprocessed_log.static_attribute_info["const"].share == 1.0
+
+    def test_an_attribute_that_changes_is_not_static(self, tmp_path_factory):
+        parser = self._parser(tmp_path_factory)
+        assert "junk" not in parser.parse_result.static_attributes
+        assert parser.preprocessed_log.static_attribute_info["junk"].share < 0.9
+
+    def test_a_static_attribute_is_never_an_effect(self, tmp_path_factory):
+        parser = self._parser(tmp_path_factory)
+        for info in parser.parse_result.transitions.values():
+            assert "const" not in info.effects
+
+    def test_a_static_attribute_stays_in_the_state_for_the_guards(self, tmp_path_factory):
+        parser = self._parser(tmp_path_factory)
+        firings = [fd for fds in parser.preprocessed_log.transition_firings.values() for fd in fds]
+        assert any(fd.pre_state.get("const") == "same" for fd in firings)
+
+    def test_the_minimum_number_of_traces_decides(self, tmp_path_factory):
+        # share 1.0, but fewer traces than the minimum: not enough evidence
+        parser = self._parser(tmp_path_factory, static_appearances_min_samples=10 ** 6)
+        assert parser.parse_result.static_attributes == set()

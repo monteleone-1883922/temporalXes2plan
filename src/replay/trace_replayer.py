@@ -54,7 +54,9 @@ import numpy as np
 from encoding.prepared_graph_utils import _prepared_xor_branch_of
 from encoding.prepared_input import PreparedDomainInput, PreparedEffectGroup, PreparedTransition
 from encoding.transition_action_builder import _combine_xor_branches
-from models import AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard, PetriNetModel, sop_holds
+from models import (
+    UNKNOWN_VALUE, AnalysisConfig, AttributeCatalogEntry, FiringStep, Guard, PetriNetModel, sop_holds,
+)
 
 import core_utils as utils
 from replay._log_alignment import align_single_trace
@@ -285,6 +287,10 @@ def _normalize_event_value(
 
     value = str(raw_value)
     if entry.possible_values and value not in entry.possible_values:
+        if UNKNOWN_VALUE in entry.possible_values:
+            # A value the model never saw is "unknown", not "not written" (that is "none").
+            return UNKNOWN_VALUE
+        # A model built before "unknown" existed: the domain has no such value to set.
         warnings.append(f"Value '{value}' for '{attr}' ignored: not a known category.")
         return None
     return value
@@ -540,6 +546,9 @@ class TraceReplayer:
         steps = execution.steps
         initial_marking = {p.name for p in model.initial_marking}
         initial_attributes: Dict[str, str] = self._unwritten_attributes()
+        # Start-of-trace attributes are always set from the first event, whether or not the
+        # walk starts after it; the walk then carries them (no transition writes them).
+        initial_attributes.update(self._start_of_trace_values(execution.steps))
         snapshot_warnings: List[str] = []
         if self.config.initial_event_as_input:
             # Start right after the first visible event, with the attributes
@@ -895,6 +904,23 @@ class TraceReplayer:
             and "none" in {str(v) for v in entry.possible_values}
         }
 
+    def _start_of_trace_values(self, firing_steps: List[FiringStep]) -> Dict[str, str]:
+        """The start-of-trace attributes (PreparedDomainInput.start_of_trace_attributes) with
+        the value the trace's first visible event gives them, in the catalog's value space.
+
+        The first event counts even when its activity has no effects: these attributes are
+        case data, always part of the state from the start of a replay. An attribute the first
+        event does not carry is not in this seed (it stays "none" until some event writes it).
+        Empty for models without any."""
+        static = self.prepared.start_of_trace_attributes
+        if not static:
+            return {}
+        first = next((st for st in firing_steps if not st.is_tau), None)
+        if first is None:
+            return {}
+        observed = _extract_event_attributes(first.attributes, self.prepared.attribute_catalog, [])
+        return {a: v for a, v in observed.items() if a in static}
+
     def _build_snapshots(
         self, firing_steps: List[FiringStep],
     ) -> Tuple[List[Set[str]], List[Dict[str, str]], List[int], List[str]]:
@@ -924,6 +950,10 @@ class TraceReplayer:
         # written yet is "none", so a guard "attribute = none" holds until the
         # first event that writes it.
         acc: Dict[str, str] = self._unwritten_attributes()
+        # Start-of-trace attributes hold the first event's value from the very start (index 0
+        # included), even when that event's activity has no effects: they are case data that no
+        # transition writes. After that they follow the log like any other attribute.
+        acc.update(self._start_of_trace_values(firing_steps))
 
         marking_at: List[Set[str]] = [set(marking)]
         raw_attributes_at: List[Dict[str, str]] = [dict(acc)]

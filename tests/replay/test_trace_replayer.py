@@ -699,6 +699,106 @@ class TestInitialEventAsInput:
         assert outcome.final_marking == {"p_out"}
 
 
+class TestStartOfTraceAttributes:
+    """Start-of-trace attributes (PreparedDomainInput.start_of_trace_attributes) are always set
+    from the first event, even when its activity has no effects and whatever
+    initial_event_as_input says: no transition writes them, so they are also what the initial
+    state of a test carries. After that the snapshots follow the log like any other attribute."""
+
+    @staticmethod
+    def _replayer(tau_seq_net, static=("flag",), config=None, catalog=None):
+        prepared = PreparedDomainInput(
+            transitions=TestInitialEventAsInput._transitions(), xor_branches={},
+            attribute_catalog=catalog or _FLAG_RISK_CATALOG, nodes=[], edges=[],
+            start_of_trace_attributes=list(static),
+        )
+        return TraceReplayer(prepared, tau_seq_net, config or AnalysisConfig())
+
+    def test_a_replay_from_zero_without_the_flag_starts_with_the_first_events_value(self, tau_seq_net):
+        trace = make_trace(make_event("A", flag="x"), make_event("B", risk="high"))
+        outcome = self._replayer(tau_seq_net).replay_evaluation_split(trace, n_prefix=0)
+        assert outcome.split_attributes == {"flag": "x"}
+        assert outcome.reached_end and outcome.matches_expected_final_state
+
+    def test_replay_full_trace_without_the_flag_carries_it_to_the_end(self, tau_seq_net):
+        trace = make_trace(make_event("A", flag="x"), make_event("B", risk="high"))
+        outcome = self._replayer(tau_seq_net).replay_full_trace(trace)
+        assert outcome.is_replayable
+        assert outcome.final_attributes == {"flag": "x", "risk": "high"}
+
+    def test_with_the_flag_the_value_is_still_there(self, tau_seq_net):
+        trace = make_trace(make_event("A", flag="x"), make_event("B", risk="high"))
+        replayer = self._replayer(tau_seq_net, config=AnalysisConfig(initial_event_as_input=True))
+        outcome = replayer.replay_full_trace(trace)
+        assert outcome.final_attributes == {"flag": "x", "risk": "high"}
+
+    def test_the_snapshot_has_it_at_every_index_even_before_the_first_event_is_consumed(self, tau_seq_net):
+        replayer = self._replayer(tau_seq_net)
+        snapshot = replayer.replay_partial_trace(make_trace(make_event("A", flag="x")))
+        assert snapshot.attributes == {"flag": "x"}
+
+    def test_a_later_event_changes_it_like_any_other_attribute(self, tau_seq_net):
+        # The log is the reality: if an event rewrites a start-of-trace attribute, the snapshot follows.
+        trace = make_trace(make_event("A", flag="x"), make_event("B", flag="y", risk="high"))
+        snapshot = self._replayer(tau_seq_net).replay_partial_trace(trace)
+        assert snapshot.attributes == {"flag": "y", "risk": "high"}
+
+    def test_the_state_at_a_cut_before_the_change_still_has_the_first_events_value(self, tau_seq_net):
+        trace = make_trace(make_event("A", flag="x"), make_event("B", flag="y", risk="high"))
+        outcome = self._replayer(tau_seq_net).replay_evaluation_split(trace, n_prefix=1)
+        assert outcome.split_attributes == {"flag": "x"}
+
+    def test_a_change_after_the_cut_cannot_be_reproduced_but_the_tail_still_reaches_the_end(self, tau_seq_net):
+        # No transition writes the attribute, so the walk keeps x while the log ends with y.
+        trace = make_trace(make_event("A", flag="x"), make_event("B", flag="y", risk="high"))
+        outcome = self._replayer(tau_seq_net).replay_evaluation_split(trace, n_prefix=1)
+        assert outcome.reached_end
+        assert not outcome.matches_expected_final_state
+        assert outcome.expected_final_attributes == {"flag": "y", "risk": "high"}
+
+    def test_a_trace_whose_first_event_lacks_it_gets_it_when_a_later_event_writes_it(self, tau_seq_net):
+        trace = make_trace(make_event("A"), make_event("B", flag="y"))
+        snapshot = self._replayer(tau_seq_net).replay_partial_trace(trace)
+        assert snapshot.attributes == {"flag": "y"}
+
+    def test_every_cut_of_replay_all_splits_has_it(self, tau_seq_net):
+        trace = make_trace(make_event("A", flag="x"), make_event("B", risk="high"))
+        outcomes = self._replayer(tau_seq_net).replay_all_splits(trace, [0, 1, 2])
+        assert all(o.split_attributes.get("flag") == "x" for o in outcomes.values())
+
+    def test_the_evaluation_split_state_at_a_cut_has_it(self, tau_seq_net):
+        trace = make_trace(make_event("A", flag="x"), make_event("B", risk="high"))
+        outcome = self._replayer(tau_seq_net).replay_evaluation_split(trace, n_prefix=1)
+        assert outcome.split_attributes == {"flag": "x"}
+        assert outcome.expected_final_attributes == {"flag": "x", "risk": "high"}
+
+
+class TestUnknownCategoricalValue:
+    """A categorical value that is not in the catalog is "unknown" (when the model has that
+    value), not dropped: dropping it would make it look like "not written" ("none")."""
+
+    _UNKNOWN_CATALOG = {
+        "flag": AttributeCatalogEntry(attribute_type="categorical", possible_values={"x", "unknown"}, bin_boundaries=None),
+    }
+
+    def test_a_never_seen_value_becomes_unknown(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, {}, catalog=self._UNKNOWN_CATALOG)
+        snapshot = replayer.replay_partial_trace(make_trace(make_event("A", flag="zzz")))
+        assert snapshot.attributes == {"flag": "unknown"}
+
+    def test_a_known_value_is_kept(self, tau_seq_net):
+        replayer = _replayer(tau_seq_net, {}, catalog=self._UNKNOWN_CATALOG)
+        snapshot = replayer.replay_partial_trace(make_trace(make_event("A", flag="x")))
+        assert snapshot.attributes == {"flag": "x"}
+
+    def test_a_model_without_the_unknown_value_still_drops_it(self, tau_seq_net):
+        # a catalog from before "unknown" existed: the domain has no such value to set
+        replayer = _replayer(tau_seq_net, {})
+        snapshot = replayer.replay_partial_trace(make_trace(make_event("A", flag="zzz")))
+        assert "flag" not in snapshot.attributes
+        assert any("not a known category" in w for w in snapshot.warnings)
+
+
 _NONE_CATALOG = {
     "flag": AttributeCatalogEntry(attribute_type="categorical", possible_values={"x", "y", "none"}, bin_boundaries=None),
     "urgent": AttributeCatalogEntry(attribute_type="boolean", possible_values=set(), bin_boundaries=None),

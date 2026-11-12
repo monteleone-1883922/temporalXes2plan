@@ -505,3 +505,43 @@ class TestUnusedAttributeFilter:
         assert len(_groups(DomainBuilder().build_prepared_input(pr, config), "activity_a")) == 2
         with pytest.raises(EffectGroupBudgetExceeded):
             DomainBuilder().build_prepared_input(pr, AnalysisConfig(max_effect_groups_per_transition=4))
+
+
+class TestStartOfTraceAttributes:
+    """The model remembers which attributes are set by the first event of a case and never change
+    (ParseResult.static_attributes), as many as a guard reads (or keep_attributes protects) and
+    its catalog keeps."""
+
+    @staticmethod
+    def _read_by_a_and_c() -> ParseResult:
+        """a is read by an XOR guard, c by an effect's value guard; b and r are not read by any guard."""
+        return _filter_parse_result(guard_reader_effects=_reader_of("c"), xor_guard_attribute="a")
+
+    def test_they_are_copied_to_the_prepared_input_sorted(self):
+        parse_result = self._read_by_a_and_c()
+        parse_result.static_attributes = {"c", "a"}
+        prepared = DomainBuilder().build_prepared_input(parse_result)
+        assert prepared.start_of_trace_attributes == ["a", "c"]
+
+    def test_one_no_guard_reads_is_left_out_even_with_the_unused_filter_off(self):
+        parse_result = self._read_by_a_and_c()
+        parse_result.static_attributes = {"a", "b"}
+        prepared = DomainBuilder().build_prepared_input(parse_result)
+        assert "b" in prepared.attribute_catalog  # the filter is off: still in the catalog
+        assert prepared.start_of_trace_attributes == ["a"]
+
+    def test_keep_attributes_protects_an_unread_one(self):
+        parse_result = self._read_by_a_and_c()
+        parse_result.static_attributes = {"a", "b"}
+        prepared = DomainBuilder().build_prepared_input(parse_result, AnalysisConfig(keep_attributes=("b",)))
+        assert prepared.start_of_trace_attributes == ["a", "b"]
+
+    def test_only_those_in_the_final_catalog_are_kept(self):
+        parse_result = self._read_by_a_and_c()
+        parse_result.static_attributes = {"a", "not_in_the_catalog"}
+        prepared = DomainBuilder().build_prepared_input(parse_result)
+        assert prepared.start_of_trace_attributes == ["a"]
+
+    def test_none_by_default(self):
+        prepared = DomainBuilder().build_prepared_input(self._read_by_a_and_c())
+        assert prepared.start_of_trace_attributes == []

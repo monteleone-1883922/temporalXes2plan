@@ -20,10 +20,11 @@ def test_sepsis_keeps_diagnose_from_the_noise_filter():
     assert "Diagnose" in LOGS["sepsis"].keep_attributes
 
 
-def test_factory_is_a_local_log_without_its_event_attributes():
+def test_factory_is_a_local_log_left_to_the_automatic_attribute_filters():
     spec = LOGS["factory"]
     assert spec.local and spec.has_lifecycle
-    assert set(spec.ignore_attributes) == {"Activity", "Resource", "elementId", "resourceCost", "resourceId"}
+    assert spec.file_name == "fabbrica_2vgr_normalizzato_w_attr.xes"
+    assert spec.ignore_attributes == () and spec.keep_attributes == ()
     # only the factory is provided by hand
     assert [s.name for s in LOGS.values() if s.local] == ["factory"]
 

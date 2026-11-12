@@ -197,6 +197,15 @@ def build_model(
         "unused_attribute_filter": sorted(unused),
         "attribute_catalog_size_before": len(result.parse_result.attribute_catalog),
         "attribute_catalog_size_after": len(result.prepared.attribute_catalog),
+        # Set by the first event of a case and never changed, in at least
+        # AnalysisConfig.static_attr_probability of the training traces: never effects.
+        # This is the statistic. The model itself only sets at the start of a replay or a
+        # planning problem those a guard reads: PreparedDomainInput.start_of_trace_attributes,
+        # in current.json.
+        "start_of_trace": sorted(result.parse_result.static_attributes),
+        "start_of_trace_share": {
+            name: info.share for name, info in sorted(result.static_attribute_info.items())
+        },
     }
     (model_dir / "attribute_filter.json").write_text(json.dumps(attribute_report, indent=2), encoding="utf-8")
     # The same information as plain rows, one per attribute, with everything known
@@ -213,6 +222,8 @@ def build_model(
         ignored_by_user=ignore_list,
         kept_by_user=keep_list,
         analysed_types=result.attribute_categories,
+        static_attributes=result.parse_result.static_attributes,
+        static_info=result.static_attribute_info,
     )
     write_jsonl(rows, model_dir / "attributes.jsonl")
     write_jsonl(transition_duration_rows(result.prepared.transitions), model_dir / "transition_durations.jsonl")

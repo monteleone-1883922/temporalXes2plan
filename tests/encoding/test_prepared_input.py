@@ -149,3 +149,19 @@ class TestSerializationRoundTrip:
             set(restored.attribute_catalog["risk"].possible_values)
             == original.attribute_catalog["risk"].possible_values
         )
+
+    def test_start_of_trace_attributes_survive_the_round_trip(self):
+        original = PreparedDomainInput(
+            transitions={}, xor_branches={},
+            attribute_catalog={"color": AttributeCatalogEntry(attribute_type="categorical", possible_values={"red"})},
+            start_of_trace_attributes=["color", "anomaly"],
+        )
+        data = original.to_dict()
+        assert data["start_of_trace_attributes"] == ["anomaly", "color"]  # sorted, JSON-serializable
+        json.dumps(data)
+        assert sorted(PreparedDomainInput.from_dict(data).start_of_trace_attributes) == ["anomaly", "color"]
+
+    def test_a_model_saved_before_the_field_existed_has_none(self):
+        data = PreparedDomainInput(transitions={}, xor_branches={}, attribute_catalog={}).to_dict()
+        del data["start_of_trace_attributes"]
+        assert PreparedDomainInput.from_dict(data).start_of_trace_attributes == []

@@ -213,6 +213,21 @@ def test_attribute_lists_and_filters_end_to_end(tmp_path):
     assert all(r["type"] and r["possible_values"] is not None
                for r in rows.values() if r["status"] == "removed_unused")
 
+    # start-of-trace attributes: the report lists them with the shares seen in training, and
+    # every attribute row has the two columns (an ignored attribute was never seen: share None)
+    assert isinstance(report["start_of_trace"], list)
+    # risk and junk have one value per trace, so the first event sets them and nothing changes
+    assert report["start_of_trace_share"]["risk"] == 1.0
+    assert report["start_of_trace_share"]["junk"] == 1.0
+    assert "event_id" not in report["start_of_trace_share"]  # removed as noise before the preprocessor
+    # the model carries its own list in current.json (only attributes a guard reads can be there)
+    start_attrs = json.loads((model_dir / "current.json").read_text())["start_of_trace_attributes"]
+    assert set(start_attrs) <= set(report["start_of_trace"]) and set(start_attrs) <= set(catalog)
+    assert "mine" not in report["start_of_trace_share"]
+    assert all(isinstance(r["start_of_trace"], bool) for r in rows.values())
+    assert rows["mine"]["start_of_trace_share"] is None
+    assert {a for a, r in rows.items() if r["start_of_trace"]} == set(report["start_of_trace"])
+
 
 @pytest.mark.integration
 def test_plan_stats_and_report_chain_on_a_real_model(tmp_path):

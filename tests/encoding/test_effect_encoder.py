@@ -39,6 +39,11 @@ class TestCategoricalEffect:
         assert PDDLEffect.set_attr_is("diagnosis", "flu") in result
         assert PDDLEffect.clear_attr_is("diagnosis", "cold") in result
 
+    def test_setting_a_value_also_clears_unknown(self):
+        entry = AttributeCatalogEntry("categorical", {"flu", "unknown"})
+        result = categorical_effect("diagnosis", "flu", entry, set())
+        assert PDDLEffect.clear_attr_is("diagnosis", "unknown") in result
+
     def test_negated_attribute_emits_is_not(self):
         entry = AttributeCatalogEntry("categorical", {"flu", "cold"})
         result = categorical_effect("diagnosis", "flu", entry, {"diagnosis"})

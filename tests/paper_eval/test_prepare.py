@@ -116,6 +116,96 @@ class TestLogStats:
         assert stats["case_duration_days"]["max"] == pytest.approx(1.0)
 
 
+class TestStartOfTraceStats:
+    """Per event attribute: in how many traces the first control-flow event sets it and it
+    never changes (a descriptive statistic of the whole log, raw values)."""
+
+    @staticmethod
+    def _trace(first, later):
+        return make_trace(make_event("A", offset=0, **first), make_event("B", offset=60, **later))
+
+    @staticmethod
+    def _by_attribute(log):
+        return {r["attribute"]: r for r in prep.start_of_trace_stats(log)}
+
+    def test_set_by_the_first_event_and_never_changed(self):
+        log = make_log(*[self._trace({"color": "red"}, {"color": "red"}) for _ in range(4)])
+        row = self._by_attribute(log)["color"]
+        assert (row["n_traces_with_attribute"], row["n_set_by_first_event"], row["n_unchanged"]) == (4, 4, 4)
+        assert row["share"] == 1.0
+
+    def test_a_trace_where_a_later_event_changes_it_does_not_count_as_unchanged(self):
+        log = make_log(
+            self._trace({"color": "red"}, {"color": "blue"}),
+            *[self._trace({"color": "red"}, {}) for _ in range(3)],
+        )
+        row = self._by_attribute(log)["color"]
+        assert (row["n_set_by_first_event"], row["n_unchanged"]) == (4, 3)
+        assert row["share"] == pytest.approx(0.75)
+
+    def test_set_only_by_a_later_event(self):
+        log = make_log(*[self._trace({}, {"risk": "high"}) for _ in range(3)])
+        row = self._by_attribute(log)["risk"]
+        assert (row["n_traces_with_attribute"], row["n_set_by_first_event"], row["n_unchanged"]) == (3, 0, 0)
+        assert row["share"] == 0.0
+
+    def test_start_events_are_not_looked_at(self):
+        # Only control-flow (complete) events count: an attribute carried by a start event
+        # alone is not reported, and the first complete event is the trace's first event.
+        trace = make_trace(
+            make_event("A", lifecycle="start", offset=0, piece="p1"),
+            make_event("A", lifecycle="complete", offset=5, color="red"),
+            make_event("B", lifecycle="complete", offset=60, color="red"),
+        )
+        by_attribute = self._by_attribute(make_log(trace))
+        assert "piece" not in by_attribute
+        assert by_attribute["color"]["n_unchanged"] == 1
+
+    def test_a_nan_repeated_in_every_event_is_unchanged(self):
+        nan = float("nan")
+        log = make_log(self._trace({"cost": nan}, {"cost": nan}))
+        assert self._by_attribute(log)["cost"]["n_unchanged"] == 1
+
+    def test_the_event_keys_are_not_attributes(self):
+        log = make_log(self._trace({}, {}))
+        names = set(self._by_attribute(log))
+        assert not names & {"concept:name", "time:timestamp", "lifecycle:transition"}
+
+    def test_log_stats_includes_it(self):
+        log = prep.preprocess(make_log(self._trace({"color": "red"}, {})), min_trace_len=2)
+        assert any(r["attribute"] == "color" for r in prep.log_stats(log)["start_of_trace_attributes"])
+
+
+class TestPrepareLogAddsTheStatisticToOldStats:
+    """A log prepared before the statistic existed gets it without being downloaded again."""
+
+    def test_the_stats_file_is_completed_from_the_prepared_log(self, tmp_path):
+        import json
+        spec = LogSpec("toy", "toy.xes", "x", False)
+        (tmp_path / "toy.xes").write_text("<log/>")
+        (tmp_path / "toy.stats.json").write_text(json.dumps({"n_traces": 4, "n_traces_raw": 5}))
+        log = make_log(*[make_trace(make_event("A", offset=0, color="red"), make_event("B", offset=60))
+                         for _ in range(4)])
+        with patch.object(prep, "_load_log", return_value=log), patch.object(prep, "download_log") as download:
+            out = prep.prepare_log(spec, tmp_path, min_trace_len=2)
+        download.assert_not_called()
+        assert out == tmp_path / "toy.xes"
+        saved = json.loads((tmp_path / "toy.stats.json").read_text())
+        assert saved["n_traces_raw"] == 5  # what was there is kept
+        assert saved["start_of_trace_attributes"][0]["attribute"] == "color"
+
+    def test_a_stats_file_that_has_it_is_left_alone(self, tmp_path):
+        import json
+        spec = LogSpec("toy", "toy.xes", "x", False)
+        (tmp_path / "toy.xes").write_text("<log/>")
+        text = json.dumps({"n_traces": 4, "start_of_trace_attributes": []})
+        (tmp_path / "toy.stats.json").write_text(text)
+        with patch.object(prep, "_load_log") as load:
+            prep.prepare_log(spec, tmp_path, min_trace_len=2)
+        load.assert_not_called()
+        assert (tmp_path / "toy.stats.json").read_text() == text
+
+
 class TestDownloadLog:
     def _spec(self, sha):
         return LogSpec("toy", "toy.xes", sha, False)

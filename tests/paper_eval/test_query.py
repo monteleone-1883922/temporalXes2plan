@@ -108,11 +108,13 @@ def _deadline_case(case_id, group_id, reached_end, min_s, max_s, deadline_s, goa
             "max_modeled_duration_s": max_s, "deadline_s": deadline_s}
 
 
-def _attribute(attribute, status, type_=None, reason=None, values=None, bins=None, kept=False, distinct=None):
+def _attribute(attribute, status, type_=None, reason=None, values=None, bins=None, kept=False, distinct=None,
+               start=False, share=None):
     return {"attribute": attribute, "type": type_, "status": status, "reason": reason,
             "kept_by_user": kept, "n_values": None if values is None else len(values),
             "possible_values": values, "n_bin_boundaries": None if bins is None else len(bins),
-            "bin_boundaries": bins, "n_distinct_observed": distinct}
+            "bin_boundaries": bins, "n_distinct_observed": distinct,
+            "start_of_trace": start, "start_of_trace_share": share}
 
 
 def _transition(name, activity, with_duration=True):
@@ -144,7 +146,7 @@ def _full_run(root, log="toy", split_hash="hash", plan=True):
         {"trial_number": 0, "score": 1.5, "rejected_reason": None, "max_effect_groups": 2},
         {"trial_number": 1, "score": None, "rejected_reason": "too many groups", "max_effect_groups": 9}])
     px.write_jsonl([
-        _attribute("crp", "kept", "categorical", values=["high", "low"]),
+        _attribute("crp", "kept", "categorical", values=["high", "low"], start=True, share=0.97),
         _attribute("Diagnose", "kept", "categorical", values=["none"], kept=True),
         _attribute("lactic", "removed_unused", "numerical", values=["gte_2", "lte_2", "none"], bins=[2.0]),
         _attribute("counter", "removed_noise", "numerical", reason="N3 counter-like", distinct=99),
@@ -214,6 +216,26 @@ class TestWholeRun:
         con = q.connect(_full_run(tmp_path), tmp_path / "data")
         assert con.execute("SELECT log, n_traces, lifecycle.complete, trace_length.max FROM logs"
                            ).fetchall() == [("toy", 6, 10, 9)]
+
+    def test_attributes_say_which_are_start_of_trace(self, tmp_path):
+        con = q.connect(_full_run(tmp_path))
+        assert con.execute(
+            "SELECT attribute, start_of_trace, start_of_trace_share FROM attributes "
+            "WHERE start_of_trace OR start_of_trace_share IS NOT NULL").fetchall() == [("crp", True, 0.97)]
+
+    def test_logs_table_has_the_start_of_trace_statistic(self, tmp_path):
+        import json
+        model_dir = _full_run(tmp_path)
+        stats_path = tmp_path / "data" / "toy.stats.json"
+        stats = json.loads(stats_path.read_text())
+        stats["start_of_trace_attributes"] = [{
+            "attribute": "color", "n_traces_with_attribute": 6, "n_set_by_first_event": 6,
+            "n_unchanged": 6, "share": 1.0}]
+        stats_path.write_text(json.dumps(stats))
+        con = q.connect(model_dir, tmp_path / "data")
+        assert con.execute(
+            "SELECT unnest(start_of_trace_attributes).attribute, "
+            "unnest(start_of_trace_attributes).share FROM logs").fetchall() == [("color", 1.0)]
 
     def test_case_split_counts_per_part(self, tmp_path):
         con = q.connect(_full_run(tmp_path))

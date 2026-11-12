@@ -210,6 +210,10 @@ class PreparedDomainInput:
     attribute_catalog: Dict[str, AttributeCatalogEntry]
     nodes: List[GraphNode] = field(default_factory=list)
     edges: List[GraphEdge] = field(default_factory=list)
+    # Start-of-trace attributes: set by the first event of a case and (almost) never changed;
+    # no transition writes them. A replay or a planning problem must always start with the
+    # value the first event gives them. Empty for models built before this field.
+    start_of_trace_attributes: List[str] = field(default_factory=list)
 
     @classmethod
     def build_graph_from_petri_net(
@@ -302,6 +306,7 @@ class PreparedDomainInput:
                 }
                 for attribute, entry in self.attribute_catalog.items()
             },
+            "start_of_trace_attributes": sorted(self.start_of_trace_attributes),
         }
 
     @classmethod
@@ -338,4 +343,5 @@ class PreparedDomainInput:
             transitions=transitions,
             xor_branches=xor_branches,
             attribute_catalog=attribute_catalog,
+            start_of_trace_attributes=list(data.get("start_of_trace_attributes", [])),
         )

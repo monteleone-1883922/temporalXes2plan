@@ -65,6 +65,10 @@ class BuildResult:
     # {attribute: "numerical" | "boolean" | "categorical"}: tells the attributes
     # that never reached the catalog (no effect or guard uses them) from the rest.
     attribute_categories: Dict[str, str] = dataclasses.field(default_factory=dict)
+    # How often each attribute is set by the first event of a case and never changes,
+    # {attribute: StaticAttributeInfo}; the ones above the threshold are the
+    # start-of-trace attributes (ParseResult.static_attributes).
+    static_attribute_info: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 class Pipeline:
@@ -250,6 +254,7 @@ class Pipeline:
             noise_attributes=parser.noise_attributes,
             noise_details=parser.noise_details,
             attribute_categories=dict(parser.attribute_categories),
+            static_attribute_info=dict(parser.preprocessed_log.static_attribute_info),
         )
 
     def run(

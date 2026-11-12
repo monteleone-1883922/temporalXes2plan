@@ -11,6 +11,9 @@ Tables (the file each one reads, inside the run folder unless noted):
 
   runs                  one row per run                  split.json, prefixes_meta.json, model_meta.json
   logs                  one row per log                  <data_dir>/<log>.stats.json
+                        (start_of_trace_attributes: per event attribute,
+                        in how many traces the first event sets it
+                        and it never changes)
   case_split            one row per case; part =         split.json (the id lists)
                         train_fit / val / test, or
                         removed_spanning (taken out of
@@ -21,7 +24,12 @@ Tables (the file each one reads, inside the run folder unless noted):
   attributes            one row per attribute of the log    attributes.jsonl
                         and its fate: status = kept /
                         removed_unused / removed_noise /
-                        removed_cascade / ignored_by_user
+                        removed_cascade / removed_unknown /
+                        ignored_by_user; start_of_trace and
+                        start_of_trace_share: set by the first
+                        event of a case and never changed (never
+                        an effect; when a guard reads it, a replay
+                        and a test start with the first event's value)
   transition_durations  one row per transition           transition_durations.jsonl
   prefixes              one row per (test case, k, goal) prefixes.jsonl
   instances             one row per deduplicated instance   instances.jsonl
@@ -118,6 +126,7 @@ _EMPTY: Dict[str, _Columns] = {
         ("attribute", "VARCHAR"), ("type", "VARCHAR"), ("status", "VARCHAR"), ("reason", "VARCHAR"),
         ("kept_by_user", "BOOLEAN"), ("n_values", "BIGINT"), ("possible_values", "VARCHAR[]"),
         ("n_bin_boundaries", "BIGINT"), ("bin_boundaries", "DOUBLE[]"), ("n_distinct_observed", "BIGINT"),
+        ("start_of_trace", "BOOLEAN"), ("start_of_trace_share", "DOUBLE"),
     ),
     "transition_durations.jsonl": (
         ("transition", "VARCHAR"), ("activity_name", "VARCHAR"), ("n_effect_groups", "BIGINT"),

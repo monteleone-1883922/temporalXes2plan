@@ -175,6 +175,57 @@ def preprocess(log: EventLog, min_trace_len: int) -> EventLog:
     return EventLog(kept, attributes=log.attributes)
 
 
+# Event keys that describe the event itself, not case data: never a start-of-trace attribute.
+_NOT_ATTRIBUTES = frozenset({"concept:name", "time:timestamp", LIFECYCLE_KEY})
+
+
+def _same_value(a: Any, b: Any) -> bool:
+    """Equality that treats two NaN as the same value (a NaN column repeats itself)."""
+    return a == b or (a != a and b != b)
+
+
+def start_of_trace_stats(log: EventLog) -> List[Dict[str, Any]]:
+    """How often each event attribute is set by the FIRST event of a trace and never changes.
+
+    A descriptive statistic of the whole log (raw values, control-flow events only), computed
+    once with the other statistics of the log. The model decides its own start-of-trace
+    attributes later, on the training traces and after discretization, with its threshold N
+    (AnalysisConfig.static_attr_probability); here only the shares are kept, so any N applies.
+
+    Per attribute (sorted by name):
+      n_traces_with_attribute: traces where some control-flow event carries it;
+      n_set_by_first_event:    of those, traces whose first control-flow event carries it;
+      n_unchanged:             of those, traces where no later event has a different value;
+      share:                   n_unchanged / n_traces_with_attribute.
+    """
+    counts: Dict[str, List[int]] = {}
+    for trace in log:
+        events = [e for e in trace if is_control_flow_event(e)]
+        if not events:
+            continue
+        first = {k: v for k, v in events[0].items() if k not in _NOT_ATTRIBUTES and v is not None}
+        seen = set(first)
+        changed = set()
+        for event in events[1:]:
+            for key, value in event.items():
+                if key in _NOT_ATTRIBUTES or value is None:
+                    continue
+                seen.add(key)
+                if key in first and not _same_value(first[key], value):
+                    changed.add(key)
+        for key in seen:
+            entry = counts.setdefault(key, [0, 0, 0])
+            entry[0] += 1
+            if key in first:
+                entry[1] += 1
+                entry[2] += key not in changed
+    return [
+        {"attribute": key, "n_traces_with_attribute": c[0], "n_set_by_first_event": c[1],
+         "n_unchanged": c[2], "share": c[2] / c[0]}
+        for key, c in sorted(counts.items())
+    ]
+
+
 def log_stats(log: EventLog) -> Dict[str, Any]:
     """Statistics of a preprocessed log, on its control-flow view."""
     # lengths/activities/variants count control-flow events only; lifecycle
@@ -204,6 +255,7 @@ def log_stats(log: EventLog) -> Dict[str, Any]:
             "median": durations_days[n // 2] if n else 0.0,
             "max": durations_days[-1] if n else 0.0,
         },
+        "start_of_trace_attributes": start_of_trace_stats(log),
     }
 
 
@@ -213,6 +265,15 @@ def prepare_log(spec: LogSpec, data_dir: Path, min_trace_len: int, force: bool =
     data_dir = Path(data_dir)
     out_path = data_dir / f"{spec.name}.xes"
     if out_path.exists() and not force:
+        stats_path = data_dir / f"{spec.name}.stats.json"
+        if stats_path.exists():
+            saved = json.loads(stats_path.read_text(encoding="utf-8"))
+            if "start_of_trace_attributes" not in saved:
+                # Prepared before this statistic existed: add it from the prepared log, without
+                # downloading or preprocessing anything again.
+                saved["start_of_trace_attributes"] = start_of_trace_stats(_load_log(str(out_path), "xes", None))
+                stats_path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+                logger.info("[%s] start-of-trace statistics added to %s", spec.name, stats_path)
         logger.info("[%s] prepared log already at %s — skipped", spec.name, out_path)
         return out_path
 

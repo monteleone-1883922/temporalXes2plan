@@ -44,6 +44,25 @@ class TestAttributeRows:
             "counter": "removed_noise", "resource": "ignored_by_user", "idle": "removed_cascade"}
         assert anomalies == []
 
+    def test_start_of_trace_columns_mark_the_static_attributes_and_their_share(self):
+        from models import StaticAttributeInfo
+        rows, _ = _rows(
+            static_attributes={"crp"},
+            static_info={"crp": StaticAttributeInfo("crp", 10, 9), "flag": StaticAttributeInfo("flag", 10, 2)},
+        )
+        assert rows["crp"]["start_of_trace"] is True
+        assert rows["crp"]["start_of_trace_share"] == pytest.approx(0.9)
+        assert rows["flag"]["start_of_trace"] is False
+        assert rows["flag"]["start_of_trace_share"] == pytest.approx(0.2)
+
+    def test_start_of_trace_is_not_a_status_a_guard_read_attribute_stays_kept(self):
+        rows, _ = _rows(static_attributes={"crp"})
+        assert rows["crp"]["status"] == "kept"
+
+    def test_without_the_information_the_columns_are_false_and_null(self):
+        rows, _ = _rows()
+        assert all(r["start_of_trace"] is False and r["start_of_trace_share"] is None for r in rows.values())
+
     def test_an_attribute_removed_as_unused_keeps_type_values_and_boundaries(self):
         row = _rows()[0]["lactic"]
         assert (row["type"], row["possible_values"], row["bin_boundaries"]) == (

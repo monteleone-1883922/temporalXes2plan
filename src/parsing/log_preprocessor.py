@@ -4,6 +4,12 @@ Reads a PetriNetLog exactly once and materialises, for every firing of every
 labeled transition, the accumulated attribute state before the firing
 (pre_state) and the attributes that actually changed (changed_attrs).
 
+A first pass finds the start-of-trace ("static") attributes: set by the first visible event of
+a trace and never changed afterwards, in at least AnalysisConfig.static_attr_probability of the
+traces where they appear. They are not effects (the probability estimator leaves them out), but
+they stay in the state like any other attribute: guards can read them, and in the few traces
+where one of them does change later the state follows the log.
+
 The result (PreprocessedLog) provides two access indexes over the same data:
   - transition_firings: per-transition  (used by effect statistics and DT)
   - xor_firings:        per-XOR-place   (used by XOR branch stats and DT)
@@ -82,7 +88,12 @@ class LogPreprocessor:
         valid_branches: Dict[PetriNet.Place, Set[Transition]] = {
             place: set(transitions) for place, transitions in xor_splits.items()
         }
-        static_attributes_info: Dict[str, StaticAttributeInfo] = {}
+        static_attributes_info = self._static_attribute_info(pn_log)
+        static_attrs = {
+            info.name for info in static_attributes_info.values()
+            if info.is_static(self.config.static_attr_probability,
+                              self.config.static_appearances_min_samples)
+        }
 
         for execution in pn_log.executions:
             # Per-execution running state: sanitized attr name → latest value.
@@ -95,7 +106,6 @@ class LogPreprocessor:
                 for attr, t in self.attribute_categories.items()
                 if t in ('categorical', 'numerical')
             }
-            attr_is_static: Dict[str, bool] = {}
             # True until the first visible (non-tau) step of this execution.
             at_first_event = True
 
@@ -127,8 +137,6 @@ class LogPreprocessor:
                 # --- 2. Compute which attributes this step changes ---
                 changed: Dict[str, Any] = {}
                 for attr, val in step.attributes.items():
-                    if attr not in attr_is_static:
-                        attr_is_static[attr] = True
                     if attr in self.ignored_attributes or val is None:
                         continue
                     sanitized = attr
@@ -142,7 +150,6 @@ class LogPreprocessor:
                     # the first time.
                     if sanitized not in state or state[sanitized] != val:
                         changed[sanitized] = val
-                        attr_is_static[attr] = False
 
                 # --- 3. Create the TransitionFiringData and index it ---
                 fd = TransitionFiringData(
@@ -162,7 +169,6 @@ class LogPreprocessor:
                     transition_firings.setdefault(act, [])
                 else:
                     transition_firings[act].append(fd)
-                at_first_event = False
 
                 # If this step traverses one or more XOR-split places, index
                 # the same object under each place it crosses.
@@ -185,16 +191,7 @@ class LogPreprocessor:
                         val = self._discretizer.transform_value(sanitized, val)
                     if val is not None:
                         state[sanitized] = val
-
-            for attr, is_static in attr_is_static.items():
-                attr_static_info = static_attributes_info.get(attr, StaticAttributeInfo(attr, 0, 0))
-                attr_static_info.appearances += 1
-                attr_static_info.static_appearances += int(is_static)
-                static_attributes_info[attr] = attr_static_info
-
-        static_attrs = {attr_info.name
-                        for attr_info in static_attributes_info.values()
-                        if attr_info.is_static(self.config.static_attr_probability, self.config.static_appearances_min_samples)}
+                at_first_event = False
 
         logger.info(
             "Preprocessing complete: %d labeled transitions fired, "
@@ -209,4 +206,48 @@ class LogPreprocessor:
             transition_firings=dict(transition_firings),
             xor_firings=dict(xor_firings),
             static_attributes=static_attrs,
+            static_attribute_info=static_attributes_info,
         )
+
+    def _normalized_value(self, attr: str, val: Any) -> Any:
+        """The value of attr as the state keeps it (discretized for numerical attributes), or
+        None for an ignored attribute or a missing value."""
+        if attr in self.ignored_attributes or val is None:
+            return None
+        if self._discretizer is not None and attr in self._discretizer.boundaries:
+            return self._discretizer.transform_value(attr, val)
+        return val
+
+    def _static_attribute_info(self, pn_log: PetriNetLog) -> Dict[str, StaticAttributeInfo]:
+        """First pass: how often each attribute is set by the first visible event of a trace and
+        never changed afterwards.
+
+        For every execution, an attribute counts as an appearance when some visible step writes
+        it, and as a static appearance when the FIRST visible step writes it and no later visible
+        step writes a different (discretized) value. A trace whose first event does not write the
+        attribute is an appearance that is not static. Tau steps carry no attributes."""
+        info: Dict[str, StaticAttributeInfo] = {}
+        for execution in pn_log.executions:
+            first_values: Dict[str, Any] = {}
+            seen: Set[str] = set()
+            changed_later: Set[str] = set()
+            at_first_event = True
+            for step in execution.steps:
+                if step.is_tau:
+                    continue
+                for attr, raw in step.attributes.items():
+                    val = self._normalized_value(attr, raw)
+                    if val is None:
+                        continue
+                    seen.add(attr)
+                    if at_first_event:
+                        first_values[attr] = val
+                    elif attr in first_values and first_values[attr] != val:
+                        changed_later.add(attr)
+                at_first_event = False
+            for attr in seen:
+                entry = info.setdefault(attr, StaticAttributeInfo(attr, 0, 0))
+                entry.appearances += 1
+                if attr in first_values and attr not in changed_later:
+                    entry.static_appearances += 1
+        return info

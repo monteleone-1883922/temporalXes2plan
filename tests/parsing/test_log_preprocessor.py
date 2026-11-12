@@ -594,6 +594,113 @@ class TestInitialEventAsInput:
 
 
 # ===========================================================================
+# start-of-trace ("static") attributes
+# ===========================================================================
+
+class TestStartOfTraceAttributes:
+    """An attribute set by the first visible event of a trace and never changed afterwards,
+    in at least static_attr_probability of the traces where it appears, is a start-of-trace
+    attribute: it is not an effect, and it stays in the state (guards can read it)."""
+
+    @staticmethod
+    def _config(min_samples=1, prob=0.75, **kw):
+        return AnalysisConfig(static_appearances_min_samples=min_samples, static_attr_probability=prob, **kw)
+
+    @staticmethod
+    def _log(traces, with_tau_first=False):
+        """traces: for each trace, the attributes of its visible steps S0, S1, ... in order."""
+        p = _place("p")
+        execs = []
+        for i, per_step in enumerate(traces):
+            steps = []
+            if with_tau_first:
+                steps.append(_step(_transition("t_tau", None), {p}, is_tau=True))
+            steps += [
+                _step(_transition(f"t{j}", f"S{j}"), {p}, attributes=dict(attrs))
+                for j, attrs in enumerate(per_step)
+            ]
+            execs.append(_execution(f"c{i}", steps))
+        return _pn_log(execs)
+
+    def test_set_by_the_first_event_and_never_changed_is_static(self):
+        log = self._log([[{"color": "red"}, {}] for _ in range(4)])
+        result = _preprocessor(self._config()).preprocess(log, {})
+        assert result.static_attributes == {"color"}
+        assert result.static_attribute_info["color"].share == 1.0
+
+    def test_the_first_write_is_not_a_change(self):
+        # The bug this replaces: the first write always counted as a change.
+        log = self._log([[{"color": "red"}, {"color": "red"}] for _ in range(4)])
+        result = _preprocessor(self._config()).preprocess(log, {})
+        assert "color" in result.static_attributes
+
+    def test_changed_later_in_too_many_traces_is_not_static(self):
+        log = self._log([[{"color": "red"}, {"color": "blue"}]] * 2 + [[{"color": "red"}, {}]] * 2)
+        result = _preprocessor(self._config()).preprocess(log, {})
+        assert result.static_attribute_info["color"].share == 0.5
+        assert result.static_attributes == set()
+
+    def test_the_threshold_n_is_inclusive(self):
+        log = self._log([[{"color": "red"}, {"color": "blue"}]] + [[{"color": "red"}, {}]] * 3)
+        result = _preprocessor(self._config(prob=0.75)).preprocess(log, {})
+        assert result.static_attribute_info["color"].share == 0.75
+        assert result.static_attributes == {"color"}
+        result = _preprocessor(self._config(prob=0.76)).preprocess(log, {})
+        assert result.static_attributes == set()
+
+    def test_set_only_by_a_later_event_is_not_static(self):
+        log = self._log([[{}, {"risk": "high"}] for _ in range(4)])
+        result = _preprocessor(self._config()).preprocess(log, {})
+        info = result.static_attribute_info["risk"]
+        assert (info.appearances, info.static_appearances) == (4, 0)
+        assert result.static_attributes == set()
+
+    def test_needs_the_minimum_number_of_traces(self):
+        log = self._log([[{"color": "red"}, {}] for _ in range(4)])
+        result = _preprocessor(self._config(min_samples=5)).preprocess(log, {})
+        assert result.static_attributes == set()
+        result = _preprocessor(self._config(min_samples=4)).preprocess(log, {})
+        assert result.static_attributes == {"color"}
+
+    def test_a_tau_before_the_first_event_does_not_count_as_it(self):
+        log = self._log([[{"color": "red"}, {}] for _ in range(4)], with_tau_first=True)
+        result = _preprocessor(self._config()).preprocess(log, {})
+        assert result.static_attributes == {"color"}
+
+    def test_ignored_attributes_are_never_reported(self):
+        log = self._log([[{"color": "red"}, {}] for _ in range(4)])
+        pre = LogPreprocessor(config=self._config(), ignored_attributes={"color"})
+        result = pre.preprocess(log, {})
+        assert result.static_attributes == set() and "color" not in result.static_attribute_info
+
+    def test_a_later_change_is_followed_by_the_state_like_any_other_attribute(self):
+        # 3 of 4 traces never change colour (share 0.75, so it is static); the 4th one rewrites it.
+        # The state follows the log: the attribute is just not an effect (the probability
+        # estimator leaves static attributes out), it is not frozen.
+        log = self._log(
+            [[{"color": "red"}, {"color": "blue"}, {}]] + [[{"color": "red"}, {}, {}]] * 3,
+        )
+        result = _preprocessor(self._config()).preprocess(log, {})
+        assert result.static_attributes == {"color"}
+        second, third = result.transition_firings["S1"][0], result.transition_firings["S2"][0]
+        assert second.pre_state.get("color") == "red" and second.changed_attrs == {"color": "blue"}
+        assert third.pre_state["color"] == "blue"
+
+    def test_a_trace_whose_first_event_lacks_it_gets_it_when_a_later_event_writes_it(self):
+        log = self._log([[{"color": "red"}, {}, {}]] * 3 + [[{}, {"color": "blue"}, {}]])
+        pre = LogPreprocessor(config=self._config(prob=0.7), attribute_categories={"color": "categorical"})
+        result = pre.preprocess(log, {})
+        assert result.static_attributes == {"color"}
+        assert result.transition_firings["S1"][-1].pre_state["color"] == "none"
+        assert result.transition_firings["S2"][-1].pre_state["color"] == "blue"
+
+    def test_a_static_attribute_stays_in_pre_state_for_the_guards(self):
+        log = self._log([[{"color": "red"}, {}] for _ in range(4)])
+        result = _preprocessor(self._config()).preprocess(log, {})
+        assert result.transition_firings["S1"][0].pre_state["color"] == "red"
+
+
+# ===========================================================================
 # ignored_attributes (explicit list, e.g. config list plus noise-filter result)
 # ===========================================================================
 

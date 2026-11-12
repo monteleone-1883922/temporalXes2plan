@@ -7,6 +7,11 @@ from pm4py.objects.powl.obj import Transition
 
 import core_utils as utils
 
+# Value of a categorical attribute that the model never saw (not in its catalog). It is NOT
+# "none": "none" means the attribute was not written at all; "unknown" means it was written
+# with a value the model has no name for.
+UNKNOWN_VALUE = "unknown"
+
 
 @dataclass
 class FiringStep:
@@ -104,10 +109,16 @@ class PreprocessedLog:
             list of TransitionFiringData for every traversal through that place
             (i.e. every step whose from_places included the XOR-split place and
             whose transition was one of the place's outgoing branches).
+        static_attributes: Start-of-trace attributes: set by the first visible event of the
+            trace and never changed afterwards, in at least AnalysisConfig.static_attr_probability
+            of the traces where they appear (see StaticAttributeInfo). They are not effects, but
+            they stay in pre_state like any other attribute, so guards can read them.
+        static_attribute_info: The counts behind static_attributes, for every attribute seen.
     """
     transition_firings: Dict[str, List[TransitionFiringData]]
     xor_firings: Dict[str, List[TransitionFiringData]]
     static_attributes: Set[str]
+    static_attribute_info: Dict[str, "StaticAttributeInfo"] = field(default_factory=dict)
 
 
 @dataclass
@@ -528,13 +539,25 @@ class PetriNetModel:
 
 @dataclass
 class StaticAttributeInfo:
+    """How often an attribute behaves as a start-of-trace attribute.
+
+    appearances: traces in which the attribute is written by some event.
+    static_appearances: of those, the traces in which the FIRST visible event writes it and no
+        later event changes its (discretized) value.
+    """
     name: str
     appearances: int
     static_appearances: int
 
+    @property
+    def share(self) -> float:
+        """static_appearances / appearances (0.0 when the attribute never appears)."""
+        return self.static_appearances / self.appearances if self.appearances else 0.0
+
     def is_static(self, min_static_prob: float, min_appearances: int) -> bool:
-        """Check if this attribute is statically present in the log."""
-        return self.appearances >= min_appearances and self.static_appearances / self.appearances >= min_static_prob
+        """True when the attribute is a start-of-trace attribute: enough traces write it and
+        in at least min_static_prob of them it is set by the first event and never changes."""
+        return self.appearances >= min_appearances and self.share >= min_static_prob
 
 
 @dataclass
@@ -570,6 +593,10 @@ class AnalysisConfig:
     # branches, or effect removal for conditional effects.
     probability_min_samples: int = 10
 
+    # Start-of-trace ("static") attributes: written by the first visible event and never
+    # changed afterwards. static_attr_probability is the N of "in at least N of the traces
+    # where the attribute appears"; static_appearances_min_samples is the least number of
+    # such traces. They are removed from effect mining but stay in the state (guards).
     static_appearances_min_samples: int = 40
     static_attr_probability: float = 0.95
 
@@ -917,6 +944,8 @@ class ParseResult:
     end_place: str
     attribute_catalog: Dict[str, AttributeCatalogEntry]
     negated_attributes: Set[str] = field(default_factory=set)
+    # Start-of-trace attributes found by LogPreprocessor (PreprocessedLog.static_attributes).
+    static_attributes: Set[str] = field(default_factory=set)
     artificial_xor_places: Set[str] = field(default_factory=set)
     variant_to_art_place: Dict[str, str] = field(default_factory=dict)
     artificial_xor_data: Dict[str, Any] = field(default_factory=dict)
