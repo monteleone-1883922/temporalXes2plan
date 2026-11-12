@@ -41,6 +41,12 @@ def _pair(a: str, b: str) -> frozenset:
 
 class TestRelatedClassification:
 
+    def test_start_of_trace_candidates_take_part_in_the_classification(self):
+        firings = [_firing({"a": 1, "b": 2}) for _ in range(10)]
+        plog = PreprocessedLog(transition_firings={"t": firings}, xor_firings={}, static_attributes={"a", "b"})
+        related, _ = EffectCorrelationAnalyzer().analyze(plog, AnalysisConfig())["t"]
+        assert _pair("a", "b") in related
+
     def test_always_co_present_is_related(self):
         firings = [_firing({"a": 1, "b": 2}) for _ in range(10)]
         result = _analyze({"t": firings}, related=0.9)

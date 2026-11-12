@@ -268,6 +268,20 @@ class TestComputeAttributeEffectProbabilities:
 
         assert result["a"].presence_probabilities["crp"] == 1.0
 
+    def test_a_start_of_trace_candidate_is_counted_like_any_other_attribute(self):
+        """Candidate start-of-trace attributes are not left out of effect mining: an activity that
+        is the first event in most traces is mined only on the others, where the attribute does
+        change (ER Registration in Sepsis), so it can be an effect; the final list of
+        start-of-trace attributes drops it afterwards."""
+        plog = PreprocessedLog(
+            transition_firings={"reg": [_fd("reg", changed_attrs={"suspected": "true"})] * 3},
+            xor_firings={},
+            static_attributes={"suspected"},
+        )
+        result = _make_estimator().compute_attribute_effect_probabilities(plog)
+
+        assert result["reg"].presence_probabilities["suspected"] == 1.0
+
     def test_unchanged_attr_not_counted(self):
         """Attr present in pre_state but NOT in changed_attrs → no effect."""
         plog = _preprocessed(transition_firings={

@@ -773,6 +773,7 @@ class TestStartOfTraceAttributesThroughTheParser:
         options = dict(
             dt_min_samples=20, probability_min_samples=5,
             static_appearances_min_samples=1, static_attr_probability=0.9,
+            initial_event_as_input=True,  # as paper_eval runs: the first event is input data
             snapshot_dir=str(tmp / "snap"),
         )
         options.update(kwargs)
@@ -788,10 +789,19 @@ class TestStartOfTraceAttributesThroughTheParser:
         assert "junk" not in parser.parse_result.static_attributes
         assert parser.preprocessed_log.static_attribute_info["junk"].share < 0.9
 
-    def test_a_static_attribute_is_never_an_effect(self, tmp_path_factory):
+    def test_a_constant_attribute_is_not_an_effect_and_stays_in_the_final_list(self, tmp_path_factory):
+        # Not because it is skipped: rewriting the same value is never a change, so no transition
+        # writes it, and a candidate that nobody writes stays start-of-trace.
         parser = self._parser(tmp_path_factory)
         for info in parser.parse_result.transitions.values():
             assert "const" not in info.effects
+
+    def test_without_initial_event_as_input_the_first_event_is_mined(self, tmp_path_factory):
+        # The first event is then an ordinary event: the attribute it sets "changes" from none,
+        # so it is an effect of the first activity and is no longer start-of-trace.
+        parser = self._parser(tmp_path_factory, initial_event_as_input=False)
+        assert any("const" in info.effects for info in parser.parse_result.transitions.values())
+        assert "const" not in parser.parse_result.static_attributes
 
     def test_a_static_attribute_stays_in_the_state_for_the_guards(self, tmp_path_factory):
         parser = self._parser(tmp_path_factory)
@@ -802,3 +812,26 @@ class TestStartOfTraceAttributesThroughTheParser:
         # share 1.0, but fewer traces than the minimum: not enough evidence
         parser = self._parser(tmp_path_factory, static_appearances_min_samples=10 ** 6)
         assert parser.parse_result.static_attributes == set()
+
+
+class TestStartOfTraceAttributesAreTheCandidatesNoTransitionWrites:
+    """xes_parser._start_of_trace_attributes: a candidate stays start-of-trace only if no
+    transition ends up writing it."""
+
+    @staticmethod
+    def _transitions(**written):
+        from types import SimpleNamespace
+        return {name: SimpleNamespace(effects={a: object() for a in attrs}) for name, attrs in written.items()}
+
+    def test_a_candidate_that_became_an_effect_is_dropped(self):
+        from parsing.xes_parser import _start_of_trace_attributes
+        transitions = self._transitions(reg=["suspected"], other=[])
+        assert _start_of_trace_attributes({"suspected", "age"}, transitions) == {"age"}
+
+    def test_candidates_nobody_writes_are_kept(self):
+        from parsing.xes_parser import _start_of_trace_attributes
+        assert _start_of_trace_attributes({"a", "b"}, self._transitions(t=[])) == {"a", "b"}
+
+    def test_an_attribute_written_but_not_a_candidate_is_not_added(self):
+        from parsing.xes_parser import _start_of_trace_attributes
+        assert _start_of_trace_attributes({"a"}, self._transitions(t=["b"])) == {"a"}

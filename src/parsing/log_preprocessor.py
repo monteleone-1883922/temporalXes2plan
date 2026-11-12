@@ -6,9 +6,10 @@ labeled transition, the accumulated attribute state before the firing
 
 A first pass finds the start-of-trace ("static") attributes: set by the first visible event of
 a trace and never changed afterwards, in at least AnalysisConfig.static_attr_probability of the
-traces where they appear. They are not effects (the probability estimator leaves them out), but
-they stay in the state like any other attribute: guards can read them, and in the few traces
-where one of them does change later the state follows the log.
+traces where they appear. They are only candidates: effect mining treats them like any other
+attribute, and the ones a transition ends up writing are dropped from the final list (see
+xes_parser._start_of_trace_attributes). They stay in the state like any other attribute: guards
+can read them, and where one of them changes later the state follows the log.
 
 The result (PreprocessedLog) provides two access indexes over the same data:
   - transition_firings: per-transition  (used by effect statistics and DT)

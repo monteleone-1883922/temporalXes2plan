@@ -147,9 +147,9 @@ class ProbabilityEstimator:
 
             for fd in firings:
                 for attr, val in fd.changed_attrs.items():
-                    # Ignore static attributes for effects
-                    if attr in preprocessed_log.static_attributes:
-                        continue
+                    # Start-of-trace attributes are counted like any other attribute: one that
+                    # a transition does write ends up as an effect, and is then no longer
+                    # reported as start-of-trace (see xes_parser._start_of_trace_attributes).
                     effect_counts[attr] += 1
                     val_key = val  # values are pre-sanitized by LogPreprocessor
                     value_counts[attr][val_key] += 1

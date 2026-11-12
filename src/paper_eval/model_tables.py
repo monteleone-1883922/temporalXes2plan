@@ -95,7 +95,8 @@ def attribute_rows(
             appear in an effect or guard (a constant attribute, for instance): they
             get status removed_cascade, so every attribute of the log is accounted for.
         static_attributes: the start-of-trace attributes the model found (set by the first
-            event of a case and never changed, in at least N of the training traces).
+            event of a case and never changed, in at least N of the training traces, and written
+            by no transition).
         static_info: {attribute: StaticAttributeInfo} with the counts behind them, for every
             attribute the preprocessor saw (ignored attributes are never seen).
 

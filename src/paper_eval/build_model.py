@@ -198,10 +198,10 @@ def build_model(
         "attribute_catalog_size_before": len(result.parse_result.attribute_catalog),
         "attribute_catalog_size_after": len(result.prepared.attribute_catalog),
         # Set by the first event of a case and never changed, in at least
-        # AnalysisConfig.static_attr_probability of the training traces: never effects.
-        # This is the statistic. The model itself only sets at the start of a replay or a
-        # planning problem those a guard reads: PreparedDomainInput.start_of_trace_attributes,
-        # in current.json.
+        # AnalysisConfig.static_attr_probability of the training traces, and written by no
+        # transition (a candidate that ended up as an effect is not listed; its share still is).
+        # The model itself only sets at the start of a replay or a planning problem those a
+        # guard reads: PreparedDomainInput.start_of_trace_attributes, in current.json.
         "start_of_trace": sorted(result.parse_result.static_attributes),
         "start_of_trace_share": {
             name: info.share for name, info in sorted(result.static_attribute_info.items())

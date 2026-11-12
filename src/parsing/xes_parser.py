@@ -245,6 +245,19 @@ def preload_replay(
     )
 
 
+def _start_of_trace_attributes(candidates: Set[str], transitions: Dict[str, "TransitionInfo"]) -> Set[str]:
+    """The start-of-trace attributes of the model: the candidates the preprocessor found (set by
+    the first event and never changed, in at least N of the traces) that no transition writes.
+
+    The candidates are NOT left out of effect mining: an attribute that is the first event's in
+    most traces is mined only on the others (the first event is input data), where it does
+    change, so it can well end up as the effect of its activity (Sepsis: ER Registration). One
+    that does is not start-of-trace any more; the rest are the attributes a replay and a
+    planning problem must always start with."""
+    written = {attr for info in transitions.values() for attr in info.effects}
+    return set(candidates) - written
+
+
 class Parser:
     """Facade orchestrating the XES → encoder-ready analysis pipeline.
 
@@ -851,7 +864,9 @@ class Parser:
             end_place=end_place,
             attribute_catalog=self._build_attribute_catalog(),
             negated_attributes=self._collect_negated_attributes(),
-            static_attributes=set(self.preprocessed_log.static_attributes),
+            static_attributes=_start_of_trace_attributes(
+                self.preprocessed_log.static_attributes, transitions,
+            ),
         )
 
 

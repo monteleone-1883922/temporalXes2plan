@@ -27,9 +27,10 @@ Tables (the file each one reads, inside the run folder unless noted):
                         removed_cascade / removed_unknown /
                         ignored_by_user; start_of_trace and
                         start_of_trace_share: set by the first
-                        event of a case and never changed (never
-                        an effect; when a guard reads it, a replay
-                        and a test start with the first event's value)
+                        event of a case and never changed, and
+                        written by no transition; when a guard reads
+                        it, a replay and a test start with the first
+                        event's value
   transition_durations  one row per transition           transition_durations.jsonl
   prefixes              one row per (test case, k, goal) prefixes.jsonl
   instances             one row per deduplicated instance   instances.jsonl

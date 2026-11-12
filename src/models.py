@@ -111,8 +111,10 @@ class PreprocessedLog:
             whose transition was one of the place's outgoing branches).
         static_attributes: Start-of-trace attributes: set by the first visible event of the
             trace and never changed afterwards, in at least AnalysisConfig.static_attr_probability
-            of the traces where they appear (see StaticAttributeInfo). They are not effects, but
-            they stay in pre_state like any other attribute, so guards can read them.
+            of the traces where they appear (see StaticAttributeInfo). These are candidates: effect
+            mining does not leave them out, and the ones that end up as an effect of some transition
+            are removed from ParseResult.static_attributes. They stay in pre_state like any other
+            attribute, so guards can read them.
         static_attribute_info: The counts behind static_attributes, for every attribute seen.
     """
     transition_firings: Dict[str, List[TransitionFiringData]]
@@ -596,7 +598,9 @@ class AnalysisConfig:
     # Start-of-trace ("static") attributes: written by the first visible event and never
     # changed afterwards. static_attr_probability is the N of "in at least N of the traces
     # where the attribute appears"; static_appearances_min_samples is the least number of
-    # such traces. They are removed from effect mining but stay in the state (guards).
+    # such traces. Effect mining still treats them like any attribute; the ones no transition
+    # ends up writing are the model's start-of-trace attributes (always set at the start of a
+    # replay or a planning problem).
     static_appearances_min_samples: int = 40
     static_attr_probability: float = 0.95
 
@@ -944,7 +948,8 @@ class ParseResult:
     end_place: str
     attribute_catalog: Dict[str, AttributeCatalogEntry]
     negated_attributes: Set[str] = field(default_factory=set)
-    # Start-of-trace attributes found by LogPreprocessor (PreprocessedLog.static_attributes).
+    # Start-of-trace attributes: the candidates of LogPreprocessor (PreprocessedLog.static_attributes)
+    # that no transition writes (the ones that ended up as effects are removed).
     static_attributes: Set[str] = field(default_factory=set)
     artificial_xor_places: Set[str] = field(default_factory=set)
     variant_to_art_place: Dict[str, str] = field(default_factory=dict)
