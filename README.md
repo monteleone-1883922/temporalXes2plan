@@ -21,30 +21,7 @@ Answers are:
 
 ## How it works
 
-```mermaid
-flowchart TB
-    subgraph OFFLINE["Offline: discovery (once per log)"]
-        direction LR
-        L[("Event log<br/>XES / CSV")] --> CF["Control flow<br/>and log alignment"]
-        CF --> DS["Discretise<br/>numeric attributes"]
-        DS --> GE["Guards, effect groups,<br/>probabilities"]
-        GE --> DU["Durations"]
-        DU --> N["Timed data-aware<br/>Petri net"]
-        N --> DOM["PDDL 3.1 domain"]
-        TPE{{"TPE model selection<br/>(replay score on a validation split)"}} -.-> CF
-    end
-    subgraph ONLINE["Online: one query"]
-        direction LR
-        P["Running prefix"] --> R["Replay on the net"]
-        R --> S["State s_k"]
-        S --> PROB["PDDL problem"]
-        Q["Target: places, condition,<br/>deadline"] --> PROB
-        PROB --> OPT["OPTIC"]
-        D2["PDDL 3.1 domain<br/>(from the offline phase)"] --> OPT
-        OPT --> PLAN["Timed partial-order plan,<br/>or no plan / unknown"]
-    end
-    OFFLINE ==> ONLINE
-```
+![How it works: offline, the event log is turned into a timed data-aware Petri net and a PDDL domain (model selection with TPE and successive halving on the replay score); online, the running prefix is replayed on the net, becomes a PDDL problem together with the what-if target, and OPTIC returns a timed plan.](figures/how_it_works.jpeg)
 
 **Offline.** The control flow is discovered with one of five miners (`powl`, `inductive`, `alpha`,
 `heuristics`, `ilp`) and the log is replayed on the net so that every event is attached to a transition
