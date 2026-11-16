@@ -350,10 +350,3 @@ Bundled and external components keep their own licences:
 - **Fast Downward** (`vendor/downward`, git submodule): its own licence (GPL).
 - Python dependencies (PM4Py, Optuna, scikit-learn, DuckDB, Flask, ...) under their respective licences.
 
-## Citation and acknowledgements
-
-Citation details will be added after the review of the accompanying paper.
-
-This work builds on an earlier XES2Plan prototype that framed predictive process monitoring as classical
-planning over a data-aware Petri net; the timed model, the temporal encoding, the model selection and the
-evaluation in this repository are new.
